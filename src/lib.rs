@@ -1,0 +1,322 @@
+//! Headless 1.12.1 (build 5875) wire test-client for the spacetime-core gateway.
+//!
+//! Speaks the real WoW protocol — SRP6 logon (port 3724) then the encrypted world session
+//! (port 8085) — so tests can drive CMSG and ASSERT on decoded SMSG, instead of QAing
+//! through the wine client. It is the client-side routines already proven in
+//! `gateway/src/logon/mod.rs` tests + `gateway/src/world/tests.rs::client_handshake`,
+//! lifted onto real `TcpStream`s. All blocking std I/O — no async.
+
+use std::net::TcpStream;
+use std::time::Duration;
+
+use anyhow::{anyhow, bail, Context, Result};
+
+// --- logon tier (auth server) ---
+use wow_login_messages::all::{
+    CMD_AUTH_LOGON_CHALLENGE_Client, Locale, Os, Platform, ProtocolVersion, Version,
+};
+use wow_login_messages::version_3::opcodes::ServerOpcodeMessage as LogonSmsg;
+use wow_login_messages::version_3::{
+    CMD_AUTH_LOGON_CHALLENGE_Server, CMD_AUTH_LOGON_PROOF_Client,
+    CMD_AUTH_LOGON_PROOF_Client_SecurityFlag, CMD_AUTH_LOGON_PROOF_Server,
+};
+use wow_login_messages::Message;
+
+// --- SRP + header crypto ---
+use wow_srp::client::SrpClientChallenge;
+use wow_srp::normalized_string::NormalizedString;
+use wow_srp::vanilla_header::{DecrypterHalf, EncrypterHalf, ProofSeed};
+use wow_srp::PublicKey;
+
+// --- world tier ---
+use wow_world_messages::vanilla::opcodes::ServerOpcodeMessage as WorldSmsg;
+use wow_world_messages::vanilla::{
+    Class, Gender, Race, SpellCastTargets, SpellCastTargets_SpellCastTargetFlags,
+    SpellCastTargets_SpellCastTargetFlags_Unit, WorldResult, CMSG_AUTH_SESSION, CMSG_CAST_SPELL,
+    CMSG_CHAR_CREATE, CMSG_CHAR_ENUM, CMSG_PLAYER_LOGIN, CMSG_SET_SELECTION, SMSG_AUTH_RESPONSE,
+};
+use wow_world_messages::vanilla::ClientMessage;
+use wow_world_messages::Guid;
+
+const LOGON_PORT: u16 = 3724;
+pub const DEFAULT_WORLD_ADDR: &str = "127.0.0.1:8085";
+
+fn ns(s: &str) -> Result<NormalizedString> {
+    NormalizedString::new(s).map_err(|e| anyhow!("normalized string {s:?}: {e:?}"))
+}
+
+/// Complete SRP6 logon and return `(session key K, world server address)`.
+/// Mirrors `gateway/src/logon/mod.rs` `full_srp6_handshake_and_realm_list`.
+pub fn logon(account: &str, password: &str) -> Result<([u8; 40], String)> {
+    let mut s = TcpStream::connect(("127.0.0.1", LOGON_PORT))
+        .with_context(|| format!("connect logon :{LOGON_PORT}"))?;
+    s.set_read_timeout(Some(Duration::from_secs(10)))?;
+
+    CMD_AUTH_LOGON_CHALLENGE_Client {
+        protocol_version: ProtocolVersion::Three,
+        version: Version { major: 1, minor: 12, patch: 1, build: 5875 },
+        platform: Platform::X86,
+        os: Os::Windows,
+        locale: Locale::EnUs,
+        utc_timezone_offset: 0,
+        client_ip_address: std::net::Ipv4Addr::new(127, 0, 0, 1),
+        account_name: account.to_string(),
+    }
+    .write(&mut s)?;
+
+    let (g, n, salt, server_pubkey) = match LogonSmsg::read(&mut s)? {
+        LogonSmsg::CMD_AUTH_LOGON_CHALLENGE(CMD_AUTH_LOGON_CHALLENGE_Server::Success {
+            generator,
+            large_safe_prime,
+            salt,
+            server_public_key,
+            ..
+        }) => (generator, large_safe_prime, salt, server_public_key),
+        other => bail!("logon challenge failed (account provisioned?): {other:?}"),
+    };
+    let n: [u8; 32] = n.try_into().map_err(|_| anyhow!("N not 32 bytes"))?;
+
+    let challenge = SrpClientChallenge::new(
+        ns(account)?,
+        ns(password)?,
+        g[0],
+        n,
+        PublicKey::from_le_bytes(server_pubkey).map_err(|e| anyhow!("server pubkey: {e:?}"))?,
+        salt,
+    );
+
+    CMD_AUTH_LOGON_PROOF_Client {
+        client_public_key: *challenge.client_public_key(),
+        client_proof: *challenge.client_proof(),
+        crc_hash: [0u8; 20],
+        telemetry_keys: vec![],
+        security_flag: CMD_AUTH_LOGON_PROOF_Client_SecurityFlag::None,
+    }
+    .write(&mut s)?;
+
+    let server_proof = match LogonSmsg::read(&mut s)? {
+        LogonSmsg::CMD_AUTH_LOGON_PROOF(CMD_AUTH_LOGON_PROOF_Server::Success {
+            server_proof,
+            ..
+        }) => server_proof,
+        other => bail!("logon proof failed (wrong password / unprovisioned): {other:?}"),
+    };
+    let srp = challenge
+        .verify_server_proof(server_proof)
+        .map_err(|e| anyhow!("server proof mismatch: {e:?}"))?;
+    let k: [u8; 40] = *srp.session_key();
+
+    wow_login_messages::version_8::CMD_REALM_LIST_Client {}.write(&mut s)?;
+    let world_addr = match LogonSmsg::read(&mut s)? {
+        LogonSmsg::CMD_REALM_LIST(reply) => reply
+            .realms
+            .first()
+            .map(|r| r.address.clone())
+            .unwrap_or_else(|| DEFAULT_WORLD_ADDR.to_string()),
+        other => bail!("realm list failed: {other:?}"),
+    };
+    Ok((k, world_addr))
+}
+
+/// A live, authenticated world connection. Send CMSG via [`WireClient::send`], read SMSG
+/// via [`WireClient::recv`] (which skips the gateway's hand-rolled type-stripped VALUES
+/// packets that gtker can't decode — their bytes are still consumed, keystream stays synced).
+pub struct WireClient {
+    stream: TcpStream,
+    enc: EncrypterHalf,
+    dec: DecrypterHalf,
+    /// The logged-in character's guid (set by [`WireClient::player_login`]).
+    pub self_guid: u64,
+    /// guids seen in CREATE_OBJECT updates (mobs/peers), newest last.
+    pub seen_guids: Vec<u64>,
+}
+
+impl WireClient {
+    /// One-shot bring-up: logon -> world handshake -> create-or-find `char_name` of
+    /// `class` -> player login. Leaves the client in-world.
+    pub fn login_as(
+        account: &str,
+        password: &str,
+        char_name: &str,
+        class: Class,
+    ) -> Result<Self> {
+        let (k, world_addr) = logon(account, password)?;
+        let mut c = Self::connect_world(&world_addr, account, k)?;
+        let guid = c.create_or_find_char(char_name, class)?;
+        c.player_login(guid)?;
+        Ok(c)
+    }
+
+    /// The world handshake: plaintext SMSG_AUTH_CHALLENGE -> CMSG_AUTH_SESSION -> encrypted
+    /// SMSG_AUTH_RESPONSE(AuthOk). Mirrors `world/tests.rs::client_handshake`.
+    pub fn connect_world(world_addr: &str, account: &str, k: [u8; 40]) -> Result<Self> {
+        let mut stream =
+            TcpStream::connect(world_addr).with_context(|| format!("connect world {world_addr}"))?;
+        stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+
+        let server_seed = match WorldSmsg::read_unencrypted(&mut stream)? {
+            WorldSmsg::SMSG_AUTH_CHALLENGE(c) => c.server_seed,
+            other => bail!("expected SMSG_AUTH_CHALLENGE, got {other}"),
+        };
+        let client_seed = ProofSeed::new();
+        let client_seed_value = client_seed.seed();
+        let (client_proof, crypto) =
+            client_seed.into_client_header_crypto(&ns(account)?, k, server_seed);
+        let (enc, mut dec) = crypto.split();
+
+        CMSG_AUTH_SESSION {
+            build: 5875,
+            server_id: 1,
+            username: account.to_string(),
+            client_seed: client_seed_value,
+            client_proof,
+            addon_info: vec![],
+        }
+        .write_unencrypted_client(&mut stream)?;
+
+        match WorldSmsg::read_encrypted(&mut stream, &mut dec)? {
+            WorldSmsg::SMSG_AUTH_RESPONSE(r) if matches!(*r, SMSG_AUTH_RESPONSE::AuthOk { .. }) => {}
+            other => bail!("world auth rejected: {other}"),
+        }
+        Ok(Self { stream, enc, dec, self_guid: 0, seen_guids: Vec::new() })
+    }
+
+    /// Send an encrypted CMSG.
+    pub fn send<M: ClientMessage>(&mut self, m: &M) -> Result<()> {
+        m.write_encrypted_client(&mut self.stream, &mut self.enc)
+            .map_err(|e| anyhow!("send: {e}"))?;
+        Ok(())
+    }
+
+    /// Read the next *decodable* SMSG. Skips packets gtker can't parse (the gateway's
+    /// hand-rolled type-stripped partial-VALUES updates — health bars / quest log); their
+    /// frame is still consumed off the cipher stream so the keystream stays in lockstep.
+    /// Records any CREATE_OBJECT guids it passes for later targeting.
+    pub fn recv(&mut self) -> Result<WorldSmsg> {
+        let mut skipped = 0u32;
+        loop {
+            match WorldSmsg::read_encrypted(&mut self.stream, &mut self.dec) {
+                Ok(m) => {
+                    self.note_guids(&m);
+                    return Ok(m);
+                }
+                Err(e) => {
+                    skipped += 1;
+                    if skipped > 64 {
+                        return Err(anyhow!("recv: stream desync/closed after 64 skips: {e}"));
+                    }
+                    continue;
+                }
+            }
+        }
+    }
+
+    /// Read until a message satisfies `pred`, returning it. Other (decodable) messages are
+    /// discarded (but their guids are still recorded).
+    pub fn recv_until<F: Fn(&WorldSmsg) -> bool>(&mut self, pred: F) -> Result<WorldSmsg> {
+        for _ in 0..256 {
+            let m = self.recv()?;
+            if pred(&m) {
+                return Ok(m);
+            }
+        }
+        bail!("recv_until: predicate never matched in 256 messages")
+    }
+
+    fn note_guids(&mut self, m: &WorldSmsg) {
+        if let WorldSmsg::SMSG_UPDATE_OBJECT(u) = m {
+            for o in &u.objects {
+                if let Some(g) = create_object_guid(o) {
+                    if !self.seen_guids.contains(&g) {
+                        self.seen_guids.push(g);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Request the character list. Returns `(guid, name, class)` per character.
+    pub fn char_enum(&mut self) -> Result<Vec<(u64, String, Class)>> {
+        self.send(&CMSG_CHAR_ENUM {})?;
+        let m = self.recv_until(|m| matches!(m, WorldSmsg::SMSG_CHAR_ENUM(_)))?;
+        let WorldSmsg::SMSG_CHAR_ENUM(e) = m else { unreachable!() };
+        Ok(e.characters.iter().map(|c| (c.guid.guid(), c.name.clone(), c.class)).collect())
+    }
+
+    /// Find a character by name, or create a Human/Male of `class` with that name. Returns
+    /// its guid. Rerunnable: a name-in-use create just falls back to the existing char.
+    pub fn create_or_find_char(&mut self, name: &str, class: Class) -> Result<u64> {
+        if let Some((g, _, _)) =
+            self.char_enum()?.into_iter().find(|(_, n, _)| n.eq_ignore_ascii_case(name))
+        {
+            return Ok(g);
+        }
+        self.send(&CMSG_CHAR_CREATE {
+            name: name.to_string(),
+            race: Race::Human,
+            class,
+            gender: Gender::Male,
+            skin_color: 0,
+            face: 0,
+            hair_style: 0,
+            hair_color: 0,
+            facial_hair: 0,
+        })?;
+        let m = self.recv_until(|m| matches!(m, WorldSmsg::SMSG_CHAR_CREATE(_)))?;
+        let WorldSmsg::SMSG_CHAR_CREATE(r) = m else { unreachable!() };
+        match r.result {
+            WorldResult::CharCreateSuccess | WorldResult::CharCreateNameInUse => {}
+            other => bail!("char create failed: {other:?}"),
+        }
+        self.char_enum()?
+            .into_iter()
+            .find(|(_, n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(g, _, _)| g)
+            .ok_or_else(|| anyhow!("character {name:?} not found after create"))
+    }
+
+    /// Enter the world as `guid`, draining the post-login burst up to (and including) the
+    /// self CREATE_OBJECT. Sets `self_guid`.
+    pub fn player_login(&mut self, guid: u64) -> Result<()> {
+        self.send(&CMSG_PLAYER_LOGIN { guid: Guid::new(guid) })?;
+        // The burst starts with SMSG_LOGIN_VERIFY_WORLD and ends with the self CREATE_OBJECT.
+        self.recv_until(|m| matches!(m, WorldSmsg::SMSG_LOGIN_VERIFY_WORLD(_)))?;
+        self.self_guid = guid;
+        // Drain through the self-spawn CREATE_OBJECT so subsequent reads are gameplay traffic.
+        self.recv_until(|m| match m {
+            WorldSmsg::SMSG_UPDATE_OBJECT(u) => {
+                u.objects.iter().any(|o| create_object_guid(o) == Some(guid))
+            }
+            _ => false,
+        })?;
+        Ok(())
+    }
+
+    /// Select a target by guid (CMSG_SET_SELECTION).
+    pub fn set_selection(&mut self, target: u64) -> Result<()> {
+        self.send(&CMSG_SET_SELECTION { target: Guid::new(target) })
+    }
+
+    /// Cast `spell_id` at `target` guid (CMSG_CAST_SPELL with TARGET_FLAG_UNIT).
+    pub fn cast_spell(&mut self, spell_id: u32, target: u64) -> Result<()> {
+        self.send(&CMSG_CAST_SPELL {
+            spell: spell_id,
+            targets: SpellCastTargets {
+                target_flags: SpellCastTargets_SpellCastTargetFlags::new_unit(
+                    SpellCastTargets_SpellCastTargetFlags_Unit { unit_target: Guid::new(target) },
+                ),
+            },
+        })
+    }
+}
+
+/// Extract the guid from a CREATE-flavored `Object` (CreateObject / CreateObject2), else None.
+fn create_object_guid(o: &wow_world_messages::vanilla::Object) -> Option<u64> {
+    use wow_world_messages::vanilla::Object;
+    match o {
+        Object::CreateObject { guid3, .. } | Object::CreateObject2 { guid3, .. } => {
+            Some(guid3.guid())
+        }
+        _ => None,
+    }
+}
