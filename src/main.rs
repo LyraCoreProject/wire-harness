@@ -40,12 +40,14 @@ fn main() -> Result<()> {
             match c.recv() {
                 Ok(Smsg::SMSG_GOSSIP_MESSAGE(g)) => {
                     saw_gossip = true;
+                    let opts: Vec<String> =
+                        g.gossips.iter().map(|o| o.message.clone()).collect();
                     println!(
-                        "[probe] SMSG_GOSSIP_MESSAGE guid={:#x} title_text={:#x} gossips={} quests={}",
+                        "[probe] SMSG_GOSSIP_MESSAGE guid={:#x} title={:#x} quests={} options={:?}",
                         g.guid.guid(),
                         g.title_text_id,
-                        g.gossips.len(),
-                        g.quests.len()
+                        g.quests.len(),
+                        opts
                     );
                 }
                 Ok(Smsg::SMSG_GOSSIP_COMPLETE) => println!("[probe] SMSG_GOSSIP_COMPLETE"),
