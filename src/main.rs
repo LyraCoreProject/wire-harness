@@ -16,7 +16,7 @@ fn main() -> Result<()> {
     let account = args.next().unwrap_or_else(|| "TEST".into());
     let password = args.next().unwrap_or_else(|| "test123".into());
     let char_name = args.next().unwrap_or_else(|| "Ginger".into());
-    let spell_id: Option<u32> = args.next().and_then(|s| s.parse().ok());
+    let mode: Option<String> = args.next();
 
     eprintln!("[wire] logon + world handshake as {account} -> char {char_name}…");
     let mut c = WireClient::login_as(&account, &password, &char_name, Class::Warlock)?;
@@ -26,7 +26,46 @@ fn main() -> Result<()> {
         c.seen_guids.len()
     );
 
-    let Some(spell_id) = spell_id else { return Ok(()) };
+    // ---- gossip probe: dump the SMSG the gateway sends for CMSG_GOSSIP_HELLO to an NPC ----
+    if mode.as_deref() == Some("gossip") {
+        let npc: u64 = args
+            .next()
+            .and_then(|s| s.parse().ok())
+            .expect("usage: … gossip <npc_guid>");
+        eprintln!("[wire] gossip-probe: CMSG_GOSSIP_HELLO -> {npc:#x}");
+        c.gossip_hello(npc)?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let mut saw_gossip = false;
+        while std::time::Instant::now() < deadline {
+            match c.recv() {
+                Ok(Smsg::SMSG_GOSSIP_MESSAGE(g)) => {
+                    saw_gossip = true;
+                    println!(
+                        "[probe] SMSG_GOSSIP_MESSAGE guid={:#x} title_text={:#x} gossips={} quests={}",
+                        g.guid.guid(),
+                        g.title_text_id,
+                        g.gossips.len(),
+                        g.quests.len()
+                    );
+                }
+                Ok(Smsg::SMSG_GOSSIP_COMPLETE) => println!("[probe] SMSG_GOSSIP_COMPLETE"),
+                Ok(Smsg::SMSG_QUESTGIVER_QUEST_LIST(_)) => println!("[probe] SMSG_QUESTGIVER_QUEST_LIST"),
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        println!(
+            "[probe] done — {}",
+            if saw_gossip {
+                "gateway SENT SMSG_GOSSIP_MESSAGE (handler works → real-client wire-reject)"
+            } else {
+                "gateway sent NO gossip message (handler aborted server-side)"
+            }
+        );
+        return Ok(());
+    }
+
+    let Some(spell_id) = mode.and_then(|s| s.parse::<u32>().ok()) else { return Ok(()) };
 
     // ---- M2: the orchestrator spawns a mob at Ginger's feet (she must be live) and writes
     // its exact guid to a file; we KEEP DRAINING the socket while polling that file, then

@@ -33,7 +33,8 @@ use wow_world_messages::vanilla::opcodes::ServerOpcodeMessage as WorldSmsg;
 use wow_world_messages::vanilla::{
     Class, Gender, Race, SpellCastTargets, SpellCastTargets_SpellCastTargetFlags,
     SpellCastTargets_SpellCastTargetFlags_Unit, WorldResult, CMSG_AUTH_SESSION, CMSG_CAST_SPELL,
-    CMSG_CHAR_CREATE, CMSG_CHAR_ENUM, CMSG_PLAYER_LOGIN, CMSG_SET_SELECTION, SMSG_AUTH_RESPONSE,
+    CMSG_CHAR_CREATE, CMSG_CHAR_ENUM, CMSG_GOSSIP_HELLO, CMSG_PLAYER_LOGIN, CMSG_SET_SELECTION,
+    SMSG_AUTH_RESPONSE,
 };
 use wow_world_messages::vanilla::ClientMessage;
 use wow_world_messages::Guid;
@@ -295,6 +296,12 @@ impl WireClient {
     /// Select a target by guid (CMSG_SET_SELECTION).
     pub fn set_selection(&mut self, target: u64) -> Result<()> {
         self.send(&CMSG_SET_SELECTION { target: Guid::new(target) })
+    }
+
+    /// Right-click a gossip NPC (CMSG_GOSSIP_HELLO) — the gateway should reply with
+    /// SMSG_GOSSIP_MESSAGE (its quests for a gossip+questgiver like McBride).
+    pub fn gossip_hello(&mut self, npc: u64) -> Result<()> {
+        self.send(&CMSG_GOSSIP_HELLO { guid: Guid::new(npc) })
     }
 
     /// Cast `spell_id` at `target` guid (CMSG_CAST_SPELL with TARGET_FLAG_UNIT).
