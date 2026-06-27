@@ -67,6 +67,34 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // ---- ghost-reveal probe (PIECE 2): a viewer who dies + becomes a GHOST should get the spirit-healer
+    // entity CREATE'd (the GW_AOI=0 on_update reveal). The orchestrator kills+repops via debug reducers
+    // (the char's small guid). PASS = healer hidden while alive, then revealed on the ghost transition.
+    if mode.as_deref() == Some("ghost") {
+        let healer: u64 = args
+            .next()
+            .and_then(|s| s.parse().ok())
+            .expect("usage: … ghost <healer_guid>");
+        let before = c.seen_guids.contains(&healer);
+        println!("[ghost] healer {healer:#x} visible while ALIVE: {before}  (want false — the alive-gate)");
+        std::fs::write("/tmp/wc_ghost_ready", "1").ok();
+        eprintln!("[ghost] ready — waiting for kill+repop, then the reveal CREATE…");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while std::time::Instant::now() < deadline {
+            c.recv()?; // recv() records CREATE guids into seen_guids
+            if c.seen_guids.contains(&healer) {
+                break;
+            }
+        }
+        let after = c.seen_guids.contains(&healer);
+        println!("[ghost] healer visible after GHOST transition: {after}  (want true — the reveal)");
+        if !before && after {
+            println!("[wire] GHOST-REVEAL PASS \u{2713}  hidden while alive, CREATE'd on the ghost transition");
+            return Ok(());
+        }
+        bail!("ghost-reveal: before={before} after={after} (want false->true)");
+    }
+
     let Some(spell_id) = mode.and_then(|s| s.parse::<u32>().ok()) else { return Ok(()) };
 
     // ---- M2: the orchestrator spawns a mob at Ginger's feet (she must be live) and writes
