@@ -98,6 +98,10 @@ fn main() -> Result<()> {
     let mut go_hits: Vec<u64> = vec![];
     let mut dmg: Option<u32> = None;
     let mut cooldown = false;
+    let mut failure: Option<u32> = None;
+    // WIRE_EXPECT_INTERRUPT: the caster is meant to be hit mid-cast → assert SMSG_SPELL_FAILURE + no GO
+    // (the cast-interrupt relay), instead of the normal START->GO->COOLDOWN completion.
+    let expect_interrupt = std::env::var("WIRE_EXPECT_INTERRUPT").is_ok();
 
     // The completion fires ~cast_time later; read on a wall-clock deadline (the busy world
     // floods packets, so a fixed count can elapse before 1.7s).
@@ -121,6 +125,12 @@ fn main() -> Result<()> {
                 go_unit = g.targets.target_flags.get_unit().map(|u| u.unit_target.guid());
             }
             Smsg::SMSG_SPELLNONMELEEDAMAGELOG(d) => dmg = Some(d.damage),
+            Smsg::SMSG_SPELL_FAILURE(f) => {
+                failure = Some(f.spell);
+                if expect_interrupt {
+                    break;
+                }
+            }
             Smsg::SMSG_SPELL_COOLDOWN(_) => {
                 cooldown = true;
                 break;
@@ -128,6 +138,31 @@ fn main() -> Result<()> {
             Smsg::SMSG_CAST_RESULT(r) => bail!("cast REJECTED by server (bad target/gate): {r:?}"),
             _ => {}
         }
+    }
+
+    if expect_interrupt {
+        let mut fails: Vec<String> = vec![];
+        if begin_timer != Some(1700) {
+            fails.push(format!("begin SMSG_SPELL_START.timer = {begin_timer:?}, want Some(1700)"));
+        }
+        if failure != Some(spell_id) {
+            fails.push(format!(
+                "NO SMSG_SPELL_FAILURE(spell={spell_id}) — the cast was NOT interrupted (failure={failure:?})"
+            ));
+        }
+        if go_spell == Some(spell_id) {
+            fails.push("got SMSG_SPELL_GO — the cast COMPLETED instead of being interrupted".into());
+        }
+        if fails.is_empty() {
+            println!(
+                "[wire] INTERRUPT PASS \u{2713}  START(1700) -> SMSG_SPELL_FAILURE(spell={spell_id}) with NO GO — damage cancelled the cast"
+            );
+            return Ok(());
+        }
+        for f in &fails {
+            eprintln!("[wire] FAIL: {f}");
+        }
+        bail!("interrupt: {} assertion(s) failed", fails.len());
     }
 
     let mut fails: Vec<String> = vec![];
