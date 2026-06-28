@@ -197,8 +197,8 @@ fn main() -> Result<()> {
     if begin_timer != Some(1700) {
         fails.push(format!("begin SMSG_SPELL_START.timer = {begin_timer:?}, want Some(1700)"));
     }
-    if !completion_start {
-        fails.push("missing completion SMSG_SPELL_START(timer=0) — the START->GO close pair (cast-lock fix)".into());
+    if completion_start {
+        fails.push("UNEXPECTED completion SMSG_SPELL_START(timer=0) — a TIMED completion must send GO ALONE (the begin START already opened the bar). A 2nd START(0) resets the cast bar to a zero-length cast → 'stuck on full'. The relay gates the START on !is_completion.".into());
     }
     if go_spell != Some(spell_id) {
         fails.push(format!("SMSG_SPELL_GO.spell = {go_spell:?}, want Some({spell_id})"));
@@ -217,7 +217,7 @@ fn main() -> Result<()> {
 
     if fails.is_empty() {
         println!(
-            "[wire] M2 PASS \u{2713}  START(1700) -> START(0)+GO(unit={mob:#x}, hits=[mob], spell={spell_id}) -> dmg={dmg:?} -> COOLDOWN"
+            "[wire] M2 PASS \u{2713}  START(1700) -> GO(unit={mob:#x}, hits=[mob], spell={spell_id}) [no 2nd START] -> dmg={dmg:?} -> COOLDOWN"
         );
         Ok(())
     } else {

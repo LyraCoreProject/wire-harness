@@ -3,8 +3,8 @@
 #
 # Drives the headless wire test-client: log in as a Warlock, spawn a hostile mob at her
 # feet, cast a TIMED spell at it, and assert the SMSG cast sequence the gateway relays:
-#   SMSG_SPELL_START(cast_time) -> SMSG_SPELL_START(0)+SMSG_SPELL_GO(targets.unit=mob)
-#   -> [SMSG_SPELLNONMELEEDAMAGELOG] -> SMSG_SPELL_COOLDOWN
+#   SMSG_SPELL_START(cast_time) -> SMSG_SPELL_GO(targets.unit=mob) [NO 2nd START — the timed
+#   completion sends GO alone] -> [SMSG_SPELLNONMELEEDAMAGELOG] -> SMSG_SPELL_COOLDOWN
 # i.e. it deterministically verifies the cast-state-close (the START->GO pair the 5875
 # client needs) and the projectile trajectory (GO.unit_target) — the class of bug we used
 # to QA by hand through the wine client.
