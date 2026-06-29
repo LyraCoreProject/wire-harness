@@ -34,7 +34,8 @@ use wow_world_messages::vanilla::{
     Class, Gender, LogoutResult, Race, SpellCastTargets, SpellCastTargets_SpellCastTargetFlags,
     SpellCastTargets_SpellCastTargetFlags_Unit, WorldResult, CMSG_AUTH_SESSION, CMSG_CAST_SPELL,
     CMSG_CHAR_CREATE, CMSG_CHAR_ENUM, CMSG_GOSSIP_HELLO, CMSG_ITEM_QUERY_SINGLE,
-    CMSG_LOGOUT_REQUEST, CMSG_PLAYER_LOGIN, CMSG_SET_SELECTION, SMSG_AUTH_RESPONSE,
+    CMSG_LOGOUT_REQUEST, CMSG_PLAYER_LOGIN, CMSG_REPOP_REQUEST, CMSG_SET_SELECTION,
+    SMSG_AUTH_RESPONSE,
 };
 use wow_world_messages::vanilla::ClientMessage;
 use wow_world_messages::Guid;
@@ -396,6 +397,11 @@ impl WireClient {
             }
         }
         bail!("timed out waiting for SMSG_LOGOUT_RESPONSE")
+    }
+
+    /// Send CMSG_REPOP_REQUEST (empty body — release spirit on the death screen).
+    pub fn repop_request(&mut self) -> Result<()> {
+        self.send(&CMSG_REPOP_REQUEST {})
     }
 
     /// Cast `spell_id` at `target` guid (CMSG_CAST_SPELL with TARGET_FLAG_UNIT).

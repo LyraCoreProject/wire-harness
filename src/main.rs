@@ -227,6 +227,53 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // ---- repop-delay probe: CMSG_REPOP_REQUEST → assert SMSG_CORPSE_RECLAIM_DELAY(30s) ----
+    // Usage: wire-client [account] [password] [char-name] repop [char-small-guid]
+    // The orchestrator must kill the character (debug_set_health 0) before signalling;
+    // then we send CMSG_REPOP_REQUEST and assert the gateway emits the 30s delay packet.
+    // Pass: SMSG_CORPSE_RECLAIM_DELAY with delay == Duration::from_secs(30).
+    if mode.as_deref() == Some("repop") {
+        let char_guid: u64 = args
+            .next()
+            .and_then(|s| s.parse().ok())
+            .expect("usage: … repop <char-guid>");
+        eprintln!("[repop] in-world as {char_name} (guid {:#x}); signalling orchestrator…", c.self_guid);
+        std::fs::write("/tmp/wc_repop_ready", "1").ok();
+
+        // Wait for the orchestrator to kill the character.
+        for _ in 0..30 {
+            if !std::path::Path::new("/tmp/wc_repop_ready").exists() { break; }
+            // drain so the gateway doesn't drop us
+            match c.recv() { Ok(_) => {} Err(_) => break }
+        }
+        eprintln!("[repop] sending CMSG_REPOP_REQUEST for char_guid={char_guid:#x}…");
+        c.repop_request()?;
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut got_delay: Option<std::time::Duration> = None;
+        while std::time::Instant::now() < deadline {
+            use wow_world_messages::vanilla::opcodes::ServerOpcodeMessage as Smsg;
+            match c.recv() {
+                Ok(Smsg::SMSG_CORPSE_RECLAIM_DELAY(d)) => {
+                    got_delay = Some(d.delay);
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        std::fs::remove_file("/tmp/wc_repop_ready").ok();
+        let want = std::time::Duration::from_secs(30);
+        match got_delay {
+            Some(d) if d == want => {
+                println!("[wire] REPOP-DELAY PASS \u{2713}  SMSG_CORPSE_RECLAIM_DELAY(delay={}ms) received", d.as_millis());
+                return Ok(());
+            }
+            Some(d) => anyhow::bail!("repop-delay: got delay={:?}, want {:?}", d, want),
+            None => anyhow::bail!("repop-delay: no SMSG_CORPSE_RECLAIM_DELAY received within 5s"),
+        }
+    }
+
     let Some(spell_id) = mode.and_then(|s| s.parse::<u32>().ok()) else { return Ok(()) };
 
     // ---- M2: the orchestrator spawns a mob at Ginger's feet (she must be live) and writes
