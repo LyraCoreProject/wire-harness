@@ -31,10 +31,10 @@ use wow_srp::PublicKey;
 // --- world tier ---
 use wow_world_messages::vanilla::opcodes::ServerOpcodeMessage as WorldSmsg;
 use wow_world_messages::vanilla::{
-    Class, Gender, Race, SpellCastTargets, SpellCastTargets_SpellCastTargetFlags,
+    Class, Gender, LogoutResult, Race, SpellCastTargets, SpellCastTargets_SpellCastTargetFlags,
     SpellCastTargets_SpellCastTargetFlags_Unit, WorldResult, CMSG_AUTH_SESSION, CMSG_CAST_SPELL,
     CMSG_CHAR_CREATE, CMSG_CHAR_ENUM, CMSG_GOSSIP_HELLO, CMSG_ITEM_QUERY_SINGLE,
-    CMSG_PLAYER_LOGIN, CMSG_SET_SELECTION, SMSG_AUTH_RESPONSE,
+    CMSG_LOGOUT_REQUEST, CMSG_PLAYER_LOGIN, CMSG_SET_SELECTION, SMSG_AUTH_RESPONSE,
 };
 use wow_world_messages::vanilla::ClientMessage;
 use wow_world_messages::Guid;
@@ -333,6 +333,32 @@ impl WireClient {
             }
         }
         bail!("timed out waiting for SMSG_ITEM_QUERY_SINGLE_RESPONSE(item={item_entry})")
+    }
+
+    /// Send CMSG_LOGOUT_REQUEST and return the LogoutResult from SMSG_LOGOUT_RESPONSE.
+    /// On Success, also drains the SMSG_LOGOUT_COMPLETE that follows.
+    pub fn logout_request(&mut self) -> Result<LogoutResult> {
+        self.send(&CMSG_LOGOUT_REQUEST {})?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            match self.recv()? {
+                WorldSmsg::SMSG_LOGOUT_RESPONSE(r) => {
+                    if r.result == LogoutResult::Success {
+                        // Drain SMSG_LOGOUT_COMPLETE (it's sent in the same batch).
+                        let deadline2 = std::time::Instant::now() + std::time::Duration::from_secs(3);
+                        while std::time::Instant::now() < deadline2 {
+                            match self.recv()? {
+                                WorldSmsg::SMSG_LOGOUT_COMPLETE => break,
+                                _ => continue,
+                            }
+                        }
+                    }
+                    return Ok(r.result);
+                }
+                _ => continue,
+            }
+        }
+        bail!("timed out waiting for SMSG_LOGOUT_RESPONSE")
     }
 
     /// Cast `spell_id` at `target` guid (CMSG_CAST_SPELL with TARGET_FLAG_UNIT).

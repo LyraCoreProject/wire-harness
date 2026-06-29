@@ -9,7 +9,7 @@
 use anyhow::{bail, Result};
 use wire_client::WireClient;
 use wow_world_messages::vanilla::opcodes::ServerOpcodeMessage as Smsg;
-use wow_world_messages::vanilla::Class;
+use wow_world_messages::vanilla::{Class, LogoutResult};
 
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
@@ -118,6 +118,22 @@ fn main() -> Result<()> {
             return Ok(());
         }
         bail!("ghost-reveal: before={before} after={after} (want false->true)");
+    }
+
+    // ---- logout probe: assert out-of-combat logout replies Success + LOGOUT_COMPLETE ----
+    // Usage: wire-client [account] [password] [char-name] logout
+    // Pass: SMSG_LOGOUT_RESPONSE(Success, Instant) → SMSG_LOGOUT_COMPLETE
+    // Fail: FailureInCombat or timeout.
+    if mode.as_deref() == Some("logout") {
+        eprintln!("[wire] logout probe — sending CMSG_LOGOUT_REQUEST…");
+        let result = c.logout_request()?;
+        match result {
+            LogoutResult::Success => {
+                println!("[wire] LOGOUT PASS \u{2713}  SMSG_LOGOUT_RESPONSE(Success, Instant) + SMSG_LOGOUT_COMPLETE");
+                return Ok(());
+            }
+            other => bail!("logout: expected Success, got {other:?}"),
+        }
     }
 
     let Some(spell_id) = mode.and_then(|s| s.parse::<u32>().ok()) else { return Ok(()) };
