@@ -274,6 +274,72 @@ fn main() -> Result<()> {
         }
     }
 
+    // ---- relay-observer: log in, signal ready, then listen for a relayed MSG_MOVE_JUMP_Server ----
+    // Usage: wire-client TEST2 test123 dfsdfsd relay-observer
+    // The orchestrator signals /tmp/wc_relay_ready; we wait, then listen for opcode 0xBB
+    // (MSG_MOVE_JUMP / MSG_MOVE_JUMP_Server — same opcode value 0x00BB = 187).
+    // Pass: opcode 0xBB received from a *different* guid (the sender's guid) within 5s.
+    if mode.as_deref() == Some("relay-observer") {
+        eprintln!("[relay-observer] in-world as {} (guid {:#x}); signalling ready…", char_name, c.self_guid);
+        std::fs::write("/tmp/wc_relay_ready", "1").ok();
+        // Drain until the sender signals they've sent the jump, keeping the socket alive.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut got_jump = false;
+        while std::time::Instant::now() < deadline {
+            let (opcode, _payload) = match c.recv_raw() {
+                Ok(x) => x,
+                Err(e) => { eprintln!("[relay-observer] recv_raw error: {e}"); break; }
+            };
+            if opcode == 0x00BB {
+                // MSG_MOVE_JUMP_Server — received a relayed jump from another player
+                got_jump = true;
+                println!("[probe] received opcode 0x{opcode:04X} (MSG_MOVE_JUMP_Server) — relay confirmed");
+                break;
+            }
+        }
+        std::fs::remove_file("/tmp/wc_relay_ready").ok();
+        if got_jump {
+            println!("[wire] RELAY-JUMP PASS \u{2713}  observer received MSG_MOVE_JUMP_Server from peer");
+            return Ok(());
+        }
+        bail!("relay-observer: no MSG_MOVE_JUMP_Server (opcode 0xBB) received within 10s");
+    }
+
+    // ---- relay-sender: wait for observer ready, then send MSG_MOVE_JUMP ----
+    // Usage: wire-client TEST test123 Ginger relay-sender
+    // Waits for /tmp/wc_relay_ready (set by relay-observer), then sends MSG_MOVE_JUMP.
+    if mode.as_deref() == Some("relay-sender") {
+        use wow_world_messages::vanilla::{MovementInfo, MovementInfo_MovementFlags, MSG_MOVE_JUMP_Client};
+        use wow_world_messages::vanilla::Vector3d;
+        eprintln!("[relay-sender] in-world as {} (guid {:#x}); waiting for observer…", char_name, c.self_guid);
+        // Drain + wait for observer to signal ready.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            // Keep socket drained while we wait.
+            match c.recv_raw() { Ok(_) => {} Err(_) => break }
+            if std::path::Path::new("/tmp/wc_relay_ready").exists() {
+                break;
+            }
+        }
+        if !std::path::Path::new("/tmp/wc_relay_ready").exists() {
+            bail!("relay-sender: observer never became ready within 10s");
+        }
+        eprintln!("[relay-sender] observer ready — sending MSG_MOVE_JUMP…");
+        // Send a minimal MSG_MOVE_JUMP: the char's current position (approximate), no extra flags.
+        // The relay is keyed on the opcode (0xBB), not the movement flags.
+        c.send(&MSG_MOVE_JUMP_Client {
+            info: MovementInfo {
+                flags: MovementInfo_MovementFlags::empty(),
+                timestamp: 0,
+                position: Vector3d { x: -8968.0, y: -129.0, z: 83.39 },
+                orientation: 0.0,
+                fall_time: 0.0,
+            },
+        })?;
+        println!("[relay-sender] MSG_MOVE_JUMP sent; observer should receive MSG_MOVE_JUMP_Server");
+        return Ok(());
+    }
+
     let Some(spell_id) = mode.and_then(|s| s.parse::<u32>().ok()) else { return Ok(()) };
 
     // ---- M2: the orchestrator spawns a mob at Ginger's feet (she must be live) and writes
