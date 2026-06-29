@@ -33,8 +33,8 @@ use wow_world_messages::vanilla::opcodes::ServerOpcodeMessage as WorldSmsg;
 use wow_world_messages::vanilla::{
     Class, Gender, Race, SpellCastTargets, SpellCastTargets_SpellCastTargetFlags,
     SpellCastTargets_SpellCastTargetFlags_Unit, WorldResult, CMSG_AUTH_SESSION, CMSG_CAST_SPELL,
-    CMSG_CHAR_CREATE, CMSG_CHAR_ENUM, CMSG_GOSSIP_HELLO, CMSG_PLAYER_LOGIN, CMSG_SET_SELECTION,
-    SMSG_AUTH_RESPONSE,
+    CMSG_CHAR_CREATE, CMSG_CHAR_ENUM, CMSG_GOSSIP_HELLO, CMSG_ITEM_QUERY_SINGLE,
+    CMSG_PLAYER_LOGIN, CMSG_SET_SELECTION, SMSG_AUTH_RESPONSE,
 };
 use wow_world_messages::vanilla::ClientMessage;
 use wow_world_messages::Guid;
@@ -302,6 +302,37 @@ impl WireClient {
     /// SMSG_GOSSIP_MESSAGE (its quests for a gossip+questgiver like McBride).
     pub fn gossip_hello(&mut self, npc: u64) -> Result<()> {
         self.send(&CMSG_GOSSIP_HELLO { guid: Guid::new(npc) })
+    }
+
+    /// Send CMSG_ITEM_QUERY_SINGLE for `item_entry` and wait for the response. Returns
+    /// `(armor, block, sell_price_copper, stats[(stat_type_int, value)])` decoded from the SMSG
+    /// reply. The server replies for any valid entry regardless of whether the character holds it.
+    pub fn query_item(
+        &mut self,
+        item_entry: u32,
+    ) -> Result<(i32, u32, u32, Vec<(u8, i32)>)> {
+        use wow_world_messages::vanilla::opcodes::ServerOpcodeMessage as Smsg;
+        // The vanilla packet carries both item entry and a guid (the item object guid when the
+        // client holds the item; 0 when querying "cold" without the object — both are accepted).
+        self.send(&CMSG_ITEM_QUERY_SINGLE { item: item_entry, guid: Guid::new(0) })?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            match self.recv()? {
+                Smsg::SMSG_ITEM_QUERY_SINGLE_RESPONSE(r) if r.item == item_entry => {
+                    let Some(found) = r.found else {
+                        bail!("item {item_entry} not found in server item_template table");
+                    };
+                    let stats: Vec<(u8, i32)> = found
+                        .stats
+                        .iter()
+                        .map(|s| (s.stat_type.as_int(), s.value))
+                        .collect();
+                    return Ok((found.armor, found.block, found.sell_price.as_int(), stats));
+                }
+                _ => continue,
+            }
+        }
+        bail!("timed out waiting for SMSG_ITEM_QUERY_SINGLE_RESPONSE(item={item_entry})")
     }
 
     /// Cast `spell_id` at `target` guid (CMSG_CAST_SPELL with TARGET_FLAG_UNIT).

@@ -26,6 +26,31 @@ fn main() -> Result<()> {
         c.seen_guids.len()
     );
 
+    // ---- item-query probe: assert SMSG_ITEM_QUERY_SINGLE_RESPONSE carries armor + stats ----
+    // Usage: wire-client TEST test123 Ginger query-item <entry> [want_armor]
+    // Exits 0 if armor == want_armor (default 105 for Blackrock Gauntlets entry 1448).
+    if mode.as_deref() == Some("query-item") {
+        let entry: u32 = args
+            .next()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1448); // Blackrock Gauntlets — stat_armor=105, stat_strength=3
+        let want_armor: i32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(105);
+        eprintln!("[wire] query-item {entry} expecting armor={want_armor}");
+        let (armor, block, sell_price, stats) = c.query_item(entry)?;
+        println!(
+            "[probe] SMSG_ITEM_QUERY_SINGLE_RESPONSE item={entry} armor={armor} block={block} sell_price={sell_price} stats={stats:?}"
+        );
+        let nonzero_stats: Vec<_> = stats.iter().filter(|&&(_, v)| v != 0).collect();
+        if armor != want_armor {
+            eprintln!("[wire] FAIL: armor={armor}, want {want_armor}");
+            std::process::exit(1);
+        }
+        println!(
+            "[wire] ITEM-QUERY PASS \u{2713}  armor={armor} block={block} sell_price={sell_price}c nonzero_stats={nonzero_stats:?}"
+        );
+        return Ok(());
+    }
+
     // ---- gossip probe: dump the SMSG the gateway sends for CMSG_GOSSIP_HELLO to an NPC ----
     if mode.as_deref() == Some("gossip") {
         let npc: u64 = args
