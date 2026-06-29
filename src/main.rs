@@ -7,7 +7,7 @@
 //! asserting the timed-cast SMSG sequence.
 
 use anyhow::{bail, Result};
-use wire_client::WireClient;
+use wire_client::{logon, WireClient};
 use wow_world_messages::vanilla::opcodes::ServerOpcodeMessage as Smsg;
 use wow_world_messages::vanilla::{Class, LogoutResult};
 
@@ -17,6 +17,41 @@ fn main() -> Result<()> {
     let password = args.next().unwrap_or_else(|| "test123".into());
     let char_name = args.next().unwrap_or_else(|| "Ginger".into());
     let mode: Option<String> = args.next();
+
+    // ---- char-enum-gear probe: verify SMSG_CHAR_ENUM equipment slots carry real display_ids ----
+    // Usage: wire-client TEST test123 <char-name> char-enum-gear [slot] [want_display_id]
+    // slot defaults to 15 (main-hand weapon). want_display_id defaults to 0 (asserts nonzero).
+    // Pass: the named character's equipment slot has a non-zero display_id (or == want if given).
+    if mode.as_deref() == Some("char-enum-gear") {
+        let slot: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(15);
+        let want: Option<u32> = args.next().and_then(|s| s.parse().ok());
+        eprintln!("[wire] char-enum-gear: logon + CMSG_CHAR_ENUM, checking {char_name} slot {slot}…");
+        let (k, world_addr) = logon(&account, &password)?;
+        let mut c = WireClient::connect_world(&world_addr, &account, k)?;
+        let chars = c.char_enum_gear()?;
+        let Some((_, _, display_ids)) = chars.iter().find(|(_, n, _)| n.eq_ignore_ascii_case(&char_name)) else {
+            bail!("char-enum-gear: character {char_name:?} not found in SMSG_CHAR_ENUM ({} chars)", chars.len());
+        };
+        let got = display_ids.get(slot).copied().unwrap_or(0);
+        println!("[probe] SMSG_CHAR_ENUM {char_name} slot {slot} display_id={got}");
+        // Print full non-zero gear for inspection
+        for (i, &did) in display_ids.iter().enumerate() {
+            if did != 0 {
+                println!("[probe]   slot {i} display_id={did}");
+            }
+        }
+        let pass = match want {
+            Some(w) => got == w,
+            None => got != 0,
+        };
+        if pass {
+            let desc = want.map(|w| format!("=={w}")).unwrap_or_else(|| "!=0".into());
+            println!("[wire] CHAR-ENUM-GEAR PASS \u{2713}  {char_name} slot {slot} display_id={got} ({desc})");
+            return Ok(());
+        }
+        let desc = want.map(|w| format!("want {w}, got {got}")).unwrap_or_else(|| format!("want non-zero, got 0 (naked)"));
+        bail!("char-enum-gear: {char_name} slot {slot}: {desc}");
+    }
 
     eprintln!("[wire] logon + world handshake as {account} -> char {char_name}…");
     let mut c = WireClient::login_as(&account, &password, &char_name, Class::Warlock)?;

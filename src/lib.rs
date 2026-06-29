@@ -244,6 +244,24 @@ impl WireClient {
         Ok(e.characters.iter().map(|c| (c.guid.guid(), c.name.clone(), c.class)).collect())
     }
 
+    /// Request the character list and return the raw equipment display_ids for each character.
+    /// Returns `(guid, name, display_ids)` where display_ids is a 19-element vec indexed by
+    /// equipment slot (slot 15 = main-hand weapon).
+    /// Used to verify SMSG_CHAR_ENUM carries real display_ids (not all-zero).
+    pub fn char_enum_gear(&mut self) -> Result<Vec<(u64, String, Vec<u32>)>> {
+        self.send(&CMSG_CHAR_ENUM {})?;
+        let m = self.recv_until(|m| matches!(m, WorldSmsg::SMSG_CHAR_ENUM(_)))?;
+        let WorldSmsg::SMSG_CHAR_ENUM(e) = m else { unreachable!() };
+        Ok(e.characters
+            .iter()
+            .map(|c| {
+                let display_ids: Vec<u32> =
+                    c.equipment.iter().map(|g| g.equipment_display_id).collect();
+                (c.guid.guid(), c.name.clone(), display_ids)
+            })
+            .collect())
+    }
+
     /// Find a character by name, or create a Human/Male of `class` with that name. Returns
     /// its guid. Rerunnable: a name-in-use create just falls back to the existing char.
     pub fn create_or_find_char(&mut self, name: &str, class: Class) -> Result<u64> {
