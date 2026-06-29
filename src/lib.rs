@@ -189,6 +189,25 @@ impl WireClient {
         Ok(())
     }
 
+    /// Read the next raw encrypted frame without gtker-decoding the payload.
+    /// Returns `(opcode, payload_bytes)`. Advances the cipher state exactly like `recv()`,
+    /// so `recv()` and `recv_raw()` can be interleaved freely — one packet at a time.
+    /// Use this for packets gtker rejects (e.g. TYPE-less partial-VALUES updates).
+    pub fn recv_raw(&mut self) -> Result<(u16, Vec<u8>)> {
+        use std::io::Read;
+        let hdr = self
+            .dec
+            .read_and_decrypt_server_header(&mut self.stream)
+            .map_err(|e| anyhow!("recv_raw header: {e}"))?;
+        // `hdr.size` = opcode (2 bytes) + payload; subtract 2 to get payload-only length.
+        let payload_len = (hdr.size as usize).saturating_sub(2);
+        let mut payload = vec![0u8; payload_len];
+        self.stream
+            .read_exact(&mut payload)
+            .map_err(|e| anyhow!("recv_raw payload: {e}"))?;
+        Ok((hdr.opcode, payload))
+    }
+
     /// Read the next *decodable* SMSG. Skips packets gtker can't parse (the gateway's
     /// hand-rolled type-stripped partial-VALUES updates — health bars / quest log); their
     /// frame is still consumed off the cipher stream so the keystream stays in lockstep.

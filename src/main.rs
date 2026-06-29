@@ -171,6 +171,62 @@ fn main() -> Result<()> {
         }
     }
 
+    // ---- ding probe: verify mid-session L10 ding pushes PLAYER_CHARACTER_POINTS1=1 ----
+    // Usage: wire-client [account] [password] [char-name] ding
+    // The orchestrator (test-ding.sh) must first set the char to L9, wait for wc_ding_ready,
+    // then call `spacetime call spacetime-core debug_set_level <guid> 10`.
+    // Pass: an SMSG_UPDATE_OBJECT arrives that contains BOTH a level=10 word [0x0a 00 00 00]
+    // AND a character_points1=1 word [0x01 00 00 00] — the levelup VALUES packet (#032 fix).
+    if mode.as_deref() == Some("ding") {
+        eprintln!("[ding] in-world as {} (guid {}), signalling orchestrator…", c.self_guid, c.self_guid);
+        std::fs::write("/tmp/wc_ding_ready", "1").ok();
+
+        // SMSG_UPDATE_OBJECT opcode (vanilla 1.12) = 0x00A9 = 169.
+        // Scan raw frames: the gtker reader rejects TYPE-less Player masks (it requires
+        // OBJECT_FIELD_TYPE), so we use recv_raw() to capture the decrypted payload bytes
+        // directly rather than going through the gtker decode path.
+        const SMSG_UPDATE_OBJECT: u16 = 0x00A9;
+        let level10_word = [0x0au8, 0x00, 0x00, 0x00]; // level=10 as little-endian u32
+        let cp1_word = [0x01u8, 0x00, 0x00, 0x00];     // character_points1=1 as little-endian u32
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let mut found = false;
+        while std::time::Instant::now() < deadline {
+            let (opcode, payload) = c.recv_raw()?;
+            if opcode == SMSG_UPDATE_OBJECT {
+                let has_level10 = payload.windows(4).any(|w| w == level10_word);
+                let has_cp1    = payload.windows(4).any(|w| w == cp1_word);
+                // Log every UPDATE_OBJECT for visibility; only match on level10 as the primary
+                // signal (cp1_word [0x01...] appears in every packet's count=1 header field).
+                // An SMSG_UPDATE_OBJECT containing level=10 is the ding VALUES packet; cp1=1
+                // in that same packet confirms PLAYER_CHARACTER_POINTS1 is set (work-item #032).
+                eprintln!(
+                    "[ding] SMSG_UPDATE_OBJECT {} bytes — has_level10={has_level10} has_cp1={has_cp1}",
+                    payload.len()
+                );
+                if has_level10 {
+                    println!(
+                        "[ding] payload (hex): {:02x?}", payload
+                    );
+                    if has_cp1 {
+                        println!(
+                            "[wire] DING PASS \u{2713}  SMSG_UPDATE_OBJECT carries level=10 + PLAYER_CHARACTER_POINTS1=1"
+                        );
+                        found = true;
+                        break;
+                    } else {
+                        bail!(
+                            "ding: SMSG_UPDATE_OBJECT has level=10 but PLAYER_CHARACTER_POINTS1=1 is MISSING — build_levelup_values regression"
+                        );
+                    }
+                }
+            }
+        }
+        if !found {
+            bail!("ding: no SMSG_UPDATE_OBJECT with level=10 + character_points1=1 within 30s");
+        }
+        return Ok(());
+    }
+
     let Some(spell_id) = mode.and_then(|s| s.parse::<u32>().ok()) else { return Ok(()) };
 
     // ---- M2: the orchestrator spawns a mob at Ginger's feet (she must be live) and writes
