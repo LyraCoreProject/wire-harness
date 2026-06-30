@@ -102,13 +102,19 @@ fn main() -> Result<()> {
                     saw_gossip = true;
                     let opts: Vec<String> =
                         g.gossips.iter().map(|o| o.message.clone()).collect();
+                    let text_id = g.title_text_id;
                     println!(
                         "[probe] SMSG_GOSSIP_MESSAGE guid={:#x} title={:#x} quests={} options={:?}",
                         g.guid.guid(),
-                        g.title_text_id,
+                        text_id,
                         g.quests.len(),
                         opts
                     );
+                    // Round-trip: query the NPC text to verify the gateway resolves the real text.
+                    match c.npc_text_query(text_id, npc) {
+                        Ok(t) => println!("[probe] SMSG_NPC_TEXT_UPDATE text_id={text_id} text={t:?}"),
+                        Err(e) => println!("[probe] NPC_TEXT_QUERY failed: {e}"),
+                    }
                 }
                 Ok(Smsg::SMSG_GOSSIP_COMPLETE) => println!("[probe] SMSG_GOSSIP_COMPLETE"),
                 Ok(Smsg::SMSG_QUESTGIVER_QUEST_LIST(_)) => println!("[probe] SMSG_QUESTGIVER_QUEST_LIST"),

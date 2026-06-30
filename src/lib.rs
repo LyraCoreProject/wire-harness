@@ -34,8 +34,8 @@ use wow_world_messages::vanilla::{
     Class, Gender, LogoutResult, Race, SpellCastTargets, SpellCastTargets_SpellCastTargetFlags,
     SpellCastTargets_SpellCastTargetFlags_Unit, WorldResult, CMSG_AUTH_SESSION, CMSG_CAST_SPELL,
     CMSG_CHAR_CREATE, CMSG_CHAR_ENUM, CMSG_GOSSIP_HELLO, CMSG_ITEM_QUERY_SINGLE,
-    CMSG_LOGOUT_REQUEST, CMSG_PLAYER_LOGIN, CMSG_REPOP_REQUEST, CMSG_SET_SELECTION,
-    SMSG_AUTH_RESPONSE,
+    CMSG_LOGOUT_REQUEST, CMSG_NPC_TEXT_QUERY, CMSG_PLAYER_LOGIN, CMSG_REPOP_REQUEST,
+    CMSG_SET_SELECTION, SMSG_AUTH_RESPONSE,
 };
 use wow_world_messages::vanilla::ClientMessage;
 use wow_world_messages::Guid;
@@ -340,6 +340,23 @@ impl WireClient {
     /// SMSG_GOSSIP_MESSAGE (its quests for a gossip+questgiver like McBride).
     pub fn gossip_hello(&mut self, npc: u64) -> Result<()> {
         self.send(&CMSG_GOSSIP_HELLO { guid: Guid::new(npc) })
+    }
+
+    /// Send `CMSG_NPC_TEXT_QUERY` for `text_id` and wait for `SMSG_NPC_TEXT_UPDATE`. Returns the
+    /// text in slot 0 (the greeting slot the gateway always fills). Used to verify per-NPC text.
+    pub fn npc_text_query(&mut self, text_id: u32, npc_guid: u64) -> Result<String> {
+        use wow_world_messages::vanilla::opcodes::ServerOpcodeMessage as Smsg;
+        self.send(&CMSG_NPC_TEXT_QUERY { text_id, guid: Guid::new(npc_guid) })?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            match self.recv()? {
+                Smsg::SMSG_NPC_TEXT_UPDATE(t) if t.text_id == text_id => {
+                    return Ok(t.texts[0].texts[0].clone());
+                }
+                _ => continue,
+            }
+        }
+        anyhow::bail!("timed out waiting for SMSG_NPC_TEXT_UPDATE(text_id={text_id})")
     }
 
     /// Send CMSG_ITEM_QUERY_SINGLE for `item_entry` and wait for the response. Returns
