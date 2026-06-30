@@ -71,18 +71,24 @@ fn main() -> Result<()> {
             .and_then(|s| s.parse().ok())
             .unwrap_or(1448); // Blackrock Gauntlets — stat_armor=105, stat_strength=3
         let want_armor: i32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(105);
-        eprintln!("[wire] query-item {entry} expecting armor={want_armor}");
-        let (armor, block, sell_price, stats) = c.query_item(entry)?;
+        // Optional 3rd arg: assert spell slot 1's id (the on-use spell that drives the green "Use:" text).
+        let want_spell: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+        eprintln!("[wire] query-item {entry} expecting armor={want_armor} spell1={want_spell}");
+        let (armor, block, sell_price, stats, spell1, trig1) = c.query_item(entry)?;
         println!(
-            "[probe] SMSG_ITEM_QUERY_SINGLE_RESPONSE item={entry} armor={armor} block={block} sell_price={sell_price} stats={stats:?}"
+            "[probe] SMSG_ITEM_QUERY_SINGLE_RESPONSE item={entry} armor={armor} block={block} sell_price={sell_price} spell1={spell1} trigger1={trig1} stats={stats:?}"
         );
         let nonzero_stats: Vec<_> = stats.iter().filter(|&&(_, v)| v != 0).collect();
         if armor != want_armor {
             eprintln!("[wire] FAIL: armor={armor}, want {want_armor}");
             std::process::exit(1);
         }
+        if want_spell != 0 && spell1 != want_spell {
+            eprintln!("[wire] FAIL: spell1={spell1}, want {want_spell}");
+            std::process::exit(1);
+        }
         println!(
-            "[wire] ITEM-QUERY PASS \u{2713}  armor={armor} block={block} sell_price={sell_price}c nonzero_stats={nonzero_stats:?}"
+            "[wire] ITEM-QUERY PASS \u{2713}  armor={armor} block={block} sell_price={sell_price}c spell1={spell1} trigger1={trig1} nonzero_stats={nonzero_stats:?}"
         );
         return Ok(());
     }
