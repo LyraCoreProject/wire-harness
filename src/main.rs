@@ -346,6 +346,29 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // ---- who probe: send CMSG_WHO (no filters) and assert SMSG_WHO lists the online char ----
+    // Usage: wire-client [account] [password] [char-name] who [want-name]
+    // Pass: SMSG_WHO.online_players >= 1 and `want-name` (default = char-name) appears in the list.
+    if mode.as_deref() == Some("who") {
+        let want_name = args.next().unwrap_or_else(|| char_name.clone());
+        eprintln!("[who] sending CMSG_WHO (no filters), expecting {want_name} in response…");
+        let (online_count, listed) = c.who_request()?;
+        println!("[probe] SMSG_WHO online_players={online_count} listed={}", listed.len());
+        for (name, level, class, race) in &listed {
+            println!("[probe]   {name} level={level} class={class} race={race}");
+        }
+        if online_count == 0 {
+            bail!("who: SMSG_WHO.online_players == 0 — no online characters (is the char in-world?)");
+        }
+        let found = listed.iter().any(|(n, _, _, _)| n.eq_ignore_ascii_case(&want_name));
+        if !found {
+            bail!("who: {want_name:?} not listed in SMSG_WHO players (listed: {listed:?})");
+        }
+        let (_, level, class, race) = listed.iter().find(|(n, _, _, _)| n.eq_ignore_ascii_case(&want_name)).unwrap();
+        println!("[wire] WHO PASS \u{2713}  SMSG_WHO online={online_count} — {want_name} listed (level={level} class={class} race={race})");
+        return Ok(());
+    }
+
     let Some(spell_id) = mode.and_then(|s| s.parse::<u32>().ok()) else { return Ok(()) };
 
     // ---- M2: the orchestrator spawns a mob at Ginger's feet (she must be live) and writes

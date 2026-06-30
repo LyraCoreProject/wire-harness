@@ -35,7 +35,7 @@ use wow_world_messages::vanilla::{
     SpellCastTargets_SpellCastTargetFlags_Unit, WorldResult, CMSG_AUTH_SESSION, CMSG_CAST_SPELL,
     CMSG_CHAR_CREATE, CMSG_CHAR_ENUM, CMSG_GOSSIP_HELLO, CMSG_ITEM_QUERY_SINGLE,
     CMSG_LOGOUT_REQUEST, CMSG_NPC_TEXT_QUERY, CMSG_PLAYER_LOGIN, CMSG_REPOP_REQUEST,
-    CMSG_SET_SELECTION, SMSG_AUTH_RESPONSE,
+    CMSG_SET_SELECTION, CMSG_WHO, SMSG_AUTH_RESPONSE,
 };
 use wow_world_messages::vanilla::ClientMessage;
 use wow_world_messages::Guid;
@@ -419,6 +419,35 @@ impl WireClient {
     /// Send CMSG_REPOP_REQUEST (empty body — release spirit on the death screen).
     pub fn repop_request(&mut self) -> Result<()> {
         self.send(&CMSG_REPOP_REQUEST {})
+    }
+
+    /// Send CMSG_WHO (empty filters — request all online players) and return the WHO response.
+    /// Returns `(online_count, [(name, level, class_int, race_int)])`.
+    pub fn who_request(&mut self) -> Result<(u32, Vec<(String, u8, u8, u8)>)> {
+        use wow_world_messages::vanilla::Level;
+        self.send(&CMSG_WHO {
+            minimum_level: Level::new(0),
+            maximum_level: Level::new(100),
+            player_name: String::new(),
+            guild_name: String::new(),
+            race_mask: 0xFFFF_FFFF,
+            class_mask: 0xFFFF_FFFF,
+            zones: vec![],
+            search_strings: vec![],
+        })?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            match self.recv()? {
+                WorldSmsg::SMSG_WHO(r) => {
+                    let players: Vec<(String, u8, u8, u8)> = r.players.iter().map(|p| {
+                        (p.name.clone(), p.level.as_int(), p.class.as_int(), p.race.as_int())
+                    }).collect();
+                    return Ok((r.online_players, players));
+                }
+                _ => continue,
+            }
+        }
+        bail!("timed out waiting for SMSG_WHO")
     }
 
     /// Cast `spell_id` at `target` guid (CMSG_CAST_SPELL with TARGET_FLAG_UNIT).
