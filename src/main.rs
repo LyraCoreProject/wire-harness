@@ -132,13 +132,20 @@ fn main() -> Result<()> {
                         items
                     );
                 }
+                Ok(Smsg::SMSG_QUESTGIVER_QUEST_DETAILS(d)) => {
+                    saw = true;
+                    println!(
+                        "[probe] SMSG_QUESTGIVER_QUEST_DETAILS quest_id={} title={:?} (INSTANT — single quest opens directly)",
+                        d.quest_id, d.title
+                    );
+                }
                 Ok(_) => {}
                 Err(_) => break,
             }
         }
         println!(
             "[probe] done — {}",
-            if saw { "gateway SENT SMSG_QUESTGIVER_QUEST_LIST" } else { "gateway sent NOTHING (handler aborted / wrong path)" }
+            if saw { "gateway answered the questgiver hello" } else { "gateway sent NOTHING (handler aborted / wrong path)" }
         );
         return Ok(());
     }
