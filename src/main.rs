@@ -8,6 +8,7 @@
 
 use anyhow::{bail, Result};
 use wire_client::{logon, WireClient};
+use wow_world_messages::vanilla::MSG_RANDOM_ROLL_Client;
 use wow_world_messages::vanilla::opcodes::ServerOpcodeMessage as Smsg;
 use wow_world_messages::vanilla::{Class, LogoutResult};
 
@@ -367,6 +368,53 @@ fn main() -> Result<()> {
         let (_, level, class, race) = listed.iter().find(|(n, _, _, _)| n.eq_ignore_ascii_case(&want_name)).unwrap();
         println!("[wire] WHO PASS \u{2713}  SMSG_WHO online={online_count} — {want_name} listed (level={level} class={class} race={race})");
         return Ok(());
+    }
+
+    // ---- roll probe: send MSG_RANDOM_ROLL_Client(1, 100) and assert MSG_RANDOM_ROLL_Server ----
+    // Usage: wire-client [account] [password] [char-name] roll [min] [max]
+    // Pass: MSG_RANDOM_ROLL_Server received with result in [min,max] and roller_guid == self_guid.
+    if mode.as_deref() == Some("roll") {
+        let min: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(1);
+        let max: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(100);
+        eprintln!("[roll] sending MSG_RANDOM_ROLL_Client(min={min}, max={max}) as guid {:#x}…", c.self_guid);
+        c.send(&MSG_RANDOM_ROLL_Client { minimum: min, maximum: max })?;
+        // MSG_RANDOM_ROLL opcode: 0x01FB (same opcode for client and server direction in vanilla)
+        const ROLL_OPCODE: u16 = 0x01FB;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut got: Option<(u32, u32, u32, u64)> = None; // (minimum, maximum, result, roller_guid)
+        while std::time::Instant::now() < deadline {
+            match c.recv_raw() {
+                Ok((opcode, payload)) => {
+                    if opcode == ROLL_OPCODE && payload.len() >= 20 {
+                        // MSG_RANDOM_ROLL_Server layout: u32 minimum, u32 maximum, u32 actual_roll, Guid (u64)
+                        let minimum = u32::from_le_bytes(payload[0..4].try_into().unwrap());
+                        let maximum = u32::from_le_bytes(payload[4..8].try_into().unwrap());
+                        let result  = u32::from_le_bytes(payload[8..12].try_into().unwrap());
+                        let roller  = u64::from_le_bytes(payload[12..20].try_into().unwrap());
+                        eprintln!("[roll] MSG_RANDOM_ROLL_Server: min={minimum} max={maximum} result={result} roller={roller:#x}");
+                        got = Some((minimum, maximum, result, roller));
+                        break;
+                    }
+                }
+                Err(e) => { eprintln!("[roll] recv error: {e}"); break; }
+            }
+        }
+        match got {
+            None => bail!("roll: no MSG_RANDOM_ROLL_Server (opcode 0x{ROLL_OPCODE:04X}) within 5s"),
+            Some((minimum, maximum, result, roller)) => {
+                if roller != c.self_guid {
+                    bail!("roll: roller_guid={roller:#x} but self_guid={:#x} (mismatch)", c.self_guid);
+                }
+                if minimum != min || maximum != max {
+                    bail!("roll: echoed range [{minimum},{maximum}], want [{min},{max}]");
+                }
+                if result < minimum || result > maximum {
+                    bail!("roll: result={result} outside range [{minimum},{maximum}]");
+                }
+                println!("[wire] ROLL PASS \u{2713}  MSG_RANDOM_ROLL_Server(min={minimum}, max={maximum}, result={result}, roller={roller:#x}) — result in range, guid matches");
+                return Ok(());
+            }
+        }
     }
 
     let Some(spell_id) = mode.and_then(|s| s.parse::<u32>().ok()) else { return Ok(()) };
