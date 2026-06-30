@@ -162,6 +162,28 @@ fn main() -> Result<()> {
         bail!("ghost-reveal: before={before} after={after} (want false->true)");
     }
 
+    // ---- stay probe: login + stay connected until a sentinel file appears, then exit Ok.
+    // Usage: wire-client [account] [password] [char-name] stay [sentinel_file]
+    // The external orchestrator writes anything to sentinel_file to signal done; we exit 0.
+    // Useful when the test only needs the character to be live in game_world_entity while an
+    // external script calls spacetime reducers (e.g. work-item #092 combat-regen probe).
+    if mode.as_deref() == Some("stay") {
+        let sentinel: String = args.next().unwrap_or_else(|| "/tmp/wc_stay_done".into());
+        let _ = std::fs::remove_file(&sentinel);
+        eprintln!("[wire] stay: draining socket until {sentinel} appears…");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while std::time::Instant::now() < deadline {
+            let _ = c.recv(); // keep gateway connection alive
+            if std::path::Path::new(&sentinel).exists() {
+                let _ = std::fs::remove_file(&sentinel);
+                println!("[wire] STAY DONE — sentinel received, exiting.");
+                return Ok(());
+            }
+        }
+        println!("[wire] STAY TIMEOUT — orchestrator did not signal within 60s.");
+        return Ok(());
+    }
+
     // ---- logout probe: assert out-of-combat logout replies Success + LOGOUT_COMPLETE ----
     // Usage: wire-client [account] [password] [char-name] logout
     // Pass: SMSG_LOGOUT_RESPONSE(Success, Instant) → SMSG_LOGOUT_COMPLETE
