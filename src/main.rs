@@ -499,6 +499,63 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // ---- bindpoint probe: assert SMSG_BINDPOINTUPDATE carries home_x/y/z (not login position) ----
+    // Usage: wire-client [account] [password] [char-name] bindpoint <home_x> <home_y> <home_z>
+    // The char must have home_* != login position (e.g. "Tester": login=(-8935, -188) home=(-8873, -134)).
+    // Pass: SMSG_BINDPOINTUPDATE.position.x == home_x (within 0.1 tolerance).
+    if mode.as_deref() == Some("bindpoint") {
+        let want_x: f32 = args.next().and_then(|s| s.parse().ok()).expect("usage: … bindpoint <home_x> <home_y> <home_z>");
+        let want_y: f32 = args.next().and_then(|s| s.parse().ok()).expect("usage: … bindpoint <home_x> <home_y> <home_z>");
+        let want_z: f32 = args.next().and_then(|s| s.parse().ok()).expect("usage: … bindpoint <home_x> <home_y> <home_z>");
+        eprintln!("[bindpoint] want home=({want_x},{want_y},{want_z}) — verifying SMSG_BINDPOINTUPDATE…");
+
+        // Re-login manually so we can capture SMSG_BINDPOINTUPDATE from the post-login burst.
+        // (The `login_as`/`player_login` helper drains the burst without exposing that packet.)
+        let (k, world_addr) = wire_client::logon(&account, &password)?;
+        let mut c2 = wire_client::WireClient::connect_world(&world_addr, &account, k)?;
+        let chars = c2.char_enum()?;
+        let guid = chars
+            .iter()
+            .find(|(_, n, _)| n.eq_ignore_ascii_case(&char_name))
+            .map(|(g, _, _)| *g)
+            .ok_or_else(|| anyhow::anyhow!("bindpoint: character {char_name:?} not found"))?;
+        eprintln!("[bindpoint] found {char_name} guid={guid}; sending CMSG_PLAYER_LOGIN…");
+        use wow_world_messages::vanilla::CMSG_PLAYER_LOGIN;
+        use wow_world_messages::vanilla::Guid;
+        c2.send(&CMSG_PLAYER_LOGIN { guid: Guid::new(guid) })?;
+
+        // Drain the login burst, capturing SMSG_BINDPOINTUPDATE.
+        let mut bind: Option<(f32, f32, f32)> = None;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if std::time::Instant::now() > deadline { break; }
+            let m = match c2.recv() { Ok(m) => m, Err(_) => break };
+            if let Smsg::SMSG_BINDPOINTUPDATE(b) = &m {
+                bind = Some((b.position.x, b.position.y, b.position.z));
+                eprintln!("[bindpoint] SMSG_BINDPOINTUPDATE: x={} y={} z={}", b.position.x, b.position.y, b.position.z);
+            }
+            // Stop after the self CREATE_OBJECT arrives (burst complete).
+            if let Smsg::SMSG_UPDATE_OBJECT(u) = &m {
+                if u.objects.iter().any(|o| wire_client::create_object_guid(o) == Some(guid)) {
+                    break;
+                }
+            }
+        }
+        match bind {
+            None => anyhow::bail!("bindpoint: SMSG_BINDPOINTUPDATE never received in login burst"),
+            Some((got_x, got_y, got_z)) => {
+                eprintln!("[bindpoint] got=({got_x},{got_y},{got_z}) want=({want_x},{want_y},{want_z})");
+                if (got_x - want_x).abs() > 0.5 || (got_y - want_y).abs() > 0.5 {
+                    anyhow::bail!(
+                        "bindpoint: SMSG_BINDPOINTUPDATE carries login position, not home!\n  got  x={got_x} y={got_y} z={got_z}\n  want x={want_x} y={want_y} z={want_z}"
+                    );
+                }
+                println!("[wire] BINDPOINT PASS \u{2713}  SMSG_BINDPOINTUPDATE x={got_x} y={got_y} z={got_z} matches persisted home");
+                return Ok(());
+            }
+        }
+    }
+
     let Some(spell_id) = mode.and_then(|s| s.parse::<u32>().ok()) else { return Ok(()) };
 
     // ---- M2: the orchestrator spawns a mob at Ginger's feet (she must be live) and writes

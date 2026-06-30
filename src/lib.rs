@@ -484,7 +484,7 @@ impl WireClient {
 }
 
 /// Extract the guid from a CREATE-flavored `Object` (CreateObject / CreateObject2), else None.
-fn create_object_guid(o: &wow_world_messages::vanilla::Object) -> Option<u64> {
+pub fn create_object_guid(o: &wow_world_messages::vanilla::Object) -> Option<u64> {
     use wow_world_messages::vanilla::Object;
     match o {
         Object::CreateObject { guid3, .. } | Object::CreateObject2 { guid3, .. } => {
