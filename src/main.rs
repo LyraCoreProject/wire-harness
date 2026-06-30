@@ -108,6 +108,41 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // ---- questgiver probe: the REAL protocol a questgiver-only NPC (npc_flags=2, no GOSSIP) uses ----
+    if mode.as_deref() == Some("questgiver") {
+        let npc: u64 = args
+            .next()
+            .and_then(|s| s.parse().ok())
+            .expect("usage: … questgiver <npc_guid>");
+        eprintln!("[wire] questgiver-probe: CMSG_QUESTGIVER_HELLO -> {npc:#x}");
+        c.questgiver_hello(npc)?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let mut saw = false;
+        while std::time::Instant::now() < deadline {
+            match c.recv() {
+                Ok(Smsg::SMSG_QUESTGIVER_QUEST_LIST(q)) => {
+                    saw = true;
+                    let items: Vec<(u32, String)> =
+                        q.quest_items.iter().map(|i| (i.quest_id, i.title.clone())).collect();
+                    println!(
+                        "[probe] SMSG_QUESTGIVER_QUEST_LIST npc={:#x} title={:?} quests={} items={:?}",
+                        q.npc.guid(),
+                        q.title,
+                        q.quest_items.len(),
+                        items
+                    );
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        println!(
+            "[probe] done — {}",
+            if saw { "gateway SENT SMSG_QUESTGIVER_QUEST_LIST" } else { "gateway sent NOTHING (handler aborted / wrong path)" }
+        );
+        return Ok(());
+    }
+
     // ---- gossip probe: dump the SMSG the gateway sends for CMSG_GOSSIP_HELLO to an NPC ----
     if mode.as_deref() == Some("gossip") {
         let npc: u64 = args

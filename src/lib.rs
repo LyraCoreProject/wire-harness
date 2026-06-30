@@ -355,6 +355,12 @@ impl WireClient {
         self.send(&CMSG_GOSSIP_HELLO { guid: Guid::new(npc) })
     }
 
+    /// Right-click a QUESTGIVER-ONLY NPC (CMSG_QUESTGIVER_HELLO) — the real protocol the client uses
+    /// when an NPC has npc_flags QUESTGIVER but NOT GOSSIP (e.g. Deputy Willem). Reply: SMSG_QUESTGIVER_QUEST_LIST.
+    pub fn questgiver_hello(&mut self, npc: u64) -> Result<()> {
+        self.send(&wow_world_messages::vanilla::CMSG_QUESTGIVER_HELLO { guid: Guid::new(npc) })
+    }
+
     /// Send `CMSG_NPC_TEXT_QUERY` for `text_id` and wait for `SMSG_NPC_TEXT_UPDATE`. Returns the
     /// text in slot 0 (the greeting slot the gateway always fills). Used to verify per-NPC text.
     pub fn npc_text_query(&mut self, text_id: u32, npc_guid: u64) -> Result<String> {
