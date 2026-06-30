@@ -62,6 +62,21 @@ fn main() -> Result<()> {
         c.seen_guids.len()
     );
 
+    // ---- initial-spells probe: assert SMSG_INITIAL_SPELLS carries the given spell ids ----
+    // Usage: wire-client TEST test123 <Human char> initial-spells [id1 id2 ...]
+    // Prints the captured spellbook; with ids, exits 1 unless every id is present.
+    if mode.as_deref() == Some("initial-spells") {
+        println!("[probe] SMSG_INITIAL_SPELLS ({} spells) = {:?}", c.initial_spells.len(), c.initial_spells);
+        let want: Vec<u32> = args.by_ref().filter_map(|s| s.parse().ok()).collect();
+        let missing: Vec<u32> = want.iter().copied().filter(|id| !c.initial_spells.contains(id)).collect();
+        if !missing.is_empty() {
+            eprintln!("[wire] FAIL: missing initial spells {missing:?}");
+            std::process::exit(1);
+        }
+        println!("[wire] INITIAL-SPELLS PASS \u{2713}  all of {want:?} present");
+        return Ok(());
+    }
+
     // ---- item-query probe: assert SMSG_ITEM_QUERY_SINGLE_RESPONSE carries armor + stats ----
     // Usage: wire-client TEST test123 Ginger query-item <entry> [want_armor]
     // Exits 0 if armor == want_armor (default 105 for Blackrock Gauntlets entry 1448).

@@ -132,6 +132,8 @@ pub struct WireClient {
     pub self_guid: u64,
     /// guids seen in CREATE_OBJECT updates (mobs/peers), newest last.
     pub seen_guids: Vec<u64>,
+    /// Spell ids from SMSG_INITIAL_SPELLS, captured during the `player_login` burst drain.
+    pub initial_spells: Vec<u32>,
 }
 
 impl WireClient {
@@ -181,7 +183,7 @@ impl WireClient {
             WorldSmsg::SMSG_AUTH_RESPONSE(r) if matches!(*r, SMSG_AUTH_RESPONSE::AuthOk { .. }) => {}
             other => bail!("world auth rejected: {other}"),
         }
-        Ok(Self { stream, enc, dec, self_guid: 0, seen_guids: Vec::new() })
+        Ok(Self { stream, enc, dec, self_guid: 0, seen_guids: Vec::new(), initial_spells: Vec::new() })
     }
 
     /// Send an encrypted CMSG.
@@ -322,13 +324,23 @@ impl WireClient {
         // The burst starts with SMSG_LOGIN_VERIFY_WORLD and ends with the self CREATE_OBJECT.
         self.recv_until(|m| matches!(m, WorldSmsg::SMSG_LOGIN_VERIFY_WORLD(_)))?;
         self.self_guid = guid;
-        // Drain through the self-spawn CREATE_OBJECT so subsequent reads are gameplay traffic.
-        self.recv_until(|m| match m {
-            WorldSmsg::SMSG_UPDATE_OBJECT(u) => {
-                u.objects.iter().any(|o| create_object_guid(o) == Some(guid))
+        // Drain through the self-spawn CREATE_OBJECT so subsequent reads are gameplay traffic, capturing
+        // SMSG_INITIAL_SPELLS (the client spellbook) en route.
+        loop {
+            let m = self.recv()?;
+            match &m {
+                WorldSmsg::SMSG_INITIAL_SPELLS(s) => {
+                    self.initial_spells =
+                        s.initial_spells.iter().map(|e| u32::from(e.spell_id)).collect();
+                }
+                WorldSmsg::SMSG_UPDATE_OBJECT(u)
+                    if u.objects.iter().any(|o| create_object_guid(o) == Some(guid)) =>
+                {
+                    break
+                }
+                _ => {}
             }
-            _ => false,
-        })?;
+        }
         Ok(())
     }
 
