@@ -10,7 +10,7 @@ use anyhow::{bail, Result};
 use wire_client::{logon, WireClient};
 use wow_world_messages::vanilla::MSG_RANDOM_ROLL_Client;
 use wow_world_messages::vanilla::opcodes::ServerOpcodeMessage as Smsg;
-use wow_world_messages::vanilla::{Class, LogoutResult};
+use wow_world_messages::vanilla::{Class, LogoutResult, SMSG_MESSAGECHAT};
 
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
@@ -417,6 +417,88 @@ fn main() -> Result<()> {
         }
     }
 
+    // ---- say-range probe: verify range-gated SAY relay ----
+    // Usage: wire-client [account] [password] [char-name] say-range [listener-account] [listener-password] [listener-char]
+    // Two connections: speaker (this client) + listener. Asserts:
+    //   a) Speaker receives their OWN SAY (self-echo, always delivered).
+    //   b) Listener at >25yd does NOT receive the SAY (range gate).
+    // Chars must be pre-positioned; this test relies on the stored coordinates in game_character.
+    if mode.as_deref() == Some("say-range") {
+        let listener_account  = args.next().unwrap_or_else(|| "TEST2".into());
+        let listener_password = args.next().unwrap_or_else(|| "test123".into());
+        let listener_char     = args.next().unwrap_or_else(|| "dfsdfsd".into());
+
+        eprintln!("[say-range] speaker={char_name} listener={listener_char}");
+        eprintln!("[say-range] connecting listener as {listener_account}/{listener_char}…");
+        // Use `create_or_find_char` path for the listener. We don't know the class here, so pick
+        // Human Warrior as a safe default (the char must already exist in game_character).
+        let mut lc = WireClient::login_as(&listener_account, &listener_password, &listener_char, Class::Warrior)?;
+
+        // Drain any buffered packets from the listener before speaking.
+        let drain_deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        while std::time::Instant::now() < drain_deadline {
+            let _ = lc.recv_raw();
+        }
+
+        // Unique probe message (timestamped).
+        let probe = format!("range-probe-{}", std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
+        eprintln!("[say-range] speaker sends SAY: {probe:?}");
+        c.send_say(&probe)?;
+
+        // Assert 1: Speaker receives their OWN say (self-echo).
+        let speaker_heard = {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            let mut found = false;
+            while std::time::Instant::now() < deadline {
+                match c.recv() {
+                    Ok(Smsg::SMSG_MESSAGECHAT(m)) => {
+                        let msg_text = extract_chat_text(&m);
+                        eprintln!("[say-range] speaker got SMSG_MESSAGECHAT: {msg_text:?}");
+                        if msg_text.as_deref() == Some(probe.as_str()) {
+                            found = true;
+                            break;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+            }
+            found
+        };
+        if !speaker_heard {
+            bail!("say-range: FAIL — speaker did not receive their own SAY (self-echo broken)");
+        }
+        eprintln!("[say-range] speaker self-echo: OK");
+
+        // Assert 2: Listener at >25yd does NOT receive the SAY.
+        let listener_heard = {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            let mut found = false;
+            while std::time::Instant::now() < deadline {
+                match lc.recv() {
+                    Ok(Smsg::SMSG_MESSAGECHAT(m)) => {
+                        let msg_text = extract_chat_text(&m);
+                        eprintln!("[say-range] listener got SMSG_MESSAGECHAT: {msg_text:?}");
+                        if msg_text.as_deref() == Some(probe.as_str()) {
+                            found = true;
+                            break;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+            }
+            found
+        };
+        if listener_heard {
+            bail!("say-range: FAIL — listener received SAY despite being >25yd away (range gate not working)");
+        }
+        eprintln!("[say-range] listener (>25yd) correctly did NOT receive the SAY");
+        println!("[wire] SAY-RANGE PASS \u{2713}  speaker self-echo OK; listener >25yd silenced");
+        return Ok(());
+    }
+
     let Some(spell_id) = mode.and_then(|s| s.parse::<u32>().ok()) else { return Ok(()) };
 
     // ---- M2: the orchestrator spawns a mob at Ginger's feet (she must be live) and writes
@@ -547,5 +629,18 @@ fn main() -> Result<()> {
             eprintln!("[wire] FAIL: {f}");
         }
         bail!("M2: {} assertion(s) failed", fails.len())
+    }
+}
+
+/// Extract the message text from an SMSG_MESSAGECHAT for probe comparison.
+/// The message is in the top-level `message` field (shared across all chat types).
+fn extract_chat_text(m: &SMSG_MESSAGECHAT) -> Option<String> {
+    use wow_world_messages::vanilla::SMSG_MESSAGECHAT_ChatType;
+    // Only relay Say and Yell for the range probe; other types are out of scope.
+    match &m.chat_type {
+        SMSG_MESSAGECHAT_ChatType::Say { .. } | SMSG_MESSAGECHAT_ChatType::Yell { .. } => {
+            Some(m.message.clone())
+        }
+        _ => None,
     }
 }

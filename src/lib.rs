@@ -31,11 +31,12 @@ use wow_srp::PublicKey;
 // --- world tier ---
 use wow_world_messages::vanilla::opcodes::ServerOpcodeMessage as WorldSmsg;
 use wow_world_messages::vanilla::{
-    Class, Gender, LogoutResult, Race, SpellCastTargets, SpellCastTargets_SpellCastTargetFlags,
-    SpellCastTargets_SpellCastTargetFlags_Unit, WorldResult, CMSG_AUTH_SESSION, CMSG_CAST_SPELL,
-    CMSG_CHAR_CREATE, CMSG_CHAR_ENUM, CMSG_GOSSIP_HELLO, CMSG_ITEM_QUERY_SINGLE,
-    CMSG_LOGOUT_REQUEST, CMSG_NPC_TEXT_QUERY, CMSG_PLAYER_LOGIN, CMSG_REPOP_REQUEST,
-    CMSG_SET_SELECTION, CMSG_WHO, SMSG_AUTH_RESPONSE,
+    Class, Gender, Language, LogoutResult, Race, SpellCastTargets,
+    SpellCastTargets_SpellCastTargetFlags, SpellCastTargets_SpellCastTargetFlags_Unit, WorldResult,
+    CMSG_AUTH_SESSION, CMSG_CAST_SPELL, CMSG_CHAR_CREATE, CMSG_CHAR_ENUM, CMSG_GOSSIP_HELLO,
+    CMSG_ITEM_QUERY_SINGLE, CMSG_LOGOUT_REQUEST, CMSG_MESSAGECHAT, CMSG_MESSAGECHAT_ChatType,
+    CMSG_NPC_TEXT_QUERY, CMSG_PLAYER_LOGIN, CMSG_REPOP_REQUEST, CMSG_SET_SELECTION, CMSG_WHO,
+    SMSG_AUTH_RESPONSE,
 };
 use wow_world_messages::vanilla::ClientMessage;
 use wow_world_messages::Guid;
@@ -459,6 +460,25 @@ impl WireClient {
                     SpellCastTargets_SpellCastTargetFlags_Unit { unit_target: Guid::new(target) },
                 ),
             },
+        })
+    }
+
+    /// Send a SAY (chat_type=0) line to the world. The gateway range-gates relay
+    /// to listeners within ~25yd; the speaker always hears their own message.
+    pub fn send_say(&mut self, message: &str) -> Result<()> {
+        self.send(&CMSG_MESSAGECHAT {
+            chat_type: CMSG_MESSAGECHAT_ChatType::Say,
+            language: Language::Universal,
+            message: message.to_string(),
+        })
+    }
+
+    /// Send a YELL (chat_type=1) line to the world. Gateway range-gates to ~300yd.
+    pub fn send_yell(&mut self, message: &str) -> Result<()> {
+        self.send(&CMSG_MESSAGECHAT {
+            chat_type: CMSG_MESSAGECHAT_ChatType::Yell,
+            language: Language::Universal,
+            message: message.to_string(),
         })
     }
 }
