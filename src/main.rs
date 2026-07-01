@@ -137,6 +137,43 @@ fn main() -> Result<()> {
         bail!("PLAYED-TIME-LIVE FAIL: total did not increase across the sleep ({t1} -> {t2})");
     }
 
+    // ---- levelup-info probe: decode SMSG_LEVELUP_INFO on a REAL XP-driven ding, asserting the popup
+    // deltas (033). Signals /tmp/wc_levelup_ready, then the orchestrator grants kill-XP (through
+    // grant_xp, e.g. debug_kill_nearest) until the character dings; we decode the resulting
+    // SMSG_LEVELUP_INFO and print every field. For a mana class the mana delta must be non-zero and at
+    // least one stat delta non-zero (the pre-033 gateway hardcoded all of them 0). ----
+    // Usage: wire-client TEST test123 <char-name> levelup-info [expect_mana: 0|1 (default 1)]
+    if mode.as_deref() == Some("levelup-info") {
+        let expect_mana: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(1);
+        eprintln!("[levelup] in-world as guid {:#x}; signalling orchestrator…", c.self_guid);
+        std::fs::write("/tmp/wc_levelup_ready", "1").ok();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while std::time::Instant::now() < deadline {
+            match c.recv() {
+                Ok(Smsg::SMSG_LEVELUP_INFO(m)) => {
+                    println!(
+                        "[probe] SMSG_LEVELUP_INFO new_level={} health={} mana={} str={} agi={} sta={} int={} spi={}",
+                        m.new_level.as_int(), m.health, m.mana,
+                        m.strength, m.agility, m.stamina, m.intellect, m.spirit
+                    );
+                    let mana_ok = if expect_mana == 1 { m.mana > 0 } else { m.mana == 0 };
+                    let any_stat = m.intellect > 0 || m.spirit > 0 || m.strength > 0 || m.stamina > 0 || m.agility > 0;
+                    if mana_ok && any_stat {
+                        println!("[wire] LEVELUP-INFO PASS \u{2713}  non-zero stat deltas decoded (mana={})", m.mana);
+                        return Ok(());
+                    }
+                    bail!(
+                        "LEVELUP-INFO FAIL: deltas all zero or mana mismatch (mana={} expect_mana={expect_mana})",
+                        m.mana
+                    );
+                }
+                Ok(_) => {}
+                Err(_) => {}
+            }
+        }
+        bail!("LEVELUP-INFO FAIL: no SMSG_LEVELUP_INFO within 60s of signalling ready");
+    }
+
     // ---- questgiver probe: the REAL protocol a questgiver-only NPC (npc_flags=2, no GOSSIP) uses ----
     if mode.as_deref() == Some("questgiver") {
         let npc: u64 = args
