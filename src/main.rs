@@ -11,6 +11,8 @@ use wire_client::{logon, WireClient};
 use wow_world_messages::vanilla::MSG_RANDOM_ROLL_Client;
 use wow_world_messages::vanilla::opcodes::ServerOpcodeMessage as Smsg;
 use wow_world_messages::vanilla::{Class, LogoutResult, SMSG_MESSAGECHAT};
+use wow_world_messages::vanilla::{CMSG_TEXT_EMOTE, TextEmote};
+use wow_world_messages::Guid;
 
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
@@ -563,6 +565,53 @@ fn main() -> Result<()> {
                     bail!("roll: result={result} outside range [{minimum},{maximum}]");
                 }
                 println!("[wire] ROLL PASS \u{2713}  MSG_RANDOM_ROLL_Server(min={minimum}, max={maximum}, result={result}, roller={roller:#x}) — result in range, guid matches");
+                return Ok(());
+            }
+        }
+    }
+
+    // ---- text-emote probe: verify a TARGETED emote resolves the target's name in SMSG_TEXT_EMOTE ----
+    // Usage: wire-client [account] [password] [char-name] text-emote
+    // Self-targets (target = own guid) so a single connection exercises the full pipeline: CMSG's
+    // target guid -> send_emote reducer -> game_emote_event.target_guid -> gateway resolves via
+    // game_character -> SMSG_TEXT_EMOTE.name. Pass: SMSG_TEXT_EMOTE.name == char_name (non-empty).
+    if mode.as_deref() == Some("text-emote") {
+        eprintln!("[text-emote] sending CMSG_TEXT_EMOTE(wave, target=self {:#x})…", c.self_guid);
+        c.send(&CMSG_TEXT_EMOTE {
+            text_emote: TextEmote::Wave,
+            emote: 0,
+            target: Guid::new(c.self_guid),
+        })?;
+        // SMSG_TEXT_EMOTE opcode: 0x0105
+        const TEXT_EMOTE_OPCODE: u16 = 0x0105;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut got: Option<String> = None;
+        while std::time::Instant::now() < deadline {
+            match c.recv_raw() {
+                Ok((opcode, payload)) => {
+                    if opcode == TEXT_EMOTE_OPCODE {
+                        // guid(8) + text_emote(4) + emote(4) + SizedCString name (u32 len + bytes, no NUL)
+                        if payload.len() >= 20 {
+                            let len = u32::from_le_bytes(payload[16..20].try_into().unwrap()) as usize;
+                            let name = String::from_utf8_lossy(&payload[20..20 + len.min(payload.len().saturating_sub(20))])
+                                .trim_end_matches('\0')
+                                .to_string();
+                            eprintln!("[text-emote] SMSG_TEXT_EMOTE name={name:?}");
+                            got = Some(name);
+                        }
+                        break;
+                    }
+                }
+                Err(e) => { eprintln!("[text-emote] recv error: {e}"); break; }
+            }
+        }
+        match got {
+            None => bail!("text-emote: no SMSG_TEXT_EMOTE (opcode 0x{TEXT_EMOTE_OPCODE:04X}) within 5s"),
+            Some(name) => {
+                if name != char_name {
+                    bail!("text-emote: SMSG_TEXT_EMOTE.name={name:?}, want {char_name:?}");
+                }
+                println!("[wire] TEXT-EMOTE PASS \u{2713}  SMSG_TEXT_EMOTE.name={name:?} matches the targeted character");
                 return Ok(());
             }
         }
