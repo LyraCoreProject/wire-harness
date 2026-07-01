@@ -108,6 +108,35 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // ---- played-time probe: work-item 029 — CMSG_PLAYED_TIME -> SMSG_PLAYED_TIME (/played) ----
+    // Usage: wire-client TEST test123 <char-name> played-time
+    if mode.as_deref() == Some("played-time") {
+        eprintln!("[wire] played-time probe: CMSG_PLAYED_TIME…");
+        let (total, level) = c.played_time_request()?;
+        println!("[probe] SMSG_PLAYED_TIME total_played_time={total} level_played_time={level}");
+        println!("[wire] PLAYED-TIME PASS \u{2713}  got a reply (total={total}s)");
+        return Ok(());
+    }
+
+    // ---- played-time-live probe: two CMSG_PLAYED_TIME queries with a sleep between, asserting the
+    // second total is strictly greater — proves the live session's elapsed span is folded into the
+    // reply in real time (not just accrued at logout). ----
+    // Usage: wire-client TEST test123 <char-name> played-time-live [sleep_secs]
+    if mode.as_deref() == Some("played-time-live") {
+        let sleep_secs: u64 = args.next().and_then(|s| s.parse().ok()).unwrap_or(3);
+        let (t1, _) = c.played_time_request()?;
+        println!("[probe] first SMSG_PLAYED_TIME total_played_time={t1}");
+        eprintln!("[wire] sleeping {sleep_secs}s…");
+        std::thread::sleep(std::time::Duration::from_secs(sleep_secs));
+        let (t2, _) = c.played_time_request()?;
+        println!("[probe] second SMSG_PLAYED_TIME total_played_time={t2}");
+        if t2 > t1 {
+            println!("[wire] PLAYED-TIME-LIVE PASS \u{2713}  {t1} -> {t2} (+{})", t2 - t1);
+            return Ok(());
+        }
+        bail!("PLAYED-TIME-LIVE FAIL: total did not increase across the sleep ({t1} -> {t2})");
+    }
+
     // ---- questgiver probe: the REAL protocol a questgiver-only NPC (npc_flags=2, no GOSSIP) uses ----
     if mode.as_deref() == Some("questgiver") {
         let npc: u64 = args

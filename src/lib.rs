@@ -35,7 +35,7 @@ use wow_world_messages::vanilla::{
     SpellCastTargets_SpellCastTargetFlags, SpellCastTargets_SpellCastTargetFlags_Unit, WorldResult,
     CMSG_AUTH_SESSION, CMSG_CAST_SPELL, CMSG_CHAR_CREATE, CMSG_CHAR_ENUM, CMSG_GOSSIP_HELLO,
     CMSG_ITEM_QUERY_SINGLE, CMSG_LOGOUT_REQUEST, CMSG_MESSAGECHAT, CMSG_MESSAGECHAT_ChatType,
-    CMSG_NPC_TEXT_QUERY, CMSG_PLAYER_LOGIN, CMSG_REPOP_REQUEST, CMSG_SET_SELECTION, CMSG_WHO,
+    CMSG_NPC_TEXT_QUERY, CMSG_PLAYED_TIME, CMSG_PLAYER_LOGIN, CMSG_REPOP_REQUEST, CMSG_SET_SELECTION, CMSG_WHO,
     SMSG_AUTH_RESPONSE,
 };
 use wow_world_messages::vanilla::ClientMessage;
@@ -441,6 +441,19 @@ impl WireClient {
     /// Send CMSG_REPOP_REQUEST (empty body — release spirit on the death screen).
     pub fn repop_request(&mut self) -> Result<()> {
         self.send(&CMSG_REPOP_REQUEST {})
+    }
+
+    /// Send CMSG_PLAYED_TIME (`/played`, work-item 029; empty body) and return
+    /// `(total_played_time, level_played_time)` from the SMSG_PLAYED_TIME reply.
+    pub fn played_time_request(&mut self) -> Result<(u32, u32)> {
+        self.send(&CMSG_PLAYED_TIME {})?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if let WorldSmsg::SMSG_PLAYED_TIME(p) = self.recv()? {
+                return Ok((p.total_played_time, p.level_played_time));
+            }
+        }
+        bail!("timed out waiting for SMSG_PLAYED_TIME")
     }
 
     /// Send CMSG_WHO (empty filters — request all online players) and return the WHO response.
