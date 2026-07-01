@@ -33,7 +33,7 @@ use wow_world_messages::vanilla::opcodes::ServerOpcodeMessage as WorldSmsg;
 use wow_world_messages::vanilla::{
     Class, Gender, Language, LogoutResult, Race, SpellCastTargets,
     SpellCastTargets_SpellCastTargetFlags, SpellCastTargets_SpellCastTargetFlags_Unit, WorldResult,
-    CMSG_AUTH_SESSION, CMSG_CAST_SPELL, CMSG_CHAR_CREATE, CMSG_CHAR_ENUM, CMSG_GOSSIP_HELLO,
+    CMSG_AUTH_SESSION, CMSG_CAST_SPELL, CMSG_CHAR_CREATE, CMSG_CHAR_DELETE, CMSG_CHAR_ENUM, CMSG_GOSSIP_HELLO,
     CMSG_ITEM_QUERY_SINGLE, CMSG_LOGOUT_REQUEST, CMSG_MESSAGECHAT, CMSG_MESSAGECHAT_ChatType,
     CMSG_NPC_TEXT_QUERY, CMSG_PLAYED_TIME, CMSG_PLAYER_LOGIN, CMSG_REPOP_REQUEST, CMSG_SET_SELECTION, CMSG_WHO,
     SMSG_AUTH_RESPONSE,
@@ -315,6 +315,14 @@ impl WireClient {
             .find(|(_, n, _)| n.eq_ignore_ascii_case(name))
             .map(|(g, _, _)| g)
             .ok_or_else(|| anyhow!("character {name:?} not found after create"))
+    }
+
+    /// Delete `guid` (`CMSG_CHAR_DELETE`, work-item 081) and return the resulting `WorldResult`.
+    pub fn char_delete(&mut self, guid: u64) -> Result<WorldResult> {
+        self.send(&CMSG_CHAR_DELETE { guid: Guid::new(guid) })?;
+        let m = self.recv_until(|m| matches!(m, WorldSmsg::SMSG_CHAR_DELETE(_)))?;
+        let WorldSmsg::SMSG_CHAR_DELETE(r) = m else { unreachable!() };
+        Ok(r.result)
     }
 
     /// Enter the world as `guid`, draining the post-login burst up to (and including) the

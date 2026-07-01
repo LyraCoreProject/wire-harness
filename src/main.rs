@@ -10,7 +10,7 @@ use anyhow::{bail, Result};
 use wire_client::{logon, WireClient};
 use wow_world_messages::vanilla::MSG_RANDOM_ROLL_Client;
 use wow_world_messages::vanilla::opcodes::ServerOpcodeMessage as Smsg;
-use wow_world_messages::vanilla::{Class, LogoutResult, SMSG_MESSAGECHAT};
+use wow_world_messages::vanilla::{Class, LogoutResult, WorldResult, SMSG_MESSAGECHAT};
 use wow_world_messages::vanilla::{CMSG_TEXT_EMOTE, TextEmote};
 use wow_world_messages::Guid;
 
@@ -54,6 +54,34 @@ fn main() -> Result<()> {
         }
         let desc = want.map(|w| format!("want {w}, got {got}")).unwrap_or_else(|| format!("want non-zero, got 0 (naked)"));
         bail!("char-enum-gear: {char_name} slot {slot}: {desc}");
+    }
+
+    // ---- char-delete probe: CMSG_CHAR_DELETE -> SMSG_CHAR_DELETE(success), row gone (081) ----
+    // Usage: wire-client <account> <password> <char-name-to-create-then-delete> char-delete
+    // Char-select tier only (no player_login/world-entry). Creates (or finds) a throwaway
+    // character named `char_name`, deletes it, and asserts SMSG_CHAR_DELETE(CharDeleteSuccess)
+    // AND that a follow-up CMSG_CHAR_ENUM no longer lists that guid. The gateway's own DB-row
+    // check (game_character gone + no owned item/quest/spell rows) is verified separately via
+    // `spacetime sql`.
+    if mode.as_deref() == Some("char-delete") {
+        eprintln!("[wire] char-delete probe: logon + char-select only (no world entry)…");
+        let (k, world_addr) = logon(&account, &password)?;
+        let mut c2 = WireClient::connect_world(&world_addr, &account, k)?;
+        let guid = c2.create_or_find_char(&char_name, Class::Warrior)?;
+        eprintln!("[wire] deleting {char_name} (guid={guid})…");
+        let result = c2.char_delete(guid)?;
+        println!("[probe] SMSG_CHAR_DELETE result={result:?}");
+        if result != WorldResult::CharDeleteSuccess {
+            bail!("char-delete: SMSG_CHAR_DELETE result={result:?}, want CharDeleteSuccess");
+        }
+        let remaining = c2.char_enum()?;
+        if remaining.iter().any(|(g, _, _)| *g == guid) {
+            bail!("char-delete: guid={guid} still present in CMSG_CHAR_ENUM after delete");
+        }
+        println!(
+            "[wire] CHAR-DELETE PASS \u{2713}  SMSG_CHAR_DELETE(CharDeleteSuccess); guid={guid} no longer in SMSG_CHAR_ENUM"
+        );
+        return Ok(());
     }
 
     eprintln!("[wire] logon + world handshake as {account} -> char {char_name}…");
