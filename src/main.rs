@@ -673,6 +673,10 @@ fn main() -> Result<()> {
     let mut dmg: Option<u32> = None;
     let mut cooldown = false;
     let mut failure: Option<u32> = None;
+    // #084 timing probe: elapsed wall-clock between SMSG_SPELL_GO and SMSG_SPELLNONMELEEDAMAGELOG —
+    // a projectile spell should show a measurable gap (~distance/missile_speed), not 0ms.
+    let mut go_at: Option<std::time::Instant> = None;
+    let mut dmg_delay_ms: Option<u128> = None;
     // WIRE_EXPECT_INTERRUPT: the caster is meant to be hit mid-cast → assert SMSG_SPELL_FAILURE + no GO
     // (the cast-interrupt relay), instead of the normal START->GO->COOLDOWN completion.
     let expect_interrupt = std::env::var("WIRE_EXPECT_INTERRUPT").is_ok();
@@ -697,8 +701,14 @@ fn main() -> Result<()> {
                 go_spell = Some(g.spell);
                 go_hits = g.hits.iter().map(|h| h.guid()).collect();
                 go_unit = g.targets.target_flags.get_unit().map(|u| u.unit_target.guid());
+                go_at = Some(std::time::Instant::now());
             }
-            Smsg::SMSG_SPELLNONMELEEDAMAGELOG(d) => dmg = Some(d.damage),
+            Smsg::SMSG_SPELLNONMELEEDAMAGELOG(d) => {
+                dmg = Some(d.damage);
+                if let Some(t0) = go_at {
+                    dmg_delay_ms = Some(t0.elapsed().as_millis());
+                }
+            }
             Smsg::SMSG_SPELL_FAILURE(f) => {
                 failure = Some(f.spell);
                 if expect_interrupt {
@@ -707,7 +717,13 @@ fn main() -> Result<()> {
             }
             Smsg::SMSG_SPELL_COOLDOWN(_) => {
                 cooldown = true;
-                break;
+                // #084: a projectile's damage log now arrives AFTER the missile travel time, which can be
+                // later than SMSG_SPELL_COOLDOWN (cooldown still starts at cast-GO, unaffected). Don't break
+                // here if we haven't seen the damage log yet — keep draining until the wall-clock deadline
+                // so the GO->dmg delay is still captured.
+                if dmg.is_some() || dmg_delay_ms.is_some() {
+                    break;
+                }
             }
             Smsg::SMSG_CAST_RESULT(r) => bail!("cast REJECTED by server (bad target/gate): {r:?}"),
             _ => {}
@@ -760,10 +776,22 @@ fn main() -> Result<()> {
     if !cooldown {
         fails.push("missing SMSG_SPELL_COOLDOWN (lock release)".into());
     }
+    // #084 regression guard: this mode always casts a projectile spell (default Shadow Bolt) at a
+    // DISTINCT target several yards away (test-cast-flow.sh spawns the mob 8yd out), so the
+    // GO->damage-log gap must be a measurable delay, not the ~0ms an instant-damage regression would
+    // produce. Threshold is well below the ~381ms expected at 8yd/21yps, just above scheduler jitter.
+    const MIN_PROJECTILE_DELAY_MS: u128 = 150;
+    match dmg_delay_ms {
+        Some(d) if d < MIN_PROJECTILE_DELAY_MS => fails.push(format!(
+            "GO->dmg delay={d}ms, want >= {MIN_PROJECTILE_DELAY_MS}ms — damage landed near-instantly (projectile impact-delay regression)"
+        )),
+        None => fails.push("no SMSG_SPELLNONMELEEDAMAGELOG observed after SMSG_SPELL_GO — cannot measure projectile impact delay".into()),
+        Some(_) => {}
+    }
 
     if fails.is_empty() {
         println!(
-            "[wire] M2 PASS \u{2713}  START(1700) -> GO(unit={mob:#x}, hits=[mob], spell={spell_id}) [no 2nd START] -> dmg={dmg:?} -> COOLDOWN"
+            "[wire] M2 PASS \u{2713}  START(1700) -> GO(unit={mob:#x}, hits=[mob], spell={spell_id}) [no 2nd START] -> dmg={dmg:?} (GO->dmg delay={dmg_delay_ms:?}ms) -> COOLDOWN"
         );
         Ok(())
     } else {
