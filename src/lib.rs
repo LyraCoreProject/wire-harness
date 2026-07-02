@@ -134,6 +134,10 @@ pub struct WireClient {
     pub seen_guids: Vec<u64>,
     /// Spell ids from SMSG_INITIAL_SPELLS, captured during the `player_login` burst drain.
     pub initial_spells: Vec<u32>,
+    /// Per-slot (standing, flag-empty) from SMSG_INITIALIZE_FACTIONS, captured during the
+    /// `player_login` burst drain — index is the Faction.dbc reputation_index (0..63), value is
+    /// the raw i32 standing (work-item #076: relog rep-restore verification).
+    pub init_factions: Vec<i32>,
 }
 
 impl WireClient {
@@ -183,7 +187,15 @@ impl WireClient {
             WorldSmsg::SMSG_AUTH_RESPONSE(r) if matches!(*r, SMSG_AUTH_RESPONSE::AuthOk { .. }) => {}
             other => bail!("world auth rejected: {other}"),
         }
-        Ok(Self { stream, enc, dec, self_guid: 0, seen_guids: Vec::new(), initial_spells: Vec::new() })
+        Ok(Self {
+            stream,
+            enc,
+            dec,
+            self_guid: 0,
+            seen_guids: Vec::new(),
+            initial_spells: Vec::new(),
+            init_factions: Vec::new(),
+        })
     }
 
     /// Send an encrypted CMSG.
@@ -340,6 +352,9 @@ impl WireClient {
                 WorldSmsg::SMSG_INITIAL_SPELLS(s) => {
                     self.initial_spells =
                         s.initial_spells.iter().map(|e| u32::from(e.spell_id)).collect();
+                }
+                WorldSmsg::SMSG_INITIALIZE_FACTIONS(f) => {
+                    self.init_factions = f.factions.iter().map(|s| s.standing as i32).collect();
                 }
                 WorldSmsg::SMSG_UPDATE_OBJECT(u)
                     if u.objects.iter().any(|o| create_object_guid(o) == Some(guid)) =>

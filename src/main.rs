@@ -107,6 +107,28 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // ---- init-factions probe: assert SMSG_INITIALIZE_FACTIONS carries a persisted standing on RELOG (076) ----
+    // Usage: wire-client TEST test123 <char-name> init-factions <reputation_index> <want_standing>
+    // `c` is already logged in once above; this probe reconnects fresh (a real relog) and re-runs
+    // player_login, so the SMSG_INITIALIZE_FACTIONS captured is the one built by the *second* login
+    // burst — exactly what a relogging client sees. Asserts slot[index] == want_standing.
+    if mode.as_deref() == Some("init-factions") {
+        let index: usize = args.next().and_then(|s| s.parse().ok()).expect("usage: init-factions <index> <want_standing>");
+        let want: i32 = args.next().and_then(|s| s.parse().ok()).expect("usage: init-factions <index> <want_standing>");
+        eprintln!("[wire] init-factions: relogging {char_name} to capture a fresh SMSG_INITIALIZE_FACTIONS…");
+        let (k2, world_addr2) = logon(&account, &password)?;
+        let mut c2 = WireClient::connect_world(&world_addr2, &account, k2)?;
+        let guid = c2.create_or_find_char(&char_name, Class::Warlock)?;
+        c2.player_login(guid)?;
+        println!("[probe] SMSG_INITIALIZE_FACTIONS ({} slots) slot[{index}]={:?}", c2.init_factions.len(), c2.init_factions.get(index));
+        let got = c2.init_factions.get(index).copied().unwrap_or(0);
+        if got != want {
+            bail!("init-factions: slot[{index}] = {got}, want {want}");
+        }
+        println!("[wire] INIT-FACTIONS PASS \u{2713}  slot[{index}] == {want} on relog");
+        return Ok(());
+    }
+
     // ---- item-query probe: assert SMSG_ITEM_QUERY_SINGLE_RESPONSE carries armor + stats ----
     // Usage: wire-client TEST test123 Ginger query-item <entry> [want_armor]
     // Exits 0 if armor == want_armor (default 105 for Blackrock Gauntlets entry 1448).
