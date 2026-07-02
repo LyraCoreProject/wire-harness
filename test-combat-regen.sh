@@ -20,7 +20,8 @@ cd "$(dirname "$0")/../.."
 
 DB=spacetime-core
 CHAR=Ginger
-CGUID=5
+CGUID=$(spacetime sql "$DB" "SELECT guid FROM game_character WHERE name = '$CHAR'" 2>&1 | grep -oE '[0-9]+' | tail -1)
+[ -z "$CGUID" ] && { echo "[test] character '$CHAR' not found in game_character" >&2; exit 1; }
 # Spell 696 (Demon Skin rank 2) has kind=169 (A_COMBAT_HEALTH_REGEN_PCT), base_points=5
 REGEN_SPELL=696
 SENTINEL=/tmp/wc_regen_done_$$
