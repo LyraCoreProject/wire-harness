@@ -12,6 +12,10 @@ use wow_world_messages::vanilla::MSG_RANDOM_ROLL_Client;
 use wow_world_messages::vanilla::opcodes::ServerOpcodeMessage as Smsg;
 use wow_world_messages::vanilla::{Class, LogoutResult, WorldResult, SMSG_MESSAGECHAT};
 use wow_world_messages::vanilla::{CMSG_TEXT_EMOTE, TextEmote};
+use wow_world_messages::vanilla::{
+    Friend_FriendStatus, CMSG_ADD_FRIEND, CMSG_ADD_IGNORE, CMSG_FRIEND_LIST,
+};
+use wow_world_base::shared::friend_result_vanilla_tbc::FriendResult;
 use wow_world_messages::Guid;
 
 fn main() -> Result<()> {
@@ -577,6 +581,155 @@ fn main() -> Result<()> {
         }
         let (_, level, class, race) = listed.iter().find(|(n, _, _, _)| n.eq_ignore_ascii_case(&want_name)).unwrap();
         println!("[wire] WHO PASS \u{2713}  SMSG_WHO online={online_count} — {want_name} listed (level={level} class={class} race={race})");
+        return Ok(());
+    }
+
+    // ---- friend probe (work-item 130): CMSG_ADD_FRIEND by name -> SMSG_FRIEND_STATUS, then
+    // CMSG_FRIEND_LIST -> SMSG_FRIEND_LIST + SMSG_IGNORE_LIST. ----
+    // Usage: wire-client [account] [password] [char-name] friend <target-name>
+    // Pass: SMSG_FRIEND_STATUS is Added(Online|Offline) carrying the target's guid, then a fresh
+    // SMSG_FRIEND_LIST lists that guid as Online (this client and the target are both connected).
+    if mode.as_deref() == Some("friend") {
+        let target_name = args.next().unwrap_or_else(|| "dfsdfsd".into());
+        eprintln!("[friend] sending CMSG_ADD_FRIEND({target_name:?})…");
+        c.send(&CMSG_ADD_FRIEND { name: target_name.clone() })?;
+        // Background AOI/relay traffic (nearby SMSG_UPDATE_OBJECT etc.) can interleave — loop past it.
+        let target_guid = {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let mut found = None;
+            while std::time::Instant::now() < deadline && found.is_none() {
+                match c.recv()? {
+                    Smsg::SMSG_FRIEND_STATUS(s) => {
+                        eprintln!("[friend] SMSG_FRIEND_STATUS result={:?} guid={:#x}", s.result, s.guid.guid());
+                        // `Already` is a pass too — a re-run of this probe against an already-added
+                        // friend still proves the name resolved to the right guid server-side.
+                        if !matches!(s.result, FriendResult::AddedOnline | FriendResult::AddedOffline | FriendResult::Already) {
+                            bail!("friend: add_friend({target_name:?}) returned {:?}, want Added(Online|Offline)/Already", s.result);
+                        }
+                        found = Some(s.guid.guid());
+                    }
+                    _ => {}
+                }
+            }
+            found.ok_or_else(|| anyhow::anyhow!("friend: timed out waiting for SMSG_FRIEND_STATUS"))?
+        };
+
+        eprintln!("[friend] sending CMSG_FRIEND_LIST…");
+        c.send(&CMSG_FRIEND_LIST {})?;
+        let mut got_list = false;
+        let mut got_ignore = false;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline && !(got_list && got_ignore) {
+            match c.recv()? {
+                Smsg::SMSG_FRIEND_LIST(l) => {
+                    got_list = true;
+                    let row = l.friends.iter().find(|f| f.guid.guid() == target_guid);
+                    match row {
+                        Some(f) => eprintln!("[friend] SMSG_FRIEND_LIST: guid={target_guid:#x} status={}", f.status),
+                        None => bail!("friend: SMSG_FRIEND_LIST doesn't carry guid {target_guid:#x} (rows: {})", l.friends.len()),
+                    }
+                    let is_online = matches!(row.unwrap().status, Friend_FriendStatus::Online { .. });
+                    if !is_online {
+                        bail!("friend: SMSG_FRIEND_LIST carries guid {target_guid:#x} as {:?}, want Online (both clients are connected)", row.unwrap().status);
+                    }
+                }
+                Smsg::SMSG_IGNORE_LIST(_) => got_ignore = true,
+                _ => {}
+            }
+        }
+        if !got_list {
+            bail!("friend: timed out waiting for SMSG_FRIEND_LIST");
+        }
+        println!("[wire] FRIEND PASS \u{2713}  add_friend({target_name:?}) -> guid {target_guid:#x}; SMSG_FRIEND_LIST carries them Online");
+        return Ok(());
+    }
+
+    // ---- ignore-whisper probe (work-item 130): the IGNORER (this client) adds the SPEAKER to their
+    // ignore list, then the speaker whispers a unique probe line — assert it NEVER arrives. ----
+    // Usage: wire-client [account] [password] [char-name] ignore-whisper <speaker-account> <speaker-password> <speaker-char>
+    // Pass: SMSG_FRIEND_STATUS(IgnoreAdded) for the speaker's guid, then no SMSG_MESSAGECHAT Whisper
+    // carrying the probe text reaches this (ignoring) client within the wait window.
+    if mode.as_deref() == Some("ignore-whisper") {
+        let speaker_account = args.next().unwrap_or_else(|| "TEST2".into());
+        let speaker_password = args.next().unwrap_or_else(|| "test123".into());
+        let speaker_char = args.next().unwrap_or_else(|| "dfsdfsd".into());
+
+        eprintln!("[ignore-whisper] ignorer={char_name} sending CMSG_ADD_IGNORE({speaker_char:?})…");
+        c.send(&CMSG_ADD_IGNORE { name: speaker_char.clone() })?;
+        {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let mut got = false;
+            while std::time::Instant::now() < deadline && !got {
+                match c.recv()? {
+                    Smsg::SMSG_FRIEND_STATUS(s) => {
+                        eprintln!("[ignore-whisper] SMSG_FRIEND_STATUS result={:?} guid={:#x}", s.result, s.guid.guid());
+                        if s.result != FriendResult::IgnoreAdded {
+                            bail!("ignore-whisper: add_ignore({speaker_char:?}) returned {:?}, want IgnoreAdded", s.result);
+                        }
+                        got = true;
+                    }
+                    _ => {}
+                }
+            }
+            if !got {
+                bail!("ignore-whisper: timed out waiting for SMSG_FRIEND_STATUS");
+            }
+        }
+
+        // Drain anything already buffered before the speaker connects/whispers.
+        let drain_deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
+        while std::time::Instant::now() < drain_deadline {
+            let _ = c.recv_raw();
+        }
+
+        eprintln!("[ignore-whisper] connecting speaker as {speaker_account}/{speaker_char}…");
+        let mut sc = WireClient::login_as(&speaker_account, &speaker_password, &speaker_char, Class::Warrior)?;
+        let probe = format!("ignore-probe-{}", std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
+        eprintln!("[ignore-whisper] speaker whispers {char_name:?}: {probe:?}");
+        sc.send(&wow_world_messages::vanilla::CMSG_MESSAGECHAT {
+            chat_type: wow_world_messages::vanilla::CMSG_MESSAGECHAT_ChatType::Whisper { target_player: char_name.clone() },
+            language: wow_world_messages::vanilla::Language::Universal,
+            message: probe.clone(),
+        })?;
+
+        // The speaker still gets their own "To <ignorer>: ..." echo — drain it, not asserted here.
+        let echo_deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while std::time::Instant::now() < echo_deadline {
+            match sc.recv() {
+                Ok(Smsg::SMSG_MESSAGECHAT(m)) => {
+                    eprintln!("[ignore-whisper] speaker echo: {:?}", extract_chat_text(&m));
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+
+        // Assert: the ignorer never receives the probe whisper.
+        let ignorer_heard = {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            let mut found = false;
+            while std::time::Instant::now() < deadline {
+                match c.recv() {
+                    Ok(Smsg::SMSG_MESSAGECHAT(m)) => {
+                        let msg_text = extract_chat_text(&m);
+                        eprintln!("[ignore-whisper] ignorer got SMSG_MESSAGECHAT: {msg_text:?}");
+                        if msg_text.as_deref() == Some(probe.as_str()) {
+                            found = true;
+                            break;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+            }
+            found
+        };
+        if ignorer_heard {
+            bail!("ignore-whisper: FAIL — ignorer received the whisper despite ignoring the sender");
+        }
+        println!("[wire] IGNORE-WHISPER PASS \u{2713}  {speaker_char} added to ignore; whisper from them never arrived");
         return Ok(());
     }
 

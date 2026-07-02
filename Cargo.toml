@@ -13,4 +13,6 @@ publish = false
 wow_srp = "0.7"
 wow_login_messages = { version = "0.5", features = ["sync"] }
 wow_world_messages = { version = "0.3", features = ["vanilla", "sync"] }
+# Only needed to name `FriendResult` (SMSG_FRIEND_STATUS's result field) — see gateway/Cargo.toml.
+wow_world_base = "0.3"
 anyhow = "1"
