@@ -278,6 +278,15 @@ t_levelup_info() {
   return $rc
 }
 
+# ---- multi-client AOI/relay regression + soak (work-item 141) ----
+t_aoi_relay() {
+  [ "${GW_AOI:-1}" = "1" ] || skip "gateway must run with GW_AOI=1 (grid-scoped subscriptions) for the AOI boundary assertions"
+  bash tools/wire-client/test-aoi-relay.sh
+}
+# Suite gate runs a 60s soak (SOAK_SECS overrides); the >=10-minute acceptance run is recorded in
+# the 141 resolution — a 10-minute wait per suite iteration would make the gate impractical.
+t_soak() { SOAK_SECS="${SOAK_SECS:-60}" bash tools/wire-client/test-soak.sh; }
+
 # ---- scenario runner (work-item 140): the four multi-step gameplay flows ----
 t_scenario_quest()  { bash tools/wire-client/test-scenario-quest.sh; }
 t_scenario_vendor() { bash tools/wire-client/test-scenario-vendor.sh; }
@@ -291,6 +300,7 @@ ALL_TESTS=(
   persist_health repop_delay ding combat_regen cast_flow cast_interrupt ghost_reveal
   init_factions levelup_info
   scenario_quest scenario_vendor scenario_train scenario_death
+  aoi_relay soak
 )
 START=$(date +%s)
 for t in "${ALL_TESTS[@]}"; do run_test "$t"; done

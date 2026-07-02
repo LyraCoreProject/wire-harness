@@ -1314,6 +1314,209 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // ===============================================================================
+    //  Multi-client AOI/relay regression + soak (work-item 141)
+    // ===============================================================================
+
+    // ---- aoi-observer <peer_guid> <cmd_file> <ack_file>: command-driven event assertions ----
+    // The orchestrator writes a command into cmd_file ("expect-create" / "expect-move" /
+    // "expect-destroy" / "done"); the observer satisfies it against the live packet stream within
+    // 30s and answers "OK <cmd>" or "FAIL <cmd>" in ack_file. Login-time precondition: the peer
+    // must NOT be visible (it starts outside the 125yd AOI box).
+    if mode.as_deref() == Some("aoi-observer") {
+        let peer: u64 = args.next().and_then(|s| s.parse().ok()).expect("peer guid");
+        let cmd_file: String = args.next().unwrap_or_else(|| "/tmp/ws_aoi_cmd".into());
+        let ack_file: String = args.next().unwrap_or_else(|| "/tmp/ws_aoi_ack".into());
+        let _ = std::fs::remove_file(&cmd_file);
+        let _ = std::fs::remove_file(&ack_file);
+        if c.seen_guids.contains(&peer) {
+            bail!("aoi-observer: peer {peer:#x} already visible at login — stage it outside the AOI box first");
+        }
+        println!("[aoi] login precondition OK — peer {peer:#x} not visible (outside AOI)");
+        c.set_recv_timeout(std::time::Duration::from_millis(300))?;
+        std::fs::write("/tmp/ws_aoi_obs_ready", "1").ok();
+        let mut moves_from_peer = 0u32;
+        loop {
+            // poll for a command, draining the socket meanwhile (records CREATE guids)
+            let cmd = loop {
+                if let Ok(cmdtext) = std::fs::read_to_string(&cmd_file) {
+                    let cmdtext = cmdtext.trim().to_string();
+                    if !cmdtext.is_empty() {
+                        let _ = std::fs::remove_file(&cmd_file);
+                        break cmdtext;
+                    }
+                }
+                let _ = c.recv();
+            };
+            if cmd == "done" {
+                println!("[wire] AOI-OBSERVER PASS \u{2713}  all commanded assertions satisfied ({moves_from_peer} relayed peer moves seen)");
+                return Ok(());
+            }
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            let mut ok = false;
+            match cmd.as_str() {
+                "expect-create" => {
+                    // fresh CREATE only: clear the stale sighting so a re-enter is really asserted
+                    c.seen_guids.retain(|g| *g != peer);
+                    while std::time::Instant::now() < deadline {
+                        let _ = c.recv();
+                        if c.seen_guids.contains(&peer) { ok = true; break; }
+                    }
+                }
+                "expect-move" => {
+                    while std::time::Instant::now() < deadline && !ok {
+                        if let Ok((op, payload)) = c.recv_raw() {
+                            // MSG_MOVE_* server relays: 0x00B5..=0x00EE range; payload starts with the
+                            // mover's PACKED guid.
+                            if (0x00B5..=0x00EE).contains(&op) {
+                                if let Some(g) = read_packed_guid(&payload) {
+                                    if g == peer { moves_from_peer += 1; ok = true; }
+                                }
+                            }
+                        }
+                    }
+                }
+                "expect-destroy" => {
+                    while std::time::Instant::now() < deadline && !ok {
+                        if let Ok((op, payload)) = c.recv_raw() {
+                            // SMSG_DESTROY_OBJECT = 0x00AA, payload = plain LE u64 guid
+                            if op == 0x00AA && payload.len() >= 8 {
+                                let g = u64::from_le_bytes(payload[0..8].try_into().unwrap());
+                                if g == peer { ok = true; }
+                            }
+                        }
+                    }
+                }
+                other => {
+                    std::fs::write(&ack_file, format!("FAIL unknown-command {other}")).ok();
+                    bail!("aoi-observer: unknown command {other:?}");
+                }
+            }
+            let verdict = if ok { "OK" } else { "FAIL" };
+            println!("[aoi] {cmd} -> {verdict}");
+            std::fs::write(&ack_file, format!("{verdict} {cmd}")).ok();
+            if !ok { bail!("aoi-observer: {cmd} not satisfied within 30s"); }
+        }
+    }
+
+    // ---- aoi-mover <cmd_file>: holds a session; on "burst <x> <y> <z>" sends 10 MSG_MOVE_HEARTBEATs
+    // stepping around that position (the relay+persist path); on "exit" disconnects abruptly. ----
+    if mode.as_deref() == Some("aoi-mover") {
+        use wow_world_messages::vanilla::{MovementInfo, MovementInfo_MovementFlags, Vector3d, MSG_MOVE_HEARTBEAT_Client};
+        let cmd_file: String = args.next().unwrap_or_else(|| "/tmp/ws_aoi_mover_cmd".into());
+        let _ = std::fs::remove_file(&cmd_file);
+        c.set_recv_timeout(std::time::Duration::from_millis(300))?;
+        std::fs::write("/tmp/ws_aoi_mover_ready", "1").ok();
+        loop {
+            let _ = c.recv();
+            let Ok(cmdtext) = std::fs::read_to_string(&cmd_file) else { continue };
+            let cmdtext = cmdtext.trim().to_string();
+            if cmdtext.is_empty() { continue; }
+            let _ = std::fs::remove_file(&cmd_file);
+            if cmdtext == "exit" {
+                println!("[wire] AOI-MOVER exiting (abrupt disconnect — the observer should see DESTROY)");
+                return Ok(());
+            }
+            if let Some(rest) = cmdtext.strip_prefix("burst ") {
+                let p: Vec<f32> = rest.split_whitespace().filter_map(|t| t.parse().ok()).collect();
+                if p.len() == 3 {
+                    for i in 0..10u32 {
+                        c.send(&MSG_MOVE_HEARTBEAT_Client {
+                            info: MovementInfo {
+                                flags: MovementInfo_MovementFlags::empty(),
+                                timestamp: i * 300,
+                                position: Vector3d { x: p[0] + (i as f32) * 0.4, y: p[1], z: p[2] },
+                                orientation: 0.0,
+                                fall_time: 0.0,
+                            },
+                        })?;
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                        let _ = c.recv();
+                    }
+                    println!("[aoi-mover] burst of 10 heartbeats sent around ({}, {}, {})", p[0], p[1], p[2]);
+                }
+            }
+        }
+    }
+
+    // ---- soak <seconds> <cx> <cy> <cz>: random-walk movement heartbeats + periodic casts +
+    // engage/disengage cycles against whatever creatures are visible; prints a run summary. ----
+    if mode.as_deref() == Some("soak") {
+        use wow_world_messages::vanilla::{
+            MovementInfo, MovementInfo_MovementFlags, Vector3d, CMSG_ATTACKSTOP, CMSG_ATTACKSWING,
+            MSG_MOVE_HEARTBEAT_Client,
+        };
+        let secs: u64 = args.next().and_then(|s| s.parse().ok()).unwrap_or(600);
+        let cx: f32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(-8920.0);
+        let cy: f32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(-180.0);
+        let cz: f32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(82.0);
+        let cast_spell: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(2050);
+        // explicit engage targets (the orchestrator passes the guids it spawned); falls back to
+        // creature guids seen in the login burst
+        let targets: Vec<u64> = args.by_ref().filter_map(|s| s.parse().ok()).collect();
+        c.set_recv_timeout(std::time::Duration::from_millis(150))?;
+        let start = std::time::Instant::now();
+        let deadline = start + std::time::Duration::from_secs(secs);
+        let (mut hb, mut casts, mut engages, mut packets, mut recv_errs) = (0u64, 0u64, 0u64, 0u64, 0u64);
+        let mut rng: u64 = 0x5eed_5eed; // deterministic LCG — reproducible walk
+        let mut engaged: Option<u64> = None;
+        let (mut last_cast, mut last_engage_flip) = (std::time::Instant::now(), std::time::Instant::now());
+        while std::time::Instant::now() < deadline {
+            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let dx = ((rng >> 33) % 300) as f32 / 10.0 - 15.0;
+            let dy = ((rng >> 43) % 300) as f32 / 10.0 - 15.0;
+            c.send(&MSG_MOVE_HEARTBEAT_Client {
+                info: MovementInfo {
+                    flags: MovementInfo_MovementFlags::empty(),
+                    timestamp: hb as u32 * 400,
+                    position: Vector3d { x: cx + dx, y: cy + dy, z: cz },
+                    orientation: 0.0,
+                    fall_time: 0.0,
+                },
+            })?;
+            hb += 1;
+            if last_cast.elapsed() >= std::time::Duration::from_secs(10) {
+                c.cast_spell(cast_spell, c.self_guid)?;
+                casts += 1;
+                last_cast = std::time::Instant::now();
+            }
+            if last_engage_flip.elapsed() >= std::time::Duration::from_secs(8) {
+                match engaged.take() {
+                    Some(t) => { c.send(&CMSG_ATTACKSTOP {})?; let _ = t; }
+                    None => {
+                        // explicit target list (round-robin), else the first visible CREATURE
+                        // (HIGHGUID_UNIT = 0xF130 high bits) from the login burst
+                        let pick = if targets.is_empty() {
+                            c.seen_guids.iter().copied().find(|g| (*g >> 48) == 0xF130)
+                        } else {
+                            Some(targets[(engages as usize) % targets.len()])
+                        };
+                        if let Some(t) = pick {
+                            c.set_selection(t)?;
+                            c.send(&CMSG_ATTACKSWING { guid: Guid::new(t) })?;
+                            engages += 1;
+                            engaged = Some(t);
+                        }
+                    }
+                }
+                last_engage_flip = std::time::Instant::now();
+            }
+            // drain whatever arrived (counts decoded + undecodable-but-consumed frames alike)
+            let drain_until = std::time::Instant::now() + std::time::Duration::from_millis(250);
+            while std::time::Instant::now() < drain_until {
+                match c.recv_raw() {
+                    Ok(_) => packets += 1,
+                    Err(_) => { recv_errs += 1; break; }
+                }
+            }
+        }
+        println!(
+            "[wire] SOAK SUMMARY \u{2713}  duration={}s heartbeats={hb} casts={casts} engage_cycles={engages} packets_seen={packets} recv_timeouts={recv_errs}",
+            start.elapsed().as_secs()
+        );
+        return Ok(());
+    }
+
     // ---- bindpoint probe: assert SMSG_BINDPOINTUPDATE carries home_x/y/z (not login position) ----
     // Usage: wire-client [account] [password] [char-name] bindpoint <home_x> <home_y> <home_z>
     // The char must have home_* != login position (e.g. "Tester": login=(-8935, -188) home=(-8873, -134)).
@@ -1543,4 +1746,19 @@ fn extract_chat_text(m: &SMSG_MESSAGECHAT) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// Parse a vanilla PACKED guid from the head of a payload: mask byte, then one byte per set mask
+/// bit (LSB-first). Returns None on truncation.
+fn read_packed_guid(payload: &[u8]) -> Option<u64> {
+    let mask = *payload.first()?;
+    let mut guid: u64 = 0;
+    let mut idx = 1usize;
+    for bit in 0..8 {
+        if mask & (1 << bit) != 0 {
+            guid |= (*payload.get(idx)? as u64) << (8 * bit);
+            idx += 1;
+        }
+    }
+    Some(guid)
 }

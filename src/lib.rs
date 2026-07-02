@@ -209,6 +209,13 @@ impl WireClient {
     /// Returns `(opcode, payload_bytes)`. Advances the cipher state exactly like `recv()`,
     /// so `recv()` and `recv_raw()` can be interleaved freely — one packet at a time.
     /// Use this for packets gtker rejects (e.g. TYPE-less partial-VALUES updates).
+    /// Override the world socket's read timeout (default 10s). The soak/AOI harness modes drain on
+    /// a sub-second cadence between synthesized movement sends, so the default would stall them.
+    pub fn set_recv_timeout(&mut self, d: Duration) -> Result<()> {
+        self.stream.set_read_timeout(Some(d))?;
+        Ok(())
+    }
+
     pub fn recv_raw(&mut self) -> Result<(u16, Vec<u8>)> {
         use std::io::Read;
         let hdr = self
