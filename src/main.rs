@@ -1314,6 +1314,53 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // ---- raw-audit <seconds>: diagnostic — every SMSG_UPDATE_OBJECT frame is decode-attempted;
+    // reports created guids vs undecodable frames (gtker gaps surface here). ----
+    if mode.as_deref() == Some("raw-audit") {
+        use wow_world_messages::vanilla::opcodes::ServerOpcodeMessage;
+        let secs: u64 = args.next().and_then(|s| s.parse().ok()).unwrap_or(8);
+        println!("[audit] initial seen_guids: {:x?}", c.seen_guids);
+        c.set_recv_timeout(std::time::Duration::from_millis(500))?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+        while std::time::Instant::now() < deadline {
+            match c.recv_raw() {
+                Ok((op, payload)) => {
+                    if op == 0x00A9 {
+                        println!("[audit] UPDATE_OBJECT len={}", payload.len());
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+        return Ok(());
+    }
+
+    // ---- name-query <guid> <want_name>: CMSG_NAME_QUERY -> SMSG_NAME_QUERY_RESPONSE(name) ----
+    // (work-item 142: proves a session-less playerbot's name resolves like any player's.)
+    if mode.as_deref() == Some("name-query") {
+        use wow_world_messages::vanilla::CMSG_NAME_QUERY;
+        let guid: u64 = args.next().and_then(|s| s.parse().ok()).expect("guid");
+        let want: String = args.next().expect("want name");
+        c.send(&CMSG_NAME_QUERY { guid: Guid::new(guid) })?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            match c.recv() {
+                Ok(Smsg::SMSG_NAME_QUERY_RESPONSE(r)) => {
+                    if r.guid.guid() != guid { continue; }
+                    println!("[probe] SMSG_NAME_QUERY_RESPONSE guid={guid:#x} name={:?}", r.character_name);
+                    if r.character_name == want {
+                        println!("[wire] NAME-QUERY PASS \u{2713}  {guid:#x} resolves to {want:?}");
+                        return Ok(());
+                    }
+                    bail!("name-query: guid {guid:#x} resolved to {:?}, want {want:?}", r.character_name);
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        bail!("name-query: no SMSG_NAME_QUERY_RESPONSE for {guid:#x} within 5s");
+    }
+
     // ===============================================================================
     //  Multi-client AOI/relay regression + soak (work-item 141)
     // ===============================================================================
@@ -1354,7 +1401,21 @@ fn main() -> Result<()> {
             }
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
             let mut ok = false;
+            // a command may carry an explicit guid ("expect-seen 42") overriding the launch peer —
+            // used when the interesting guid (a freshly spawned bot) isn't known at observer start
+            let (cmd, peer) = match cmd.split_once(' ') {
+                Some((c, g)) => (c.to_string(), g.trim().parse().unwrap_or(peer)),
+                None => (cmd, peer),
+            };
             match cmd.as_str() {
+                // like expect-create but WITHOUT clearing the sighting: passes if the guid was
+                // already CREATEd (e.g. it spawned moments ago) or shows up within the window
+                "expect-seen" => {
+                    while std::time::Instant::now() < deadline {
+                        if c.seen_guids.contains(&peer) { ok = true; break; }
+                        let _ = c.recv();
+                    }
+                }
                 "expect-create" => {
                     // fresh CREATE only: clear the stale sighting so a re-enter is really asserted
                     c.seen_guids.retain(|g| *g != peer);

@@ -244,6 +244,11 @@ impl WireClient {
                     return Ok(m);
                 }
                 Err(e) => {
+                    // Diagnostic: surface every skipped (undecodable) frame when asked — the gtker
+                    // wire gaps (danger-zones §2) are otherwise silent.
+                    if std::env::var_os("WIRE_LOG_SKIPS").is_some() {
+                        eprintln!("[wire-skip] {e}");
+                    }
                     // A SOCKET timeout is terminal, not a skip: the skip loop exists for packets
                     // gtker can't decode (which fail instantly). Swallowing timeouts here made a
                     // quiet-world recv() spin up to 64 × the 10s read timeout (scenario pads with
