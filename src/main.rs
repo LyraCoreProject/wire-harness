@@ -130,8 +130,9 @@ fn main() -> Result<()> {
     }
 
     // ---- item-query probe: assert SMSG_ITEM_QUERY_SINGLE_RESPONSE carries armor + stats ----
-    // Usage: wire-client TEST test123 Ginger query-item <entry> [want_armor]
+    // Usage: wire-client TEST test123 Ginger query-item <entry> [want_armor] [want_spell] [want_bonding]
     // Exits 0 if armor == want_armor (default 105 for Blackrock Gauntlets entry 1448).
+    // want_bonding: 4th optional arg, -1 (default) = don't check (0=NoBind,1=BoP,2=BoE,3=BoU work-item 127).
     if mode.as_deref() == Some("query-item") {
         let entry: u32 = args
             .next()
@@ -140,10 +141,12 @@ fn main() -> Result<()> {
         let want_armor: i32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(105);
         // Optional 3rd arg: assert spell slot 1's id (the on-use spell that drives the green "Use:" text).
         let want_spell: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-        eprintln!("[wire] query-item {entry} expecting armor={want_armor} spell1={want_spell}");
-        let (armor, block, sell_price, stats, spell1, trig1) = c.query_item(entry)?;
+        // Optional 4th arg: assert the item-binding byte (work-item 127) — -1 skips the check.
+        let want_bonding: i32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(-1);
+        eprintln!("[wire] query-item {entry} expecting armor={want_armor} spell1={want_spell} bonding={want_bonding}");
+        let (armor, block, sell_price, stats, spell1, trig1, bonding) = c.query_item(entry)?;
         println!(
-            "[probe] SMSG_ITEM_QUERY_SINGLE_RESPONSE item={entry} armor={armor} block={block} sell_price={sell_price} spell1={spell1} trigger1={trig1} stats={stats:?}"
+            "[probe] SMSG_ITEM_QUERY_SINGLE_RESPONSE item={entry} armor={armor} block={block} sell_price={sell_price} spell1={spell1} trigger1={trig1} bonding={bonding} stats={stats:?}"
         );
         let nonzero_stats: Vec<_> = stats.iter().filter(|&&(_, v)| v != 0).collect();
         if armor != want_armor {
@@ -154,8 +157,12 @@ fn main() -> Result<()> {
             eprintln!("[wire] FAIL: spell1={spell1}, want {want_spell}");
             std::process::exit(1);
         }
+        if want_bonding >= 0 && i32::from(bonding) != want_bonding {
+            eprintln!("[wire] FAIL: bonding={bonding}, want {want_bonding}");
+            std::process::exit(1);
+        }
         println!(
-            "[wire] ITEM-QUERY PASS \u{2713}  armor={armor} block={block} sell_price={sell_price}c spell1={spell1} trigger1={trig1} nonzero_stats={nonzero_stats:?}"
+            "[wire] ITEM-QUERY PASS \u{2713}  armor={armor} block={block} sell_price={sell_price}c spell1={spell1} trigger1={trig1} bonding={bonding} nonzero_stats={nonzero_stats:?}"
         );
         return Ok(());
     }

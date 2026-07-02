@@ -402,12 +402,14 @@ impl WireClient {
     }
 
     /// Send CMSG_ITEM_QUERY_SINGLE for `item_entry` and wait for the response. Returns
-    /// `(armor, block, sell_price_copper, stats[(stat_type_int, value)])` decoded from the SMSG
-    /// reply. The server replies for any valid entry regardless of whether the character holds it.
+    /// `(armor, block, sell_price_copper, stats[(stat_type_int, value)], spell1, trigger1, bonding)`
+    /// decoded from the SMSG reply — `bonding` is the raw `Bonding` enum int (work-item 127:
+    /// 0=NoBind,1=BoP,2=BoE,3=BoU,4/5=QuestItem). The server replies for any valid entry regardless
+    /// of whether the character holds it.
     pub fn query_item(
         &mut self,
         item_entry: u32,
-    ) -> Result<(i32, u32, u32, Vec<(u8, i32)>, u32, u32)> {
+    ) -> Result<(i32, u32, u32, Vec<(u8, i32)>, u32, u32, u8)> {
         use wow_world_messages::vanilla::opcodes::ServerOpcodeMessage as Smsg;
         // The vanilla packet carries both item entry and a guid (the item object guid when the
         // client holds the item; 0 when querying "cold" without the object — both are accepted).
@@ -427,7 +429,8 @@ impl WireClient {
                     // spell slot 1 (id + ItemSpellTriggerType) — drives the client green "Use:" text.
                     let spell1 = found.spells[0].spell;
                     let trig1 = u32::from(found.spells[0].spell_trigger.as_int());
-                    return Ok((found.armor, found.block, found.sell_price.as_int(), stats, spell1, trig1));
+                    let bonding = found.bonding.as_int();
+                    return Ok((found.armor, found.block, found.sell_price.as_int(), stats, spell1, trig1, bonding));
                 }
                 _ => continue,
             }
