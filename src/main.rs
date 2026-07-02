@@ -909,6 +909,57 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // ---- inspect probe: CMSG_INSPECT -> SMSG_INSPECT(target guid) gated on range (work-item 137) ----
+    // Usage: wire-client [account] [password] [char-name] inspect <near_guid> <far_guid>
+    // `near_guid` must be an in-world player guid within 10yd of `char_name` (a real target replies
+    // SMSG_INSPECT carrying that guid); `far_guid` must be an in-world player guid beyond 10yd (the
+    // module's range gate rejects it, so the gateway sends nothing back). Guids come from
+    // `spacetime sql … "select guid, x, y, z from game_character"` — this probe only drives the wire.
+    if mode.as_deref() == Some("inspect") {
+        let near_guid: u64 = args.next().and_then(|s| s.parse().ok()).expect("usage: … inspect <near_guid> <far_guid>");
+        let far_guid: u64 = args.next().and_then(|s| s.parse().ok()).expect("usage: … inspect <near_guid> <far_guid>");
+
+        eprintln!("[inspect] sending CMSG_INSPECT for in-range guid={near_guid}…");
+        c.send(&wow_world_messages::vanilla::CMSG_INSPECT { guid: Guid::new(near_guid) })?;
+        let near_ok = {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            let mut got = None;
+            while std::time::Instant::now() < deadline && got.is_none() {
+                match c.recv() {
+                    Ok(Smsg::SMSG_INSPECT(r)) => got = Some(r.guid.guid()),
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+            }
+            got
+        };
+        if near_ok != Some(near_guid) {
+            bail!("inspect: FAIL — expected SMSG_INSPECT(guid={near_guid}) for the in-range target, got {near_ok:?}");
+        }
+        eprintln!("[inspect] in-range target: OK (SMSG_INSPECT guid={near_guid})");
+
+        eprintln!("[inspect] sending CMSG_INSPECT for out-of-range guid={far_guid}…");
+        c.send(&wow_world_messages::vanilla::CMSG_INSPECT { guid: Guid::new(far_guid) })?;
+        let far_reply = {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            let mut got = None;
+            while std::time::Instant::now() < deadline && got.is_none() {
+                match c.recv() {
+                    Ok(Smsg::SMSG_INSPECT(r)) => got = Some(r.guid.guid()),
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+            }
+            got
+        };
+        if far_reply.is_some() {
+            bail!("inspect: FAIL — got SMSG_INSPECT({far_reply:?}) for an out-of-range target (range gate not working)");
+        }
+        eprintln!("[inspect] out-of-range target correctly got no SMSG_INSPECT");
+        println!("[wire] INSPECT PASS \u{2713}  in-range={near_guid} acked; out-of-range={far_guid} silenced");
+        return Ok(());
+    }
+
     // ---- bindpoint probe: assert SMSG_BINDPOINTUPDATE carries home_x/y/z (not login position) ----
     // Usage: wire-client [account] [password] [char-name] bindpoint <home_x> <home_y> <home_z>
     // The char must have home_* != login position (e.g. "Tester": login=(-8935, -188) home=(-8873, -134)).
