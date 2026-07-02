@@ -247,11 +247,15 @@ t_ghost_reveal() {
 }
 
 t_init_factions() {
-  [ "${HAS_FACTIONS:-0}" -ge 1 ] || skip "game_faction empty — Faction.dbc import absent (importer --dbc), so no reputation-index mapping to assert"
-  # fixture on an imported node: grant a standing, then assert it on relog (index/standing args are
-  # the operator-node convention: 69 = Darnassus row, matching the 076 verification)
-  spacetime call "$DB" -- debug_grant_reputation "$GINGER" 69 100 >/dev/null 2>&1 || true
-  timeout 60 "$WC" TEST test123 Ginger init-factions 69 100
+  # Uses the scenario-fixture faction 79 (reputation_index 5 — seeded by debug_seed_scenario_fixtures,
+  # present even on a no-import sandbox). Standing accumulates across runs (quest rewards + this
+  # grant), so read the expected value back instead of hardcoding it.
+  spacetime call "$DB" -- debug_seed_scenario_fixtures >/dev/null 2>&1 || true
+  spacetime call "$DB" -- debug_grant_reputation "$GINGER" 79 100 >/dev/null 2>&1 || true
+  local want
+  want=$(sqlq "SELECT standing FROM game_player_reputation WHERE character_guid = $GINGER AND faction_id = 79" | grep -oE '\-?[0-9]+' | tail -1)
+  [ -z "$want" ] && skip "debug_grant_reputation left no game_player_reputation row for fixture faction 79"
+  timeout 60 "$WC" TEST test123 Ginger init-factions 5 "$want"
 }
 
 t_levelup_info() {
@@ -274,12 +278,19 @@ t_levelup_info() {
   return $rc
 }
 
+# ---- scenario runner (work-item 140): the four multi-step gameplay flows ----
+t_scenario_quest()  { bash tools/wire-client/test-scenario-quest.sh; }
+t_scenario_vendor() { bash tools/wire-client/test-scenario-vendor.sh; }
+t_scenario_train()  { bash tools/wire-client/test-scenario-train.sh; }
+t_scenario_death()  { bash tools/wire-client/test-scenario-death.sh; }
+
 # ---------- the run ----------
 ALL_TESTS=(
   logout who roll text_emote played_time played_time_live initial_spells char_enum_gear
   query_item char_delete bindpoint inspect friend ignore_whisper say_range move_relay
   persist_health repop_delay ding combat_regen cast_flow cast_interrupt ghost_reveal
   init_factions levelup_info
+  scenario_quest scenario_vendor scenario_train scenario_death
 )
 START=$(date +%s)
 for t in "${ALL_TESTS[@]}"; do run_test "$t"; done

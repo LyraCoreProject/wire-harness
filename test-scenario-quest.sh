@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# SCENARIO 1 — QUEST LOOP (work-item 140): accept from a live giver -> kill both objective wolves
+# with real engage/swing ticks -> loot the corpse -> turn in -> assert XP, reward item, rep, money,
+# and the rewarded quest row. Wire steps + SMSG assertions live in `wire-client scenario-quest`;
+# this orchestrator stages the fixtures, sql-asserts every server-state seam, and tears down.
+# Fixture: quest 50900 "Wolf Cull" (repeatable) from giver 51003, kill 2x Test Wolf 51000
+# (debug_seed_scenario_fixtures — idempotent mock-seed).
+set -uo pipefail
+cd "$(dirname "$0")/../.."
+source tools/wire-client/scenario-lib.sh
+scenario_preflight scenario-quest
+
+QUEST=50900; GIVER_ENTRY=51003; WOLF_ENTRY=51000
+PAD_X=-8920; PAD_Y=-180; PAD_Z=82
+
+# repeatability: drop any prior 50900 log row (failed-run residue or a rewarded repeatable row) so
+# every run exercises the identical first-accept path (hello -> QUEST_DETAILS).
+sqlq "DELETE FROM game_character_quest WHERE character_guid = $GINGER AND quest_entry = $QUEST" >/dev/null
+
+# ---- stage: park Ginger on the pad, spawn the giver + two weakened wolves at her feet ----
+stay_start TEST test123 Ginger || exit 1
+scall debug_teleport "$GINGER" 0 $PAD_X $PAD_Y $PAD_Z 0
+scall debug_set_health "$GINGER" 100000
+GIVER=$(spawn_at "$GINGER" $GIVER_ENTRY 4)
+WOLF1=$(spawn_at "$GINGER" $WOLF_ENTRY 6)
+WOLF2=$(spawn_at "$GINGER" $WOLF_ENTRY 8)
+if [ -z "$GIVER" ] || [ -z "$WOLF1" ] || [ -z "$WOLF2" ] || [ "$WOLF1" = "$WOLF2" ]; then
+  echo "[orch] fixture spawn failed (giver=$GIVER wolves=$WOLF1/$WOLF2)" >&2; stay_stop; exit 1
+fi
+# Weaken the wolves so the real swing exchange stays seconds-long (still a genuine kill-credit path).
+scall debug_set_health "$WOLF1" 10
+scall debug_set_health "$WOLF2" 10
+stay_stop
+echo "[orch] staged: giver=$GIVER wolf1=$WOLF1 wolf2=$WOLF2"
+
+# ---- baselines for the delta assertions ----
+MONEY0=$(sql1 "SELECT money FROM game_character WHERE guid = $GINGER")
+XP0=$(sql1 "SELECT xp FROM game_character WHERE guid = $GINGER")
+LEVEL0=$(sql1 "SELECT level FROM game_character WHERE guid = $GINGER")
+JERKY0=$(sqlq "SELECT stack_count FROM game_item_instance WHERE owner_guid = $GINGER AND entry = 52" | grep -oE '[0-9]+' | awk '{s+=$1} END{print s+0}')
+REP0=$(sql1 "SELECT standing FROM game_player_reputation WHERE character_guid = $GINGER AND faction_id = 79"); REP0=${REP0:-0}
+
+# ---- mid-flight watcher: the accept row must appear while the wire scenario runs ----
+(
+  for _ in $(seq 1 30); do
+    R=$(sql1 "SELECT COUNT(*) AS n FROM game_character_quest WHERE character_guid = $GINGER AND quest_entry = $QUEST AND rewarded = false")
+    [ "${R:-0}" -ge 1 ] && { echo "[orch] STEP-ASSERT OK: quest log row appeared after accept (rewarded=false)"; exit 0; }
+    sleep 1
+  done
+  echo "[orch] STEP-ASSERT FAIL: quest log row never appeared after accept" >&2
+) &
+WATCH=$!
+
+# ---- the wire scenario (SMSG assertions per step; nonzero exit = the failed step is named) ----
+timeout 240 "$WC" TEST test123 Ginger scenario-quest "$GIVER" $QUEST "$WOLF1" "$WOLF2"
+RC=$?
+wait "$WATCH" 2>/dev/null || FAILED=1
+[ $RC -ne 0 ] && { echo "[orch] wire scenario failed (rc=$RC)"; FAILED=1; }
+
+# ---- post-flow server-state assertions ----
+MONEY1=$(sql1 "SELECT money FROM game_character WHERE guid = $GINGER")
+XP1=$(sql1 "SELECT xp FROM game_character WHERE guid = $GINGER")
+JERKY1=$(sqlq "SELECT stack_count FROM game_item_instance WHERE owner_guid = $GINGER AND entry = 52" | grep -oE '[0-9]+' | awk '{s+=$1} END{print s+0}')
+REP1=$(sql1 "SELECT standing FROM game_player_reputation WHERE character_guid = $GINGER AND faction_id = 79")
+REWARDED=$(sql1 "SELECT COUNT(*) AS n FROM game_character_quest WHERE character_guid = $GINGER AND quest_entry = $QUEST AND rewarded = true")
+
+# money: +150 quest reward +25..50 looted from ONE wolf corpse (kill-XP path also pays nothing else)
+DMONEY=$(( ${MONEY1:-0} - ${MONEY0:-0} ))
+assert_ge "money delta = 150 reward + 25..50 loot" "$DMONEY" 175
+assert_lt "money delta = 150 reward + 25..50 loot" "$DMONEY" 201
+# xp: +90 (explicit reward_xp; kill XP for a grey L1 wolf at Ginger's level is 0). If the award
+# crossed a level threshold, xp wraps into the ding — a level increase is the same proof.
+LEVEL1=$(sql1 "SELECT level FROM game_character WHERE guid = $GINGER")
+if [ "${LEVEL1:-0}" -gt "${LEVEL0:-0}" ]; then
+  step_ok "xp: quest reward dinged the character (L${LEVEL0} -> L${LEVEL1})"
+else
+  assert_ge "xp delta >= 90 (quest reward)" $(( ${XP1:-0} - ${XP0:-0} )) 90
+fi
+assert_eq "reward item: +2 Tough Jerky (entry 52)" "$JERKY1" "$(( JERKY0 + 2 ))"
+assert_eq "reputation: +250 with fixture faction 79" "${REP1:-0}" "$(( REP0 + 250 ))"
+assert_ge "quest row marked rewarded" "${REWARDED:-0}" 1
+
+# ---- teardown (asserted): fixture NPCs, wolves, corpses, spawn rows all gone ----
+sqlq "DELETE FROM game_melee_attack WHERE attacker_guid = $GINGER" >/dev/null
+purge_entry $GIVER_ENTRY
+# per-guid wolf teardown — entry-wide purge would take the init-seeded demo wolf with it
+for W in "$WOLF1" "$WOLF2"; do
+  sqlq "DELETE FROM game_creature_spawn WHERE guid = $W" >/dev/null
+  sqlq "DELETE FROM game_world_entity WHERE guid = $W" >/dev/null
+done
+assert_eq "teardown: pad wolves gone" "$(sql1 "SELECT COUNT(*) AS n FROM game_world_entity WHERE guid = $WOLF1")$(sql1 "SELECT COUNT(*) AS n FROM game_world_entity WHERE guid = $WOLF2")" "00"
+sqlq "DELETE FROM game_corpse_loot WHERE corpse_guid = $WOLF1" >/dev/null
+sqlq "DELETE FROM game_corpse_loot WHERE corpse_guid = $WOLF2" >/dev/null
+# NOTE deliberately kept: the repeatable quest's log row (rewarded=true) and the granted rewards —
+# the next run re-baselines its deltas, and accept resets a rewarded repeatable row in place.
+
+if [ "$FAILED" -eq 0 ]; then echo "[scenario-quest] PASS"; exit 0; else echo "[scenario-quest] FAIL"; exit 1; fi

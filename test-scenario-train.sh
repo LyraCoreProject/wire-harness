@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# SCENARIO 3 — TRAIN-AND-CAST (work-item 140): buy a trainer spell over the wire (SMSG_TRAINER_LIST
+# -> SMSG_TRAINER_BUY_SUCCEEDED + SMSG_LEARNED_SPELL) -> cast it (SMSG_SPELL_START(1500) ->
+# SMSG_SPELL_GO) -> assert the effect landed (health rose by the heal) + money/spellbook state.
+# Fixture: the seeded Profession Trainer (51001) offers Lesser Heal (2050, 100c) via
+# debug_seed_scenario_fixtures.
+set -uo pipefail
+cd "$(dirname "$0")/../.."
+source tools/wire-client/scenario-lib.sh
+scenario_preflight scenario-train
+
+TRAINER_ENTRY=51001; SPELL=2050; CAST_MS=1500; COST=100
+PAD_X=-8880; PAD_Y=-240; PAD_Z=82
+
+# repeatability: forget the spell + normalize the purse before buying it again
+sqlq "DELETE FROM game_player_spell WHERE character_guid = $GINGER AND spell_id = $SPELL" >/dev/null
+scall debug_grant_money "$GINGER" 1000
+
+stay_start TEST test123 Ginger || exit 1
+scall debug_teleport "$GINGER" 0 $PAD_X $PAD_Y $PAD_Z 0
+TRAINER=$(spawn_at "$GINGER" $TRAINER_ENTRY 4)
+stay_stop
+if [ -z "$TRAINER" ]; then echo "[orch] trainer spawn failed" >&2; exit 1; fi
+echo "[orch] staged: trainer=$TRAINER"
+
+# ---- run the wire scenario; stage the damaged caster at its ready-handshake ----
+rm -f /tmp/ws_train_ready
+timeout 120 "$WC" TEST test123 Ginger scenario-train "$TRAINER" $SPELL $CAST_MS &
+WIRE=$!
+HEALTH0=""
+for _ in $(seq 1 30); do [ -f /tmp/ws_train_ready ] && break; sleep 1; done
+if [ -f /tmp/ws_train_ready ]; then
+  MAXHP=$(sql1 "SELECT max_health FROM game_world_entity WHERE guid = $GINGER")
+  HEALTH0=$(( ${MAXHP:-100} - 60 )) # leave a >heal-size hole so the +50 heal is unambiguous
+  scall debug_set_health "$GINGER" "$HEALTH0"
+  scall debug_set_power "$GINGER" 100 # no mana curve on a no-import sandbox -> stage the 30-mana cost
+  rm -f /tmp/ws_train_ready # signals the wire client to proceed
+else
+  echo "[orch] wire client never signalled ready" >&2; FAILED=1
+fi
+wait "$WIRE"; RC=$?
+[ $RC -ne 0 ] && { echo "[orch] wire scenario failed (rc=$RC)"; FAILED=1; }
+
+# ---- server-state assertions ----
+assert_eq "buy: money 1000 -> 900 (cost $COST)" "$(sql1 "SELECT money FROM game_character WHERE guid = $GINGER")" "900"
+assert_ge "learn: spellbook row for $SPELL exists" "$(sql1 "SELECT COUNT(*) AS n FROM game_player_spell WHERE character_guid = $GINGER AND spell_id = $SPELL")" 1
+# The heal is +50; out-of-combat regen can add a little more inside the window, so assert >= +50.
+HEALTH1=$(sql1 "SELECT health FROM game_world_entity WHERE guid = $GINGER")
+[ -z "$HEALTH1" ] && HEALTH1=$(sql1 "SELECT health FROM game_character WHERE guid = $GINGER") # logged out already
+assert_ge "cast effect: health rose by >= the 50 heal" "$(( ${HEALTH1:-0} - ${HEALTH0:-0} ))" 50
+
+# ---- teardown (asserted): the pad trainer only (the seeded start-area trainer stays) ----
+sqlq "DELETE FROM game_creature_spawn WHERE entry = $TRAINER_ENTRY AND x > -8890" >/dev/null
+sqlq "DELETE FROM game_world_entity WHERE guid = ${TRAINER:-0}" >/dev/null
+scall debug_grant_money "$GINGER" 0
+assert_eq "teardown: pad trainer gone" "$(sql1 "SELECT COUNT(*) AS n FROM game_world_entity WHERE guid = ${TRAINER:-0}")" "0"
+
+if [ "$FAILED" -eq 0 ]; then echo "[scenario-train] PASS"; exit 0; else echo "[scenario-train] FAIL"; exit 1; fi

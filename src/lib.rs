@@ -237,6 +237,18 @@ impl WireClient {
                     return Ok(m);
                 }
                 Err(e) => {
+                    // A SOCKET timeout is terminal, not a skip: the skip loop exists for packets
+                    // gtker can't decode (which fail instantly). Swallowing timeouts here made a
+                    // quiet-world recv() spin up to 64 × the 10s read timeout (scenario pads with
+                    // nothing moving nearby hit this as a ten-minute hang).
+                    let msg = e.to_string().to_lowercase();
+                    // Linux EAGAIN reads "resource temporarily unavailable" (os error 11).
+                    if msg.contains("timed out")
+                        || msg.contains("would block")
+                        || msg.contains("temporarily unavailable")
+                    {
+                        return Err(anyhow!("recv: socket read timeout: {e}"));
+                    }
                     skipped += 1;
                     if skipped > 64 {
                         return Err(anyhow!("recv: stream desync/closed after 64 skips: {e}"));
