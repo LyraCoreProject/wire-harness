@@ -1335,6 +1335,193 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // ===============================================================================
+    //  Party/group flows (work-item 066)
+    // ===============================================================================
+
+    // ---- group-leader <target_name> [hold_file]: invite -> PARTY_COMMAND_RESULT(Success) ->
+    // (target accepts) SMSG_GROUP_LIST carrying the target -> write <hold_file>.ingroup -> hold the
+    // session until <hold_file> appears -> CMSG_GROUP_DISBAND -> SMSG_GROUP_DESTROYED. ----
+    if mode.as_deref() == Some("group-leader") {
+        use wow_world_messages::vanilla::{PartyResult, CMSG_GROUP_DISBAND, CMSG_GROUP_INVITE};
+        let target: String = args.next().expect("target name");
+        let hold: String = args.next().unwrap_or_else(|| "/tmp/ws_group_leader".into());
+        let _ = std::fs::remove_file(&hold);
+        let _ = std::fs::remove_file(format!("{hold}.ingroup"));
+        c.set_recv_timeout(std::time::Duration::from_millis(500))?;
+
+        c.send(&CMSG_GROUP_INVITE { name: target.clone() })?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut invited = false;
+        while std::time::Instant::now() < deadline && !invited {
+            match c.recv() {
+                Ok(Smsg::SMSG_PARTY_COMMAND_RESULT(r)) => {
+                    if r.result != PartyResult::Success {
+                        bail!("STEP 1 FAIL: SMSG_PARTY_COMMAND_RESULT {:?} (want Success)", r.result);
+                    }
+                    invited = true;
+                }
+                Ok(_) => {}
+                Err(_) => {}
+            }
+        }
+        if !invited { bail!("STEP 1 FAIL: no SMSG_PARTY_COMMAND_RESULT within 10s of CMSG_GROUP_INVITE"); }
+        println!("[group] STEP 1 OK — invite acknowledged (PARTY_COMMAND_RESULT Success)");
+
+        // The target's accept triggers the roster push: SMSG_GROUP_LIST listing the target.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let mut listed = false;
+        while std::time::Instant::now() < deadline && !listed {
+            match c.recv() {
+                Ok(Smsg::SMSG_GROUP_LIST(l)) => {
+                    let names: Vec<String> = l.members.iter().map(|m| m.name.clone()).collect();
+                    println!("[group] SMSG_GROUP_LIST members={names:?} leader={:#x}", l.leader.guid());
+                    if l.leader.guid() != c.self_guid { bail!("STEP 2 FAIL: leader {:#x} != self {:#x}", l.leader.guid(), c.self_guid); }
+                    if !names.iter().any(|n| n.eq_ignore_ascii_case(&target)) {
+                        bail!("STEP 2 FAIL: GROUP_LIST lacks {target:?} (members {names:?})");
+                    }
+                    listed = true;
+                }
+                Ok(_) => {}
+                Err(_) => {}
+            }
+        }
+        if !listed { bail!("STEP 2 FAIL: no SMSG_GROUP_LIST within 60s (did the target accept?)"); }
+        println!("[group] STEP 2 OK — SMSG_GROUP_LIST reflects the two-member party (self is leader)");
+
+        std::fs::write(format!("{hold}.ingroup"), "1").ok();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+        while std::time::Instant::now() < deadline && !std::path::Path::new(&hold).exists() {
+            let _ = c.recv();
+        }
+        if !std::path::Path::new(&hold).exists() { bail!("orchestrator never released the hold"); }
+        let _ = std::fs::remove_file(&hold);
+
+        c.send(&CMSG_GROUP_DISBAND {})?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut destroyed = false;
+        while std::time::Instant::now() < deadline && !destroyed {
+            match c.recv() {
+                Ok(Smsg::SMSG_GROUP_DESTROYED) => destroyed = true,
+                Ok(_) => {}
+                Err(_) => {}
+            }
+        }
+        if !destroyed { bail!("STEP 3 FAIL: no SMSG_GROUP_DESTROYED within 10s of CMSG_GROUP_DISBAND"); }
+        println!("[wire] GROUP-LEADER PASS \u{2713}  invite->list->hold->disband->destroyed");
+        return Ok(());
+    }
+
+    // ---- group-join [hold_file]: wait for SMSG_GROUP_INVITE -> CMSG_GROUP_ACCEPT ->
+    // SMSG_GROUP_LIST -> write <hold_file>.ingroup -> hold until <hold_file> -> expect
+    // SMSG_GROUP_DESTROYED (the leader's disband dissolves the 2-man group). ----
+    if mode.as_deref() == Some("group-join") {
+        use wow_world_messages::vanilla::CMSG_GROUP_ACCEPT;
+        let hold: String = args.next().unwrap_or_else(|| "/tmp/ws_group_join".into());
+        let _ = std::fs::remove_file(&hold);
+        let _ = std::fs::remove_file(format!("{hold}.ingroup"));
+        c.set_recv_timeout(std::time::Duration::from_millis(500))?;
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let mut inviter = String::new();
+        while std::time::Instant::now() < deadline && inviter.is_empty() {
+            match c.recv() {
+                Ok(Smsg::SMSG_GROUP_INVITE(i)) => inviter = i.name.clone(),
+                Ok(_) => {}
+                Err(_) => {}
+            }
+        }
+        if inviter.is_empty() { bail!("STEP 1 FAIL: no SMSG_GROUP_INVITE within 60s"); }
+        println!("[group] STEP 1 OK — SMSG_GROUP_INVITE from {inviter:?}; accepting");
+
+        c.send(&CMSG_GROUP_ACCEPT {})?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut listed = false;
+        while std::time::Instant::now() < deadline && !listed {
+            match c.recv() {
+                Ok(Smsg::SMSG_GROUP_LIST(l)) => {
+                    let names: Vec<String> = l.members.iter().map(|m| m.name.clone()).collect();
+                    println!("[group] SMSG_GROUP_LIST members={names:?} leader={:#x}", l.leader.guid());
+                    if !names.iter().any(|n| n.eq_ignore_ascii_case(&inviter)) {
+                        bail!("STEP 2 FAIL: GROUP_LIST lacks the inviter {inviter:?} (members {names:?})");
+                    }
+                    listed = true;
+                }
+                Ok(_) => {}
+                Err(_) => {}
+            }
+        }
+        if !listed { bail!("STEP 2 FAIL: no SMSG_GROUP_LIST within 10s of CMSG_GROUP_ACCEPT"); }
+        println!("[group] STEP 2 OK — joined; SMSG_GROUP_LIST carries the leader");
+
+        std::fs::write(format!("{hold}.ingroup"), "1").ok();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+        let mut destroyed = false;
+        while std::time::Instant::now() < deadline && !destroyed {
+            match c.recv() {
+                Ok(Smsg::SMSG_GROUP_DESTROYED) => destroyed = true,
+                Ok(_) => {}
+                Err(_) => {}
+            }
+            if std::path::Path::new(&hold).exists() {
+                // release marker seen but keep draining for the DESTROYED
+                let _ = std::fs::remove_file(&hold);
+            }
+        }
+        if !destroyed { bail!("STEP 3 FAIL: no SMSG_GROUP_DESTROYED after the leader's disband"); }
+        println!("[wire] GROUP-JOIN PASS \u{2713}  invite->accept->list->destroyed on disband");
+        return Ok(());
+    }
+
+    // ---- group-invite-expect-decline <target_name>: invite, then assert SMSG_GROUP_DECLINE. ----
+    if mode.as_deref() == Some("group-invite-expect-decline") {
+        use wow_world_messages::vanilla::{PartyResult, CMSG_GROUP_INVITE};
+        let target: String = args.next().expect("target name");
+        c.set_recv_timeout(std::time::Duration::from_millis(500))?;
+        c.send(&CMSG_GROUP_INVITE { name: target.clone() })?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let (mut acked, mut declined) = (false, false);
+        while std::time::Instant::now() < deadline && !(acked && declined) {
+            match c.recv() {
+                Ok(Smsg::SMSG_PARTY_COMMAND_RESULT(r)) => {
+                    if r.result != PartyResult::Success { bail!("invite rejected: {:?}", r.result); }
+                    acked = true;
+                }
+                Ok(Smsg::SMSG_GROUP_DECLINE(d)) => {
+                    if !d.name.eq_ignore_ascii_case(&target) { bail!("SMSG_GROUP_DECLINE from {:?}, want {target:?}", d.name); }
+                    declined = true;
+                }
+                Ok(_) => {}
+                Err(_) => {}
+            }
+        }
+        if !(acked && declined) { bail!("decline flow incomplete: acked={acked} declined={declined}"); }
+        println!("[wire] GROUP-DECLINE-FLOW PASS \u{2713}  invite acked, SMSG_GROUP_DECLINE({target}) received");
+        return Ok(());
+    }
+
+    // ---- group-decline: wait for SMSG_GROUP_INVITE, decline it. ----
+    if mode.as_deref() == Some("group-decline") {
+        use wow_world_messages::vanilla::CMSG_GROUP_DECLINE;
+        c.set_recv_timeout(std::time::Duration::from_millis(500))?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let mut invited = false;
+        while std::time::Instant::now() < deadline && !invited {
+            match c.recv() {
+                Ok(Smsg::SMSG_GROUP_INVITE(_)) => invited = true,
+                Ok(_) => {}
+                Err(_) => {}
+            }
+        }
+        if !invited { bail!("no SMSG_GROUP_INVITE within 30s"); }
+        c.send(&CMSG_GROUP_DECLINE {})?;
+        // linger briefly so the decline flushes before the socket drops
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < deadline { let _ = c.recv(); }
+        println!("[wire] GROUP-DECLINE PASS \u{2713}  invite received and declined");
+        return Ok(());
+    }
+
     // ---- name-query <guid> <want_name>: CMSG_NAME_QUERY -> SMSG_NAME_QUERY_RESPONSE(name) ----
     // (work-item 142: proves a session-less playerbot's name resolves like any player's.)
     if mode.as_deref() == Some("name-query") {
