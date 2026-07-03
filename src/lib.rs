@@ -283,6 +283,30 @@ impl WireClient {
         bail!("recv_until: predicate never matched in 256 messages")
     }
 
+    /// Read until `pred` returns `Some`, bounded by a WALL-CLOCK window (not a message count).
+    /// Socket read timeouts and undecodable packets just consume window time — a quiet stretch is
+    /// NOT terminal. This is the canonical form of the driver's "wait up to N seconds for packet X"
+    /// loops; the hand-rolled `while Instant::now() < deadline { match recv() ... }` copies kept
+    /// breeding starved-recv bugs through their ad-hoc `Err(_)` arms (`break` where a read timeout
+    /// merely means the world is quiet). Returns `None` if the window closes without a match.
+    /// Callers wanting snappy polling should `set_recv_timeout` to something short first — the
+    /// window can overshoot by up to one socket read timeout.
+    pub fn recv_for<T>(
+        &mut self,
+        window: std::time::Duration,
+        mut pred: impl FnMut(&WorldSmsg) -> Option<T>,
+    ) -> Option<T> {
+        let deadline = std::time::Instant::now() + window;
+        while std::time::Instant::now() < deadline {
+            if let Ok(m) = self.recv() {
+                if let Some(t) = pred(&m) {
+                    return Some(t);
+                }
+            }
+        }
+        None
+    }
+
     fn note_guids(&mut self, m: &WorldSmsg) {
         if let WorldSmsg::SMSG_UPDATE_OBJECT(u) = m {
             for o in &u.objects {
