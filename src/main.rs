@@ -1429,6 +1429,92 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // ---- party-bots <hold_file> <name>... : invite each named BOT (they auto-accept server-side
+    // via the on_group_invite hook — no second client), assert every invite lands Success + the
+    // final SMSG_GROUP_LIST carries ALL names, write <hold>.ingroup, hold for the orchestrator's
+    // fight phase, then disband and expect SMSG_GROUP_DESTROYED. (Work-item 148.) ----
+    if mode.as_deref() == Some("party-bots") {
+        use wow_world_messages::vanilla::{PartyResult, CMSG_GROUP_DISBAND, CMSG_GROUP_INVITE};
+        let hold: String = args.next().expect("hold file");
+        let names: Vec<String> = args.collect();
+        if names.is_empty() {
+            bail!("party-bots: need at least one bot name");
+        }
+        let _ = std::fs::remove_file(&hold);
+        let _ = std::fs::remove_file(format!("{hold}.ingroup"));
+        c.set_recv_timeout(std::time::Duration::from_millis(500))?;
+
+        let mut latest_roster: Vec<String> = Vec::new();
+        for name in &names {
+            c.send(&CMSG_GROUP_INVITE { name: name.clone() })?;
+            // Each bot accepts in the SAME transaction as the invite, so both the command result
+            // and the roster push arrive promptly; collect both before the next invite.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+            let mut acked = false;
+            let mut listed = false;
+            while std::time::Instant::now() < deadline && !(acked && listed) {
+                match c.recv() {
+                    Ok(Smsg::SMSG_PARTY_COMMAND_RESULT(r)) => {
+                        if r.result != PartyResult::Success {
+                            bail!("party-bots: invite {name:?} -> {:?} (want Success)", r.result);
+                        }
+                        acked = true;
+                    }
+                    Ok(Smsg::SMSG_GROUP_LIST(l)) => {
+                        latest_roster = l.members.iter().map(|m| m.name.clone()).collect();
+                        if l.leader.guid() != c.self_guid {
+                            bail!("party-bots: leader {:#x} != self {:#x}", l.leader.guid(), c.self_guid);
+                        }
+                        if latest_roster.iter().any(|n| n.eq_ignore_ascii_case(name)) {
+                            listed = true;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(_) => {}
+                }
+            }
+            if !acked {
+                bail!("party-bots: no SMSG_PARTY_COMMAND_RESULT for {name:?} within 15s");
+            }
+            if !listed {
+                bail!("party-bots: no SMSG_GROUP_LIST carrying {name:?} within 15s (roster {latest_roster:?})");
+            }
+            println!("[party] invited {name} — roster now {latest_roster:?}");
+        }
+        for name in &names {
+            if !latest_roster.iter().any(|n| n.eq_ignore_ascii_case(name)) {
+                bail!("party-bots: final roster {latest_roster:?} lacks {name:?}");
+            }
+        }
+        println!("[party] STEP OK — all {} bots in the roster {latest_roster:?}", names.len());
+
+        std::fs::write(format!("{hold}.ingroup"), "1").ok();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+        while std::time::Instant::now() < deadline && !std::path::Path::new(&hold).exists() {
+            let _ = c.recv();
+        }
+        if !std::path::Path::new(&hold).exists() {
+            bail!("party-bots: orchestrator never released the hold");
+        }
+        let _ = std::fs::remove_file(&hold);
+
+        c.send(&CMSG_GROUP_DISBAND {})?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut destroyed = false;
+        while std::time::Instant::now() < deadline && !destroyed {
+            match c.recv() {
+                Ok(Smsg::SMSG_GROUP_DESTROYED) => destroyed = true,
+                Ok(_) => {}
+                Err(_) => {}
+            }
+        }
+        if !destroyed {
+            bail!("party-bots: no SMSG_GROUP_DESTROYED within 10s of CMSG_GROUP_DISBAND");
+        }
+        println!("[wire] PARTY-BOTS PASS \u{2713}  {} bots invited (auto-accept) -> full roster -> hold -> disband -> destroyed", names.len());
+        return Ok(());
+    }
+
     // ---- group-join [hold_file]: wait for SMSG_GROUP_INVITE -> CMSG_GROUP_ACCEPT ->
     // SMSG_GROUP_LIST -> write <hold_file>.ingroup -> hold until <hold_file> -> expect
     // SMSG_GROUP_DESTROYED (the leader's disband dissolves the 2-man group). ----
