@@ -533,30 +533,47 @@ fn main() -> Result<()> {
         use wow_world_messages::vanilla::{MovementInfo, MovementInfo_MovementFlags, MSG_MOVE_JUMP_Client};
         use wow_world_messages::vanilla::Vector3d;
         eprintln!("[relay-sender] in-world as {} (guid {:#x}); waiting for observer…", char_name, c.self_guid);
-        // Drain + wait for observer to signal ready.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        // Drain + wait for observer to signal ready. A recv error here is NOT terminal: with no
+        // ambient packet traffic near the pad, recv_raw simply rides its 10s socket read-timeout —
+        // treating that as "break" collapsed the whole wait to a single file check and flaked the
+        // suite whenever the observer's login was still in flight. Use a short read-timeout so the
+        // ready-file poll stays responsive, and only the deadline ends the wait.
+        let _ = c.set_recv_timeout(std::time::Duration::from_millis(500));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         while std::time::Instant::now() < deadline {
-            // Keep socket drained while we wait.
-            match c.recv_raw() { Ok(_) => {} Err(_) => break }
             if std::path::Path::new("/tmp/wc_relay_ready").exists() {
                 break;
             }
+            let _ = c.recv_raw(); // keep the socket drained; Err = just the poll-interval timeout
         }
+        let _ = c.set_recv_timeout(std::time::Duration::from_secs(10));
         if !std::path::Path::new("/tmp/wc_relay_ready").exists() {
-            bail!("relay-sender: observer never became ready within 10s");
+            bail!("relay-sender: observer never became ready within 20s");
         }
         eprintln!("[relay-sender] observer ready — sending MSG_MOVE_JUMP…");
         // Send a minimal MSG_MOVE_JUMP: the char's current position (approximate), no extra flags.
         // The relay is keyed on the opcode (0xBB), not the movement flags.
-        c.send(&MSG_MOVE_JUMP_Client {
-            info: MovementInfo {
-                flags: MovementInfo_MovementFlags::empty(),
-                timestamp: 0,
-                position: Vector3d { x: -8968.0, y: -129.0, z: 83.39 },
-                orientation: 0.0,
-                fall_time: 0.0,
-            },
-        })?;
+        //
+        // Sent 3× at 2s intervals, NOT once: the observer signals ready the moment its world
+        // handshake completes, but its per-player game_movement_event SUBSCRIPTION can still be
+        // applying for a beat after that (observed as a suite-context-only B->A flake — the
+        // observer relogs fast off the previous direction's disconnect, and a single immediate
+        // jump lands before its subscription is live). Any ONE received jump proves the relay, so
+        // the retries only harden the handshake, never weaken the assertion.
+        for attempt in 0..3u32 {
+            if attempt > 0 {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+            }
+            c.send(&MSG_MOVE_JUMP_Client {
+                info: MovementInfo {
+                    flags: MovementInfo_MovementFlags::empty(),
+                    timestamp: 0,
+                    position: Vector3d { x: -8968.0, y: -129.0, z: 83.39 },
+                    orientation: 0.0,
+                    fall_time: 0.0,
+                },
+            })?;
+        }
         println!("[relay-sender] MSG_MOVE_JUMP sent; observer should receive MSG_MOVE_JUMP_Server");
         return Ok(());
     }

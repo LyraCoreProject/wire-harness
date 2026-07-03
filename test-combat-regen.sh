@@ -101,26 +101,38 @@ orchestrate() {
     fi
   fi
 
+  # Verdict goes to a SEPARATE result file — the wire client's stay mode DELETES the sentinel it
+  # watches (both at startup and on exit), so a verdict written INTO the sentinel is destroyed
+  # before the test can read it back and every run false-passed with ORCH_RC=0. The sentinel is
+  # now signal-only; the verdict survives in $RESULT_FILE.
   if [ "$pass" = "true" ]; then
-    echo "0" > "$SENTINEL"
+    echo "0" > "$RESULT_FILE"
   else
-    echo "1" > "$SENTINEL"
+    echo "1" > "$RESULT_FILE"
   fi
+  touch "$SENTINEL"
 }
+
+RESULT_FILE="${SENTINEL}.result"
+rm -f "$RESULT_FILE"
 
 orchestrate &
 ORCH=$!
 
-# Wire client "stay" mode: drains the socket until we write to the sentinel.
+# Wire client "stay" mode: drains the socket until we touch the sentinel.
 timeout 90 cargo run -q -p wire-client -- TEST test123 "$CHAR" stay "$SENTINEL"
 WC_RC=$?
 
 wait "$ORCH" 2>/dev/null || true
 
-ORCH_RC=0
-if [ -f "$SENTINEL" ]; then
-  ORCH_RC=$(cat "$SENTINEL" | tr -d '[:space:]')
-  rm -f "$SENTINEL"
+# The orchestrator's verdict is REQUIRED — a missing result file is itself a failure (it means the
+# orchestrator died before reaching a verdict), never a silent pass.
+ORCH_RC=1
+if [ -f "$RESULT_FILE" ]; then
+  ORCH_RC=$(cat "$RESULT_FILE" | tr -d '[:space:]')
+  rm -f "$RESULT_FILE"
+else
+  echo "[092] Orchestrator never wrote a verdict" >&2
 fi
 
 if [ "$WC_RC" -ne 0 ]; then

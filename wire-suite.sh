@@ -125,6 +125,7 @@ echo "[suite] fixtures: Ginger=$GINGER dfsdfsd=$DFS"
 # ---------- data-gate probes (sandbox vs fully-imported node) ----------
 HAS_SPELL_686=$(countq "game_spell WHERE spell_id = 686")
 HAS_CREATURE_103=$(countq "game_creature_template WHERE entry = 103")
+HAS_COMBAT_REGEN_EFFECT=$(countq "game_spell_effect WHERE kind = 169")
 HAS_FACTIONS=$(countq "game_faction")
 HAS_LEVEL_STATS=$(countq "game_level_stats")
 HAS_HEALER=$(countq "game_world_entity WHERE entry = 6491")
@@ -226,7 +227,16 @@ t_repop_delay() {
 }
 
 t_ding()         { bash tools/wire-client/test-ding.sh; }
-t_combat_regen() { bash tools/wire-client/test-combat-regen.sh; }
+t_combat_regen() {
+  # The probe needs a spell whose effect is kind 169 (A_COMBAT_HEALTH_REGEN_PCT). The 092-era
+  # fixture rode on Demon Skin 696 until work-item 024 reclassified its regen to A_PERIODIC_HEAL;
+  # a long-lived node kept the stale 169 row (insert-if-absent seeds), a fresh node has NONE — so
+  # the probe is data-gated exactly like the DBC-import probes (work-item filed to restore a
+  # kind-169 fixture, e.g. the Troll Regeneration racial).
+  [ "${HAS_COMBAT_REGEN_EFFECT:-0}" -ge 1 ] \
+    || skip "no kind-169 (A_COMBAT_HEALTH_REGEN_PCT) spell effect on this node — the 092 fixture went with 024's Demon-Skin reclassification; needs a kind-169 source (Troll Regeneration import or a new fixture)"
+  bash tools/wire-client/test-combat-regen.sh
+}
 
 t_cast_flow() {
   [ "${HAS_SPELL_686:-0}" -ge 1 ] && [ "${HAS_CREATURE_103:-0}" -ge 1 ] \
