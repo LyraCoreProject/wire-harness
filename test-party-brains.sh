@@ -97,9 +97,8 @@ for i in $(seq 1 20); do
   [ "${C355:-0}" -gt "${CAST_BASE_355:-0}" ] && TAUNTED=1
   [ "${C133:-0}" -gt "${CAST_BASE_133:-0}" ] && DPS_CASTS=1
   # taunt-yank evidence: at SOME sampled instant the tank is the TOP threat source on a wolf
-  # (each taunt sets it to table-max+1; core taunt has no forced-target window yet — that is a
-  # documented core follow-up in threat.rs — so a hard-nuking dps can re-overtake between ticks;
-  # the top-threat INSTANT is the deterministic, sampleable proof the yank ran)
+  # (each taunt sets it to table-max+1; the 155 forced-target window then PINS the wolf — the
+  # hold itself is asserted separately below)
   for W in "$W1" "$W2"; do
     TOPSRC=$(sqlq "SELECT source_guid, threat FROM game_threat WHERE creature_guid = $W" | sed -n '3,9p' | sort -t'|' -k2 -n | tail -1 | awk -F'|' '{gsub(/ /,"",$1); print $1}')
     [ "${TOPSRC:-x}" = "$TANK" ] && TANK_TOP=1
@@ -111,7 +110,19 @@ done
 [ "$TAUNTED" = 1 ] && step_ok "tank: Taunt 355 cast events fired" || step_fail "tank: no Taunt casts"
 assert_ge "tank: threat rows name the tank as a source" "$(sql1 "SELECT COUNT(*) AS n FROM game_threat WHERE source_guid = $TANK")" 1
 [ "$TANK_TOP" = 1 ] && step_ok "tank: taunt yank observed (tank topped a wolf's threat table)" || step_fail "tank: never became top threat on a wolf"
-[ "$ONTANK_SEEN" = 1 ] && echo "[orch] info: a wolf's melee row was observed on the tank" || echo "[orch] info: no wolf melee row sampled on the tank (taunt forced-target window is the core follow-up)"
+# 155: the taunt FORCED-TARGET window (3s) pins the taunted wolf on the tank regardless of the
+# dps out-threatening it — sample the melee table on a tight cadence and demand a >=3-sample
+# consecutive on-tank run (the pre-155 threat-top alone never held longer than a retarget tick).
+[ "$ONTANK_SEEN" = 1 ] && step_ok "tank: a wolf's melee row swung onto the tank" || step_fail "tank: no wolf melee row ever on the tank"
+RUN=0; BEST=0
+for i in $(seq 1 25); do
+  ON=$(sql1 "SELECT COUNT(*) AS n FROM game_melee_attack WHERE target_guid = $TANK")
+  if [ "${ON:-0}" -ge 1 ]; then RUN=$((RUN+1)); [ $RUN -gt $BEST ] && BEST=$RUN; else RUN=0; fi
+  [ $BEST -ge 3 ] && break
+  for M in "$TANK" "$HEAL" "$DPS" "$GINGER"; do scall debug_set_health "$M" 10000; done
+  for W in "$W1" "$W2"; do scall debug_set_health "$W" 10000; done
+done
+assert_ge "tank: taunt window HELD the wolf on the tank (consecutive on-tank samples)" "$BEST" 3
 [ "$DPS_CASTS" = 1 ] && step_ok "dps: Fireball 133 rotation fired" || step_fail "dps: no Fireball casts"
 assert_ge "dps: melee assist row armed" "$(sql1 "SELECT COUNT(*) AS n FROM game_melee_attack WHERE attacker_guid = $DPS")" 1
 

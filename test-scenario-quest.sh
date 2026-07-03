@@ -31,6 +31,12 @@ fi
 scall debug_set_health "$WOLF1" 10
 scall debug_set_health "$WOLF2" 10
 stay_stop
+# repeatability: suite combat wears the main-hand cumulatively (swings roll -1 durability, deaths
+# cost 10% max, nothing repairs it) and a 0-durability weapon swings UNARMED (combat/mod.rs) — a
+# worn sword made wolf-2's 90s window unkillable IN-SUITE while standalone reruns (after
+# scenario_death's own top-up) passed. Top it by guid (compound UPDATE no-ops).
+MH_GUID=$(sql1 "SELECT guid FROM game_item_instance WHERE owner_guid = $GINGER AND slot = 15")
+[ -n "$MH_GUID" ] && sqlq "UPDATE game_item_instance SET durability = 20 WHERE guid = $MH_GUID" >/dev/null
 echo "[orch] staged: giver=$GIVER wolf1=$WOLF1 wolf2=$WOLF2"
 
 # ---- baselines for the delta assertions ----
