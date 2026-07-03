@@ -20,28 +20,15 @@ scenario_preflight party-brains
 WOLF_ENTRY=51000
 PAD_X=-8890.0; PAD_Y=-460.0; PAD_Z=82.0
 
-# spacetime sql DELETE with a compound WHERE silently no-ops — purge per guid (146 lesson).
-purge_entry() {
-  for G in $(sqlq "SELECT guid FROM game_creature_spawn WHERE entry = $1" | grep -oE '[0-9]{6,}'); do
-    sqlq "DELETE FROM game_creature_spawn WHERE guid = $G" >/dev/null
-  done
-  for G in $(sqlq "SELECT guid FROM game_world_entity WHERE entry = $1" | grep -oE '[0-9]{6,}'); do
-    sqlq "DELETE FROM game_world_entity WHERE guid = $G" >/dev/null
-    sqlq "DELETE FROM game_corpse_loot WHERE corpse_guid = $G" >/dev/null
-  done
-}
-
 # ---- staging ----
 scall debug_seed_scenario_fixtures || true
 scall playerbots_despawn_all || true
-purge_entry $WOLF_ENTRY
+purge_entry_rows $WOLF_ENTRY
 sqlq "DELETE FROM game_melee_attack" >/dev/null
 sqlq "DELETE FROM game_group_member WHERE character_guid = $GINGER" >/dev/null
 sqlq "DELETE FROM game_group_invite WHERE target_guid = $GINGER" >/dev/null
-# Hostility needs faction data (absent on mock-seed): stage Monster(14)-vs-Player-group(1) rows,
-# removed again in teardown (146's aggro-evidence pattern).
-sqlq "INSERT INTO game_faction_template (id, faction, faction_group, friend_group, enemy_group, enemy_0, enemy_1, enemy_2, enemy_3, friend_0, friend_1, friend_2, friend_3) VALUES (14, 14, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0)" >/dev/null
-sqlq "INSERT INTO game_faction_template (id, faction, faction_group, friend_group, enemy_group, enemy_0, enemy_1, enemy_2, enemy_3, friend_0, friend_1, friend_2, friend_3) VALUES (1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0)" >/dev/null
+# Hostility on mock-seed needs staged faction rows (canonical helper; cleared in teardown).
+stage_hostility
 sqlq "UPDATE game_character SET x = $PAD_X, y = $PAD_Y, z = $PAD_Z WHERE guid = $GINGER" >/dev/null
 
 # ---- 1. spawn the role trio + kit asserts ----
@@ -191,10 +178,9 @@ case "$NEWLEAD" in "$TANK"|"$HEAL"|"$DPS") step_ok "sql: leadership transferred 
 # ---- teardown (asserted) ----
 scall playerbots_despawn_all || true
 assert_eq "teardown: bot party dissolved by the despawn sweep" "$(sql1 "SELECT COUNT(*) AS n FROM game_group")" "0"
-purge_entry $WOLF_ENTRY
+purge_entry_rows $WOLF_ENTRY
 sqlq "DELETE FROM game_melee_attack" >/dev/null
-sqlq "DELETE FROM game_faction_template WHERE id = 14" >/dev/null
-sqlq "DELETE FROM game_faction_template WHERE id = 1" >/dev/null
+clear_hostility
 rm -f "$HOLD" "$HOLD.ingroup"
 assert_eq "teardown: zero bot rows" "$(sql1 "SELECT COUNT(*) AS n FROM pkg_playerbots_bot")" "0"
 assert_eq "teardown: zero personality rows" "$(sql1 "SELECT COUNT(*) AS n FROM pkg_playerbots_personality")" "0"

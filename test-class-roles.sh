@@ -14,26 +14,16 @@ scenario_preflight class-roles
 
 WOLF=51000
 PAD_X=-8890.0; PAD_Y=-460.0; PAD_Z=82.0
-
-purge_entry() { # compound-WHERE DELETE no-ops — purge per guid (146 lesson)
-  for G in $(sqlq "SELECT guid FROM game_creature_spawn WHERE entry = $1" | grep -oE '[0-9]{6,}'); do
-    sqlq "DELETE FROM game_creature_spawn WHERE guid = $G" >/dev/null
-  done
-  for G in $(sqlq "SELECT guid FROM game_world_entity WHERE entry = $1" | grep -oE '[0-9]{6,}'); do
-    sqlq "DELETE FROM game_world_entity WHERE guid = $G" >/dev/null
-    sqlq "DELETE FROM game_corpse_loot WHERE corpse_guid = $G" >/dev/null
-  done
-}
 casts_by() { sql1 "SELECT COUNT(*) AS n FROM game_spell_cast_event WHERE caster_guid = $1 AND spell_id = $2"; }
 
 # ---- staging ----
 scall debug_seed_scenario_fixtures || true
 scall playerbots_despawn_all || true
-purge_entry $WOLF
+purge_entry_rows $WOLF
 sqlq "DELETE FROM game_melee_attack" >/dev/null
 sqlq "DELETE FROM game_group_member WHERE character_guid = $GINGER" >/dev/null
-sqlq "INSERT INTO game_faction_template (id, faction, faction_group, friend_group, enemy_group, enemy_0, enemy_1, enemy_2, enemy_3, friend_0, friend_1, friend_2, friend_3) VALUES (14, 14, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0)" >/dev/null
-sqlq "INSERT INTO game_faction_template (id, faction, faction_group, friend_group, enemy_group, enemy_0, enemy_1, enemy_2, enemy_3, friend_0, friend_1, friend_2, friend_3) VALUES (1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0)" >/dev/null
+# Hostility on mock-seed needs staged faction rows (canonical helper; cleared in teardown).
+stage_hostility
 sqlq "UPDATE game_character SET x = $PAD_X, y = $PAD_Y, z = $PAD_Z WHERE guid = $GINGER" >/dev/null
 
 # ---- 1. defaults + validity gate ----
@@ -91,13 +81,8 @@ done
 [ "$HEALED" = 1 ] && step_ok "healer rotation: Holy Light on the damaged member (ALLY_HP_BELOW_PCT)" || step_fail "healer rotation: no Holy Light casts"
 [ "$JUDGED" = 1 ] && step_ok "dps rotation: Judgement under TANK_ENGAGED" || step_fail "dps rotation: no Judgement casts"
 # blessing sweep: every living party member ends up carrying the blessing aura
-BLESSED=0
-for i in $(seq 1 20); do
-  N=$(sql1 "SELECT COUNT(*) AS n FROM game_aura WHERE spell_id = 50131")
-  [ "${N:-0}" -ge 3 ] && BLESSED=1 && break
-  sleep 1
-done
-[ "$BLESSED" = 1 ] && step_ok "healer rotation: blessing sweep converged (>=3 members buffed)" || step_fail "healer rotation: blessing sweep incomplete ($N)"
+wait_for_sql_ge 20 "SELECT COUNT(*) AS n FROM game_aura WHERE spell_id = 50131" 3 \
+  && step_ok "healer rotation: blessing sweep converged (>=3 members buffed)" || step_fail "healer rotation: blessing sweep never converged"
 
 # ---- 3. live rotation patch: swap the dps nuke to Fireball, watch behavior change ----
 ROW=$(sqlq "SELECT id FROM pkg_playerbots_rotation WHERE spell_id = 50134" | grep -oE '[0-9]+' | head -1)
@@ -119,10 +104,9 @@ touch "$HOLD"
 wait "$LEADER"; RC_L=$?
 [ $RC_L -eq 0 ] && step_ok "wire: leader flow green (disband -> DESTROYED)" || { step_fail "leader wire flow rc=$RC_L"; tail -3 /tmp/ws_class_roles.log; }
 scall playerbots_despawn_all || true
-purge_entry $WOLF
+purge_entry_rows $WOLF
 sqlq "DELETE FROM game_melee_attack" >/dev/null
-sqlq "DELETE FROM game_faction_template WHERE id = 14" >/dev/null
-sqlq "DELETE FROM game_faction_template WHERE id = 1" >/dev/null
+clear_hostility
 rm -f "$HOLD" "$HOLD.ingroup"
 assert_eq "teardown: zero bot rows" "$(sql1 "SELECT COUNT(*) AS n FROM pkg_playerbots_bot")" "0"
 assert_eq "teardown: zero faction rows" "$(sql1 "SELECT COUNT(*) AS n FROM game_faction_template")" "0"

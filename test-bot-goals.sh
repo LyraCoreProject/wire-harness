@@ -20,23 +20,10 @@ WOLF=51000; GIVER=51003; QUEST=50900
 # 150yd goal fence, so a mid-grind death resumes instead of re-fencing.
 PAD_X=-8930.0; PAD_Y=-250.0; PAD_Z=80.0
 
-purge_entry() { # compound-WHERE DELETE no-ops (146 lesson) — purge per guid
-  for G in $(sqlq "SELECT guid FROM game_creature_spawn WHERE entry = $1" | grep -oE '[0-9]{6,}'); do
-    sqlq "DELETE FROM game_creature_spawn WHERE guid = $G" >/dev/null
-  done
-  for G in $(sqlq "SELECT guid FROM game_world_entity WHERE entry = $1" | grep -oE '[0-9]{6,}'); do
-    sqlq "DELETE FROM game_world_entity WHERE guid = $G" >/dev/null
-    sqlq "DELETE FROM game_corpse_loot WHERE corpse_guid = $G" >/dev/null
-  done
-}
-goal_field() { # $1=sql field expr over the ACTIVE-or-any goal set
-  sql1 "$1"
-}
-
 # ---- staging (no faction rows: the bot INITIATES; wolves retaliate) ----
 scall debug_seed_scenario_fixtures || true
 scall playerbots_despawn_all || true
-purge_entry $WOLF; purge_entry $GIVER
+purge_entry_rows $WOLF; purge_entry_rows $GIVER
 sqlq "DELETE FROM game_melee_attack" >/dev/null
 scall playerbots_spawn_role 1 $PAD_X $PAD_Y $PAD_Z 2 || { echo "[orch] bot spawn failed" >&2; exit 1; }
 BOT=$(char_guid Dpsbot1)
@@ -49,20 +36,10 @@ XP0=$(sql1 "SELECT xp FROM game_world_entity WHERE guid = $BOT"); XP0=${XP0:-0}
 M0=$(sql1 "SELECT money FROM game_world_entity WHERE guid = $BOT"); M0=${M0:-0}
 
 # ---- 1. the autonomous quest loop ----
-CHOSE=0
-for i in $(seq 1 45); do
-  K=$(sql1 "SELECT COUNT(*) AS n FROM pkg_playerbots_goal WHERE kind = 1")
-  [ "${K:-0}" -ge 1 ] && CHOSE=1 && break
-  sleep 1
-done
-[ "$CHOSE" = 1 ] && step_ok "selection: bot chose QUEST $QUEST (goal row)" || step_fail "selection: no QUEST goal within 45s"
-ACCEPTED=0
-for i in $(seq 1 30); do
-  Q=$(sql1 "SELECT COUNT(*) AS n FROM game_character_quest WHERE character_guid = $BOT")
-  [ "${Q:-0}" -ge 1 ] && ACCEPTED=1 && break
-  sleep 1
-done
-[ "$ACCEPTED" = 1 ] && step_ok "accept: quest row landed in the bot's log (walked to the giver)" || step_fail "accept: no quest row within 30s"
+wait_for_sql_ge 45 "SELECT COUNT(*) AS n FROM pkg_playerbots_goal WHERE kind = 1" 1 \
+  && step_ok "selection: bot chose QUEST $QUEST (goal row)" || step_fail "selection: no QUEST goal within 45s"
+wait_for_sql_ge 30 "SELECT COUNT(*) AS n FROM game_character_quest WHERE character_guid = $BOT" 1 \
+  && step_ok "accept: quest row landed in the bot's log (walked to the giver)" || step_fail "accept: no quest row within 30s"
 DONE=0
 for i in $(seq 1 90); do
   R=$(sqlq "SELECT rewarded FROM game_character_quest WHERE character_guid = $BOT" | grep -c true)
@@ -80,20 +57,10 @@ assert_ge "history: the finished QUEST goal row is kept (state done)" "$(sql1 "S
 scall debug_spawn_at_feet "$BOT" $WOLF 15
 scall debug_spawn_at_feet "$BOT" $WOLF 18
 scall debug_spawn_at_feet "$BOT" $WOLF 21
-GRIND=0
-for i in $(seq 1 45); do
-  G=$(sql1 "SELECT COUNT(*) AS n FROM pkg_playerbots_goal WHERE kind = 0 AND state = 0")
-  [ "${G:-0}" -ge 1 ] && GRIND=1 && break
-  sleep 1
-done
-[ "$GRIND" = 1 ] && step_ok "selection: next goal is GRIND $WOLF" || step_fail "selection: no GRIND goal within 45s"
-PROG=0
-for i in $(seq 1 45); do
-  P=$(sql1 "SELECT progress FROM pkg_playerbots_goal WHERE kind = 0 AND state = 0")
-  [ "${P:-0}" -ge 1 ] && PROG=1 && break
-  sleep 1
-done
-[ "$PROG" = 1 ] && step_ok "grind: a kill advanced progress (on_kill credit)" || step_fail "grind: no kill credit within 45s"
+wait_for_sql_ge 45 "SELECT COUNT(*) AS n FROM pkg_playerbots_goal WHERE kind = 0 AND state = 0" 1 \
+  && step_ok "selection: next goal is GRIND $WOLF" || step_fail "selection: no GRIND goal within 45s"
+wait_for_sql_ge 45 "SELECT progress FROM pkg_playerbots_goal WHERE kind = 0 AND state = 0" 1 \
+  && step_ok "grind: a kill advanced progress (on_kill credit)" || step_fail "grind: no kill credit within 45s"
 
 scall debug_set_health "$BOT" 0
 D0=$(sql1 "SELECT dead FROM game_world_entity WHERE guid = $BOT" | head -1)
@@ -108,20 +75,15 @@ done
 [ "$REVIVED" = 1 ] && step_ok "recovery: released + spirit-ressed (alive again, sql-observed)" || step_fail "recovery: still dead after 15s"
 STILL=$(sql1 "SELECT COUNT(*) AS n FROM pkg_playerbots_goal WHERE kind = 0 AND state = 0")
 assert_ge "recovery: the GRIND goal survived the death (resumes)" "${STILL:-0}" 1
-FINISHED=0
-for i in $(seq 1 90); do
-  F=$(sql1 "SELECT COUNT(*) AS n FROM pkg_playerbots_goal WHERE kind = 0 AND state = 1")
-  [ "${F:-0}" -ge 1 ] && FINISHED=1 && break
-  sleep 1
-done
-[ "$FINISHED" = 1 ] && step_ok "resume: the grind completed after the death (3 kills, state done)" || step_fail "resume: grind never completed within 90s"
+wait_for_sql_ge 90 "SELECT COUNT(*) AS n FROM pkg_playerbots_goal WHERE kind = 0 AND state = 1" 1 \
+  && step_ok "resume: the grind completed after the death (3 kills, state done)" || step_fail "resume: grind never completed within 90s"
 
 # ---- 4. the decision trail ----
 assert_ge "history: >= 2 finished goal rows kept (the sql-visible mind)" "$(sql1 "SELECT COUNT(*) AS n FROM pkg_playerbots_goal WHERE state = 1")" 2
 
 # ---- teardown (asserted) ----
 scall playerbots_despawn_all || true
-purge_entry $WOLF; purge_entry $GIVER
+purge_entry_rows $WOLF; purge_entry_rows $GIVER
 sqlq "DELETE FROM game_melee_attack" >/dev/null
 assert_eq "teardown: zero goal rows (swept with the bot character)" "$(sql1 "SELECT COUNT(*) AS n FROM pkg_playerbots_goal")" "0"
 assert_eq "teardown: zero bot rows" "$(sql1 "SELECT COUNT(*) AS n FROM pkg_playerbots_bot")" "0"

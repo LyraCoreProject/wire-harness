@@ -68,15 +68,62 @@ spawn_at() { # $1=anchor_char_guid $2=entry $3=offset
   sqlq "SELECT guid FROM game_world_entity WHERE entry = $2" | grep -oE '[0-9]{15,}' | sort -n | tail -1
 }
 
-# Remove every live entity + spawn row + corpse-loot residue of a fixture entry, then assert zero.
+# Silently remove every spawn row + live entity + corpse-loot residue of a fixture entry.
+# PER GUID: a compound-WHERE DELETE silently no-ops on this CLI (the 146 lesson) — the old
+# entry+owner_guid form here left stale entities behind and three tests grew local copies of the
+# fix; this is now the one canonical purge.
+purge_entry_rows() { # $1=entry
+  local G
+  for G in $(sqlq "SELECT guid FROM game_creature_spawn WHERE entry = $1" | grep -oE '[0-9]{6,}'); do
+    sqlq "DELETE FROM game_creature_spawn WHERE guid = $G" >/dev/null
+  done
+  for G in $(sqlq "SELECT guid FROM game_world_entity WHERE entry = $1" | grep -oE '[0-9]{6,}'); do
+    sqlq "DELETE FROM game_world_entity WHERE guid = $G" >/dev/null
+    sqlq "DELETE FROM game_corpse_loot WHERE corpse_guid = $G" >/dev/null
+  done
+}
+
+# Purge a fixture entry AND assert nothing remains — the asserting teardown form.
 purge_entry() { # $1=entry
-  sqlq "DELETE FROM game_creature_spawn WHERE entry = $1" >/dev/null
-  sqlq "DELETE FROM game_world_entity WHERE entry = $1 AND owner_guid = 0" >/dev/null
+  purge_entry_rows "$1"
   local left
   left=$(sql1 "SELECT COUNT(*) AS n FROM game_world_entity WHERE entry = $1")
   assert_eq "teardown: no live entities of entry $1 remain" "${left:-0}" "0"
   left=$(sql1 "SELECT COUNT(*) AS n FROM game_creature_spawn WHERE entry = $1")
   assert_eq "teardown: no spawn rows of entry $1 remain" "${left:-0}" "0"
+}
+
+# Proximity-aggro hostility on a mock-seed sandbox: no faction data is imported and
+# compute_hostile refuses missing rows, so nothing can aggro without staging these two
+# game_faction_template rows (Monster 14 enemy-group vs Player group 1). ALWAYS pair with
+# clear_hostility in teardown — the rest of the suite expects the pre-import baseline.
+stage_hostility() {
+  sqlq "INSERT INTO game_faction_template (id, faction, faction_group, friend_group, enemy_group, enemy_0, enemy_1, enemy_2, enemy_3, friend_0, friend_1, friend_2, friend_3) VALUES (14, 14, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0)" >/dev/null
+  sqlq "INSERT INTO game_faction_template (id, faction, faction_group, friend_group, enemy_group, enemy_0, enemy_1, enemy_2, enemy_3, friend_0, friend_1, friend_2, friend_3) VALUES (1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0)" >/dev/null
+}
+clear_hostility() {
+  sqlq "DELETE FROM game_faction_template WHERE id = 14" >/dev/null
+  sqlq "DELETE FROM game_faction_template WHERE id = 1" >/dev/null
+}
+
+# Poll a 1-value sql query once per second for up to $1 seconds until it compares true against
+# $3 (eq/ge). Echoes nothing; returns 0 on success, 1 on timeout — `wait_for_sql_eq 30 "SELECT
+# ..." 4 && step_ok ... || step_fail ...` replaces the hand-rolled seq/sleep loops.
+wait_for_sql_eq() { # $1=secs $2=query $3=want
+  local i v
+  for i in $(seq 1 "$1"); do
+    v=$(sql1 "$2"); [ "${v:-}" = "$3" ] && return 0
+    sleep 1
+  done
+  return 1
+}
+wait_for_sql_ge() { # $1=secs $2=query $3=want
+  local i v
+  for i in $(seq 1 "$1"); do
+    v=$(sql1 "$2"); [ "${v:-0}" -ge "$3" ] 2>/dev/null && return 0
+    sleep 1
+  done
+  return 1
 }
 
 scenario_preflight() { # $1=scenario name
