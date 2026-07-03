@@ -1032,7 +1032,12 @@ fn main() -> Result<()> {
                         got_kill = true;
                     }
                     Ok(_) => {}
-                    Err(_) => break,
+                    // A recv read-timeout is NOT terminal here: a low-health wolf FLEES and goes
+                    // silent (no swings, no packets) until the leash walks it back into range and
+                    // the still-armed auto-attack finishes it — the 90s deadline exists exactly
+                    // for that cycle, so ride the quiet out instead of bailing at the first 10s
+                    // lull (the starved-recv class from 146's suite archaeology).
+                    Err(_) => {}
                 }
             }
             if !got_kill { bail!("STEP {} FAIL: no SMSG_QUESTUPDATE_ADD_KILL({i}/2) within 90s", 2 + i); }

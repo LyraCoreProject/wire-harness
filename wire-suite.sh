@@ -307,6 +307,7 @@ t_scenario_death()  { bash tools/wire-client/test-scenario-death.sh; }
 # range-gate/disband/decline acceptance ----
 t_group() { bash tools/wire-client/test-group.sh; }
 t_party_brains() { bash tools/wire-client/test-party-brains.sh; }
+t_bot_goals() { bash tools/wire-client/test-bot-goals.sh; }
 
 # ---- playerbots package acceptance (work-item 142) — the script self-SKIPs (exit 77) when the
 # packages/playerbots drop-in isn't installed/published. ----
@@ -319,7 +320,7 @@ ALL_TESTS=(
   persist_health repop_delay ding combat_regen cast_flow cast_interrupt ghost_reveal
   init_factions levelup_info
   scenario_quest scenario_vendor scenario_train scenario_death
-  aoi_relay soak playerbots group party_brains
+  aoi_relay soak playerbots group party_brains bot_goals
 )
 START=$(date +%s)
 for t in "${ALL_TESTS[@]}"; do run_test "$t"; done

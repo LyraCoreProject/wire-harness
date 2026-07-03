@@ -35,6 +35,11 @@ if [ -n "$NEED_EQUIP" ]; then
   [ -n "$SWORD_SLOT" ] && timeout 60 "$WC" TEST test123 Ginger equip-from "$SWORD_SLOT" >/dev/null 2>&1
 fi
 if [ -z "$WOLF" ]; then echo "[orch] wolf spawn failed" >&2; exit 1; fi
+# repeatability: every suite death costs 10% max durability and nothing ever repaired the starter
+# sword — at the 0 floor the loss assert below can't observe a delta. Top it up by guid (compound
+# UPDATE no-ops — resolve the guid first).
+MH_GUID=$(sql1 "SELECT guid FROM game_item_instance WHERE owner_guid = $GINGER AND slot = 15")
+[ -n "$MH_GUID" ] && sqlq "UPDATE game_item_instance SET durability = 20 WHERE guid = $MH_GUID" >/dev/null
 DUR0=$(sql1 "SELECT durability FROM game_item_instance WHERE owner_guid = $GINGER AND slot = 15")
 echo "[orch] staged: wolf=$WOLF corpse_guid=$CORPSE mainhand_dur0=${DUR0:-none}"
 
