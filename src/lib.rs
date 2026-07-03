@@ -209,6 +209,13 @@ impl WireClient {
     /// Returns `(opcode, payload_bytes)`. Advances the cipher state exactly like `recv()`,
     /// so `recv()` and `recv_raw()` can be interleaved freely — one packet at a time.
     /// Use this for packets gtker rejects (e.g. TYPE-less partial-VALUES updates).
+    /// Override the world socket's read timeout (default 10s). The soak/AOI harness modes drain on
+    /// a sub-second cadence between synthesized movement sends, so the default would stall them.
+    pub fn set_recv_timeout(&mut self, d: Duration) -> Result<()> {
+        self.stream.set_read_timeout(Some(d))?;
+        Ok(())
+    }
+
     pub fn recv_raw(&mut self) -> Result<(u16, Vec<u8>)> {
         use std::io::Read;
         let hdr = self
@@ -237,6 +244,23 @@ impl WireClient {
                     return Ok(m);
                 }
                 Err(e) => {
+                    // Diagnostic: surface every skipped (undecodable) frame when asked — the gtker
+                    // wire gaps (danger-zones §2) are otherwise silent.
+                    if std::env::var_os("WIRE_LOG_SKIPS").is_some() {
+                        eprintln!("[wire-skip] {e}");
+                    }
+                    // A SOCKET timeout is terminal, not a skip: the skip loop exists for packets
+                    // gtker can't decode (which fail instantly). Swallowing timeouts here made a
+                    // quiet-world recv() spin up to 64 × the 10s read timeout (scenario pads with
+                    // nothing moving nearby hit this as a ten-minute hang).
+                    let msg = e.to_string().to_lowercase();
+                    // Linux EAGAIN reads "resource temporarily unavailable" (os error 11).
+                    if msg.contains("timed out")
+                        || msg.contains("would block")
+                        || msg.contains("temporarily unavailable")
+                    {
+                        return Err(anyhow!("recv: socket read timeout: {e}"));
+                    }
                     skipped += 1;
                     if skipped > 64 {
                         return Err(anyhow!("recv: stream desync/closed after 64 skips: {e}"));
@@ -257,6 +281,30 @@ impl WireClient {
             }
         }
         bail!("recv_until: predicate never matched in 256 messages")
+    }
+
+    /// Read until `pred` returns `Some`, bounded by a WALL-CLOCK window (not a message count).
+    /// Socket read timeouts and undecodable packets just consume window time — a quiet stretch is
+    /// NOT terminal. This is the canonical form of the driver's "wait up to N seconds for packet X"
+    /// loops; the hand-rolled `while Instant::now() < deadline { match recv() ... }` copies kept
+    /// breeding starved-recv bugs through their ad-hoc `Err(_)` arms (`break` where a read timeout
+    /// merely means the world is quiet). Returns `None` if the window closes without a match.
+    /// Callers wanting snappy polling should `set_recv_timeout` to something short first — the
+    /// window can overshoot by up to one socket read timeout.
+    pub fn recv_for<T>(
+        &mut self,
+        window: std::time::Duration,
+        mut pred: impl FnMut(&WorldSmsg) -> Option<T>,
+    ) -> Option<T> {
+        let deadline = std::time::Instant::now() + window;
+        while std::time::Instant::now() < deadline {
+            if let Ok(m) = self.recv() {
+                if let Some(t) = pred(&m) {
+                    return Some(t);
+                }
+            }
+        }
+        None
     }
 
     fn note_guids(&mut self, m: &WorldSmsg) {

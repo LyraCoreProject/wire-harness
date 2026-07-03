@@ -5,8 +5,8 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 CHAR="Ginger"; DB=spacetime-core
-CGUID=$(spacetime sql "$DB" "SELECT guid FROM game_world_entity WHERE display_name='$CHAR'" 2>&1 | grep -oE '[0-9]{5,}' | head -1)
-[ -z "$CGUID" ] && { echo "[test] character '$CHAR' not found in game_world_entity" >&2; exit 1; }
+CGUID=$(spacetime sql "$DB" "SELECT guid FROM game_character WHERE name = '$CHAR'" 2>&1 | grep -oE '[0-9]+' | tail -1)
+[ -z "$CGUID" ] && { echo "[test] character '$CHAR' not found in game_character" >&2; exit 1; }
 echo "[test] $CHAR guid=$CGUID"
 cargo build -q -p wire-client || exit 1
 rm -f /tmp/wc_repop_ready
