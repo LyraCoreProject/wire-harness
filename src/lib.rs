@@ -307,6 +307,29 @@ impl WireClient {
         None
     }
 
+    /// The raw-frame twin of [`WireClient::recv_for`]: read `(opcode, payload)` frames via
+    /// [`WireClient::recv_raw`] until `pred` returns `Some`, bounded by the same WALL-CLOCK
+    /// window. Socket read timeouts just consume window time — a quiet stretch is NOT terminal —
+    /// and the window can overshoot by up to one socket read timeout, so callers wanting snappy
+    /// polling should `set_recv_timeout` to something short first. Use this where the awaited
+    /// packet is one gtker rejects (e.g. TYPE-less partial-VALUES updates) or where the probe
+    /// decodes payload bytes by hand. Returns `None` if the window closes without a match.
+    pub fn recv_raw_for<T>(
+        &mut self,
+        window: std::time::Duration,
+        mut pred: impl FnMut(u16, &[u8]) -> Option<T>,
+    ) -> Option<T> {
+        let deadline = std::time::Instant::now() + window;
+        while std::time::Instant::now() < deadline {
+            if let Ok((opcode, payload)) = self.recv_raw() {
+                if let Some(t) = pred(opcode, &payload) {
+                    return Some(t);
+                }
+            }
+        }
+        None
+    }
+
     fn note_guids(&mut self, m: &WorldSmsg) {
         if let WorldSmsg::SMSG_UPDATE_OBJECT(u) = m {
             for o in &u.objects {

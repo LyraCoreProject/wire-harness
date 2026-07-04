@@ -22,6 +22,19 @@ pub(crate) struct ModeCtx<'a> {
     pub char_name: &'a str,
 }
 
+/// Run `mode` through the CHAR-SELECT-TIER probes (probes that must run BEFORE `login_as`,
+/// e.g. `char-enum-gear` / `char-delete` — they never enter the world). `Ok(true)` = claimed
+/// and completed; `Ok(false)` = not a char-select mode, proceed to world login + `dispatch`.
+pub(crate) fn dispatch_charselect(
+    mode: &str,
+    account: &str,
+    password: &str,
+    char_name: &str,
+    args: &mut dyn Iterator<Item = String>,
+) -> Result<bool> {
+    probes::try_dispatch_charselect(mode, account, password, char_name, args)
+}
+
 /// Run `mode` through the families until one claims it.
 pub(crate) fn dispatch(
     mode: &str,
