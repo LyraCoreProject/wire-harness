@@ -52,7 +52,7 @@ HOLD=/tmp/ws_party_bots_$$
 rm -f "$HOLD" "$HOLD.ingroup"
 timeout 400 "$WC" TEST test123 Ginger party-bots "$HOLD" Tankbot1 Healbot1 Dpsbot1 >/tmp/ws_party_bots.log 2>&1 &
 LEADER=$!
-for _ in $(seq 1 40); do [ -f "$HOLD.ingroup" ] && break; sleep 1; done
+wait_for_file 40 "$HOLD.ingroup"
 if [ -f "$HOLD.ingroup" ]; then
   step_ok "wire: full 4-member roster over SMSG_GROUP_LIST (bots auto-accepted)"
 else

@@ -55,7 +55,7 @@ HOLD=/tmp/ws_class_roles_$$
 rm -f "$HOLD" "$HOLD.ingroup"
 timeout 400 "$WC" TEST test123 Ginger party-bots "$HOLD" Tankbot1 Healbot1 Dpsbot1 >/tmp/ws_class_roles.log 2>&1 &
 LEADER=$!
-for _ in $(seq 1 40); do [ -f "$HOLD.ingroup" ] && break; sleep 1; done
+wait_for_file 40 "$HOLD.ingroup"
 [ -f "$HOLD.ingroup" ] && step_ok "wire: 4-member all-Paladin party formed" || { step_fail "wire: party never formed"; tail -3 /tmp/ws_class_roles.log; }
 
 # a real pack (3 wolves — enough for the Consecration ENEMIES_GE_N(3) row) on the squishies

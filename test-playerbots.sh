@@ -50,9 +50,10 @@ CMD=/tmp/ws_bots_cmd_$$; ACK=/tmp/ws_bots_ack_$$; OBS_READY=/tmp/ws_bots_obs_rea
 rm -f "$CMD" "$ACK" "$OBS_READY"
 timeout 180 "$WC" TEST test123 Ginger aoi-observer 999999999 "$CMD" "$ACK" "$OBS_READY" >/tmp/ws_bots_observer.log 2>&1 &
 OBS=$!
-for _ in $(seq 1 20); do [ -f "$OBS_READY" ] && break; sleep 1; done
+wait_for_file 20 "$OBS_READY"
 rm -f "$OBS_READY"
-obs_ack() { rm -f "$ACK"; echo "$1" > "$CMD"; for _ in $(seq 1 35); do [ -f "$ACK" ] && break; sleep 1; done; grep -q "^OK" "$ACK" 2>/dev/null; }
+# obs_cmd_send does the cmd/ack file mechanics; this test's reporting is rc-only (caller if/else).
+obs_ack() { obs_cmd_send "$1" "$CMD" "$ACK" 35 | grep -q "^OK"; }
 scall playerbots_spawn 1 $PAD_X $PAD_Y $PAD_Z || step_fail "wire-phase spawn failed"
 sleep 1
 NEWBOT=$(sqlq "SELECT character_guid FROM pkg_playerbots_bot" | grep -oE '[0-9]+' | sort -n | tail -1)

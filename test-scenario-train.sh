@@ -30,7 +30,7 @@ rm -f "$TRAIN_READY"
 timeout 120 "$WC" TEST test123 Ginger scenario-train "$TRAINER" $SPELL $CAST_MS "$TRAIN_READY" &
 WIRE=$!
 HEALTH0=""
-for _ in $(seq 1 30); do [ -f "$TRAIN_READY" ] && break; sleep 1; done
+wait_for_file 30 "$TRAIN_READY"
 if [ -f "$TRAIN_READY" ]; then
   MAXHP=$(sql1 "SELECT max_health FROM game_world_entity WHERE guid = $GINGER")
   HEALTH0=$(( ${MAXHP:-100} - 60 )) # leave a >heal-size hole so the +50 heal is unambiguous

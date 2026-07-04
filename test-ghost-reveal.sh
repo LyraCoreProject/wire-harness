@@ -5,10 +5,11 @@
 # Usage: tools/wire-client/test-ghost-reveal.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-CHAR="Ginger"; DB=spacetime-core
+source tools/wire-client/scenario-lib.sh
+CHAR="Ginger"
 # Run-scoped handshake path (work-item 161): defined ONCE here, passed as a wire-client arg.
 GHOST_READY=/tmp/wc_ghost_ready_$$
-CGUID=$(spacetime sql "$DB" "SELECT guid FROM game_character WHERE name = '$CHAR'" 2>&1 | grep -oE '[0-9]+' | tail -1)
+CGUID=$(char_guid "$CHAR")
 [ -z "$CGUID" ] && { echo "[test] character '$CHAR' not found in game_character" >&2; exit 1; }
 cargo build -q -p wire-client || exit 1
 rm -f "$GHOST_READY"
@@ -17,7 +18,7 @@ HEALER=$(spacetime sql "$DB" "SELECT guid FROM game_world_entity WHERE entry=649
 echo "[test] spirit healer guid=$HEALER"
 
 orchestrate() {
-  for _ in $(seq 1 30); do [ -f "$GHOST_READY" ] && break; sleep 1; done
+  wait_for_file 30 "$GHOST_READY"
   spacetime call "$DB" debug_set_health $CGUID 0 >/dev/null 2>&1
   sleep 1
   spacetime call "$DB" debug_repop $CGUID >/dev/null 2>&1

@@ -4,22 +4,26 @@
 # Client A (TEST / Ginger)  sends MSG_MOVE_JUMP.
 # Client B (TEST2 / dfsdfsd) observes and asserts it receives MSG_MOVE_JUMP_Server (opcode 0xBB).
 #
-# Both characters start within 32yd of each other in Northshire — well within the 125yd AOI box.
-# Coordination via the run-scoped $RELAY_READY file (work-item 161), passed to both wire-client
-# sides as an arg: observer writes it when in-world; sender polls the same path.
+# Both characters are staged within 32yd of each other in Northshire (position_apart) — well
+# within the 125yd AOI box. Coordination via the run-scoped $RELAY_READY file (work-item 161),
+# passed to both wire-client sides as an arg: observer writes it when in-world; sender polls the
+# same path.
 #
 # Usage: bash tools/wire-client/test-move-relay.sh
 # Pass exit code: 0. Fail exit code: non-zero.
 
 set -euo pipefail
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WC="$SCRIPT_DIR/../../target/debug/wire-client"
+cd "$(dirname "${BASH_SOURCE[0]}")/../.."
+source tools/wire-client/scenario-lib.sh
 
 if [[ ! -x "$WC" ]]; then
   echo "[test-move-relay] building wire-client…"
-  cargo build -p wire-client --manifest-path "$SCRIPT_DIR/../../Cargo.toml" 2>&1
+  cargo build -p wire-client 2>&1
 fi
+
+# Staging (moved from wire-suite.sh, work-item 162): park the two characters ~32yd apart so
+# standalone runs get the same geometry the suite used to set up in its t_move_relay wrapper.
+position_apart || { echo "[test-move-relay] staging failed (position_apart)" >&2; exit 1; }
 
 # Run-scoped handshake path (work-item 161): defined ONCE here, passed to both sides as an arg.
 RELAY_READY=/tmp/wc_relay_ready_$$

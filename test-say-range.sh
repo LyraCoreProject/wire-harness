@@ -14,6 +14,10 @@
 
 set -euo pipefail
 cd "$(dirname "$0")/../.."
+source tools/wire-client/scenario-lib.sh
 
 cargo build -p wire-client -q
-./target/debug/wire-client TEST test123 Ginger say-range TEST2 test123 dfsdfsd
+# Staging (moved from wire-suite.sh, work-item 162): park the two characters ~32yd apart so
+# standalone runs get the same geometry the suite used to set up in its t_say_range wrapper.
+position_apart || { echo "[test-say-range] staging failed (position_apart)" >&2; exit 1; }
+"$WC" TEST test123 Ginger say-range TEST2 test123 dfsdfsd

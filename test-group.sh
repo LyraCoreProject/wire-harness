@@ -44,6 +44,9 @@ JOINER=$!
 sleep 3
 timeout 300 "$WC" TEST test123 Ginger group-leader dfsdfsd "$HOLD_L" >/tmp/ws_group_leader.log 2>&1 &
 LEADER=$!
+# both sides must signal in-group.
+# Kept hand-rolled: ONE 40s deadline shared by BOTH files (chained wait_for_file calls would
+# quietly double the budget to 80s and mask a join-latency regression).
 for _ in $(seq 1 40); do [ -f "$HOLD_L.ingroup" ] && [ -f "$HOLD_J.ingroup" ] && break; sleep 1; done
 if [ -f "$HOLD_L.ingroup" ] && [ -f "$HOLD_J.ingroup" ]; then
   step_ok "wire: both sessions decoded SMSG_GROUP_LIST (two-member party formed)"

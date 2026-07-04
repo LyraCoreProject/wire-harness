@@ -31,8 +31,10 @@ mkdir -p "$LOGDIR"
 # The canonical sqlq/char_guid/scall/stay_start/stay_stop (and sql assert_*) implementations live
 # in scenario-lib.sh — ONE copy of the fiddly stay_start relogin-race settle/verify/retry, not a
 # drifting suite-local fork (the fork that used to live here had already lost that race fix).
-# SC_STAY_LOG_DIR makes the lib capture each stay session's wire log like the old fork did.
-SC_STAY_LOG_DIR="$LOGDIR"
+# SC_STAY_LOG_DIR makes the lib capture each stay session's wire log like the old fork did —
+# exported so the test-*.sh child processes (which now own their staging, work-item 162) keep
+# capturing their staging stay logs under suite runs too.
+export SC_STAY_LOG_DIR="$LOGDIR"
 source tools/wire-client/scenario-lib.sh
 # COUNT(*) helper — equality-filter only (spacetime sql 2.x range-filter gotcha, danger-zones §2).
 countq() { sqlq "SELECT COUNT(*) AS n FROM $1" | grep -oE '[0-9]+' | tail -1; }
@@ -165,47 +167,15 @@ t_friend() {
   return $rc
 }
 
-t_ignore_whisper() {
-  # The probe asserts a strict IgnoreAdded, so purge Ginger's contact rows first (repeatability),
-  # and leave them purged after (the friend test tolerates Already, but a stale ignore row would
-  # silently eat unrelated whisper traffic in later tests).
-  sqlq "DELETE FROM game_character_contact WHERE owner_guid = $GINGER" >/dev/null
-  timeout 90 "$WC" TEST test123 Ginger ignore-whisper TEST2 test123 dfsdfsd
-  local rc=$?
-  sqlq "DELETE FROM game_character_contact WHERE owner_guid = $GINGER" >/dev/null
-  return $rc
-}
-
-position_apart() { # say-range/move-relay geometry: ~32yd apart (out of 25yd SAY, inside 125yd AOI)
-  stay_start TEST test123 Ginger || return 1
-  spacetime call "$DB" -- debug_teleport "$GINGER" 0 -8968 -129 83.4 0 || { stay_stop; return 1; }
-  stay_stop
-  stay_start TEST2 test123 dfsdfsd || return 1
-  spacetime call "$DB" -- debug_teleport "$DFS" 0 -8945 -107 83.4 0 || { stay_stop; return 1; }
-  stay_stop
-}
-
-t_say_range()  { position_apart || exit 1; bash tools/wire-client/test-say-range.sh; }
-t_move_relay() { position_apart || exit 1; bash tools/wire-client/test-move-relay.sh; }
-
-t_persist_health() {
-  bash tools/wire-client/test-persist-health.sh
-  local rc=$?
-  # teardown: heal the 22hp residue so later combat tests don't start near-dead
-  stay_start TEST test123 Ginger && spacetime call "$DB" -- debug_set_health "$GINGER" 100000; stay_stop
-  return $rc
-}
-
-t_repop_delay() {
-  bash tools/wire-client/test-repop-delay.sh
-  local rc=$?
-  # teardown: the test leaves Ginger dead/ghost — resurrect + heal for whatever runs next
-  stay_start TEST test123 Ginger || return $rc
-  spacetime call "$DB" -- debug_spirit_healer_res "$GINGER" >/dev/null 2>&1 || true
-  spacetime call "$DB" -- debug_set_health "$GINGER" 100000 >/dev/null 2>&1 || true
-  stay_stop
-  return $rc
-}
+# Staging/teardown for the next five live in their OWNING scripts (work-item 162): the contact
+# purge/restore in test-ignore-whisper.sh, the position_apart geometry in test-say-range.sh /
+# test-move-relay.sh (via scenario-lib), the heal/resurrect teardowns in test-persist-health.sh /
+# test-repop-delay.sh — standalone runs and suite runs are now the same path.
+t_ignore_whisper() { bash tools/wire-client/test-ignore-whisper.sh; }
+t_say_range()      { bash tools/wire-client/test-say-range.sh; }
+t_move_relay()     { bash tools/wire-client/test-move-relay.sh; }
+t_persist_health() { bash tools/wire-client/test-persist-health.sh; }
+t_repop_delay()    { bash tools/wire-client/test-repop-delay.sh; }
 
 t_ding()         { bash tools/wire-client/test-ding.sh; }
 t_combat_regen() {
@@ -258,7 +228,7 @@ t_levelup_info() {
   spacetime call "$DB" -- debug_set_level "$GINGER" 1 >/dev/null 2>&1 || true
   spacetime call "$DB" -- debug_set_xp_rate 100 >/dev/null 2>&1 || true
   (
-    for _ in $(seq 1 30); do [ -f "$ready" ] && break; sleep 1; done
+    wait_for_file 30 "$ready"
     rm -f "$ready"
     spacetime call "$DB" -- debug_spawn_at_feet "$GINGER" 51000 5 >/dev/null 2>&1
     sleep 1

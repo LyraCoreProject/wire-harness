@@ -85,7 +85,7 @@ MONEY_PRE_SELL=$(sql1 "SELECT money FROM game_character WHERE guid = $GINGER")
 rm -f "$SOLD_FILE" "$BOUGHT_FILE"
 timeout 120 "$WC" TEST test123 Ginger vendor-sell-buyback "$VENDOR" "${IGUID:-0}" "$SOLD_FILE" "$BOUGHT_FILE" &
 WIRE=$!
-for _ in $(seq 1 20); do [ -f "$SOLD_FILE" ] && break; sleep 1; done
+wait_for_file 20 "$SOLD_FILE"
 if [ -f "$SOLD_FILE" ]; then
   sleep 1
   # mid-session, the authoritative purse is the LIVE entity (game_character.money persists at logout)
@@ -97,7 +97,7 @@ if [ -f "$SOLD_FILE" ]; then
 else
   echo "[orch] wire client never signalled the sell" >&2; FAILED=1
 fi
-for _ in $(seq 1 20); do [ -f "$BOUGHT_FILE" ] && break; sleep 1; done
+wait_for_file 20 "$BOUGHT_FILE"
 if [ -f "$BOUGHT_FILE" ]; then
   sleep 1
   assert_eq "buyback: money -240" "$(sql1 "SELECT money FROM game_world_entity WHERE guid = $GINGER")" "$(( ${MONEY_PRE_BB:-0} - 240 ))"

@@ -37,22 +37,17 @@ stay_stop
 # mover first (so the observer's login precondition sees it already in-world but FAR)
 timeout 240 "$WC" TEST2 test123 dfsdfsd aoi-mover "$CMD_MOV" "$MOV_READY" >/tmp/ws_aoi_mover.log 2>&1 &
 MOVER=$!
-for _ in $(seq 1 20); do [ -f "$MOV_READY" ] && break; sleep 1; done
-[ -f "$MOV_READY" ] || { echo "[orch] mover never ready" >&2; kill $MOVER 2>/dev/null; exit 1; }
+wait_for_file 20 "$MOV_READY" || { echo "[orch] mover never ready" >&2; kill $MOVER 2>/dev/null; exit 1; }
 rm -f "$MOV_READY"
 
 timeout 240 "$WC" TEST test123 Ginger aoi-observer "$DFS" "$CMD_OBS" "$ACK_OBS" "$OBS_READY" >/tmp/ws_aoi_observer.log 2>&1 &
 OBS=$!
-for _ in $(seq 1 20); do [ -f "$OBS_READY" ] && break; sleep 1; done
-[ -f "$OBS_READY" ] || { echo "[orch] observer never ready (peer visible at login?)" >&2; cat /tmp/ws_aoi_observer.log; kill $OBS $MOVER 2>/dev/null; exit 1; }
+wait_for_file 20 "$OBS_READY" || { echo "[orch] observer never ready (peer visible at login?)" >&2; cat /tmp/ws_aoi_observer.log; kill $OBS $MOVER 2>/dev/null; exit 1; }
 rm -f "$OBS_READY"
 step_ok "login precondition: peer outside AOI not visible"
 
-obs_cmd() { # $1=command -> waits for the observer's ack, asserts OK
-  rm -f "$ACK_OBS"
-  echo "$1" > "$CMD_OBS"
-  for _ in $(seq 1 35); do [ -f "$ACK_OBS" ] && break; sleep 1; done
-  local ack; ack=$(cat "$ACK_OBS" 2>/dev/null)
+obs_cmd() { # $1=command -> waits for the observer's ack (obs_cmd_send mechanics), asserts OK
+  local ack; ack=$(obs_cmd_send "$1" "$CMD_OBS" "$ACK_OBS" 35)
   if grep -q "^OK" <<<"$ack"; then step_ok "observer: $1"; else step_fail "observer: $1 -> ${ack:-no ack}"; fi
 }
 
@@ -91,7 +86,7 @@ obs_cmd expect-create & CMDPID=$!
 sleep 1 # let the observer arm (clear the stale sighting) BEFORE the login CREATE can arrive
 timeout 120 "$WC" TEST2 test123 dfsdfsd aoi-mover "$CMD_MOV" "$MOV_READY" >/tmp/ws_aoi_mover2.log 2>&1 &
 MOVER=$!
-for _ in $(seq 1 20); do [ -f "$MOV_READY" ] && break; sleep 1; done
+wait_for_file 20 "$MOV_READY"
 rm -f "$MOV_READY"
 wait $CMDPID
 
@@ -117,7 +112,7 @@ sleep 4 # settle before the relay pairs relog the same two accounts
 # 3b. move relay BOTH WAYS: the existing jump-relay pair, run in each direction. The relay-sender
 # mode sends its jump with the CANONICAL test position baked into the packet (-8968,-129 — the
 # module persists + scopes recipients by it), so stage BOTH stored rows at the canonical move-relay
-# geometry (~32yd apart, one grid box) exactly like the suite's position_apart fixture.
+# geometry (~32yd apart, one grid box) exactly like scenario-lib's position_apart fixture.
 sqlq "UPDATE game_character SET x = -8968.0, y = -129.0, z = 83.4 WHERE guid = $GINGER" >/dev/null
 sqlq "UPDATE game_character SET x = -8945.0, y = -107.0, z = 83.4 WHERE guid = $DFS" >/dev/null
 echo "[orch] move relay A->B (Ginger jumps, dfsdfsd observes)…"

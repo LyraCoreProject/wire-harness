@@ -9,10 +9,11 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 
+source tools/wire-client/scenario-lib.sh
 SPELL="${1:-686}"   # 686 = Shadow Bolt (1.7s timed)
 ENTRY="${2:-103}"   # 103 = Garrick Padfoot (hostile Defias) — melee attacker
-CHAR="Ginger"; DB=spacetime-core
-CGUID=$(spacetime sql "$DB" "SELECT guid FROM game_character WHERE name = '$CHAR'" 2>&1 | grep -oE '[0-9]+' | tail -1)
+CHAR="Ginger"
+CGUID=$(char_guid "$CHAR")
 [ -z "$CGUID" ] && { echo "[test] character '$CHAR' not found in game_character" >&2; exit 1; }
 
 cargo build -q -p wire-client || exit 1

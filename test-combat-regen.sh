@@ -18,9 +18,9 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 
-DB=spacetime-core
+source tools/wire-client/scenario-lib.sh
 CHAR=Ginger
-CGUID=$(spacetime sql "$DB" "SELECT guid FROM game_character WHERE name = '$CHAR'" 2>&1 | grep -oE '[0-9]+' | tail -1)
+CGUID=$(char_guid "$CHAR")
 [ -z "$CGUID" ] && { echo "[test] character '$CHAR' not found in game_character" >&2; exit 1; }
 # Test Regeneration (152 fixture): the ONE kind-169 (A_COMBAT_HEALTH_REGEN_PCT) source on a
 # mock-seed node — Demon Skin 696 lost its kind-169 effect to the 024 reclassification

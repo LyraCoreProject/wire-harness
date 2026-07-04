@@ -19,12 +19,12 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 
-DB=spacetime-core
+source tools/wire-client/scenario-lib.sh
 CHAR=${1:-Ginger}
 
 cargo build -q -p wire-client || exit 1
 
-CGUID=$(spacetime sql "$DB" "SELECT guid FROM game_character WHERE name = '$CHAR'" 2>&1 | grep -oE '[0-9]+' | tail -1)
+CGUID=$(char_guid "$CHAR")
 if [ -z "$CGUID" ]; then
   echo "[078] ERROR: character '$CHAR' not found" >&2
   exit 1
@@ -36,7 +36,8 @@ SENTINEL2=/tmp/wc078_stay2_$$
 FAIL=0
 
 echo "[078] Step 1: login (stay) to create a live entity..."
-timeout 30 ./target/debug/wire-client TEST test123 "$CHAR" stay "$SENTINEL1" &
+# outer timeout 90 > the stay mode's own 60s sentinel deadline — the wire client must own the timeout, not be SIGKILLed mid-drain
+timeout 90 "$WC" TEST test123 "$CHAR" stay "$SENTINEL1" &
 WC1=$!
 for _ in $(seq 1 15); do
   H=$(spacetime sql "$DB" "SELECT health FROM game_world_entity WHERE guid=$CGUID" 2>&1 | grep -oE '[0-9]+' | tail -1)
@@ -67,7 +68,7 @@ if [ -z "$PERSISTED" ] || [ "$PERSISTED" -eq 0 ]; then
 fi
 
 echo "[078] Step 4: relog (stay) and check the rebuilt entity's health..."
-timeout 30 ./target/debug/wire-client TEST test123 "$CHAR" stay "$SENTINEL2" &
+timeout 90 "$WC" TEST test123 "$CHAR" stay "$SENTINEL2" & # 90 > the stay mode's 60s inner deadline (same as step 1)
 WC2=$!
 RELOG_HEALTH=""
 MAXHP=""
@@ -78,6 +79,9 @@ for _ in $(seq 1 15); do
   [ -n "$RELOG_HEALTH" ] && [ "$RELOG_HEALTH" != "health" ] && break
   sleep 1
 done
+# Teardown (moved from wire-suite.sh, work-item 162): heal the 22hp residue while this stay
+# session is still live, so later combat tests don't start near-dead — standalone AND suite runs.
+spacetime call "$DB" debug_set_health "$CGUID" 100000 >/dev/null 2>&1 || true
 touch "$SENTINEL2"
 wait "$WC2" 2>/dev/null
 

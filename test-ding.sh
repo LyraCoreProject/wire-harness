@@ -11,26 +11,22 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 
+source tools/wire-client/scenario-lib.sh
 CHAR="Ginger"
-DB=spacetime-core
 # Run-scoped handshake path (work-item 161): defined ONCE here, passed to the wire-client as an
 # arg — no shared /tmp literal, so concurrent runs can't collide.
 DING_READY=/tmp/wc_ding_ready_$$
-CGUID=$(spacetime sql "$DB" "SELECT guid FROM game_character WHERE name = '$CHAR'" 2>&1 | grep -oE '[0-9]+' | tail -1)
+CGUID=$(char_guid "$CHAR")
 [ -z "$CGUID" ] && { echo "[test] character '$CHAR' not found in game_character" >&2; exit 1; }
 
 cargo build -q -p wire-client || exit 1
 
 orchestrate() {
     # Wait until the wire-client is in-world and signals readiness (entity live).
-    for _ in $(seq 1 30); do
-        [ -f "$DING_READY" ] && break
-        sleep 1
-    done
-    if [ ! -f "$DING_READY" ]; then
+    wait_for_file 30 "$DING_READY" || {
         echo "[orch] wire-client never signalled ready" >&2
         return 1
-    fi
+    }
     rm -f "$DING_READY"
     sleep 1   # let any login burst drain through the wire-client
 

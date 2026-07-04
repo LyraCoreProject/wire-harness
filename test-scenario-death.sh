@@ -50,7 +50,7 @@ echo "[orch] staged: wolf=$WOLF corpse_guid=$CORPSE mainhand_dur0=${DUR0:-none}"
 rm -f "$DEATH_READY" "$DEATH_RECLAIMED"
 timeout 180 "$WC" TEST test123 Ginger scenario-death "$CORPSE" "$DEATH_READY" "$DEATH_RECLAIMED" &
 WIRE=$!
-for _ in $(seq 1 30); do [ -f "$DEATH_READY" ] && break; sleep 1; done
+wait_for_file 30 "$DEATH_READY"
 if [ -f "$DEATH_READY" ]; then
   scall debug_set_health "$GINGER" 1
   scall debug_engage "$WOLF" "$GINGER" # the wolf lands the real killing blow
@@ -79,7 +79,7 @@ assert_ge "release: corpse row exists" "${CORPSE_SEEN:-0}" 1
 scall debug_teleport "$GINGER" 0 $PAD_X $PAD_Y $PAD_Z 0
 
 # wait for the wire client's reclaim, then assert the resurrected state and let it finish
-for _ in $(seq 1 60); do [ -f "$DEATH_RECLAIMED" ] && break; sleep 1; done
+wait_for_file 60 "$DEATH_RECLAIMED"
 if [ -f "$DEATH_RECLAIMED" ]; then
   sleep 2
   HP=$(sql1 "SELECT health FROM game_world_entity WHERE guid = $GINGER")
