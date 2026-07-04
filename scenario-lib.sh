@@ -31,9 +31,11 @@ stay_start() { # $1=account $2=pass $3=char
   # guid and would delete the NEW session's entity from under us) — settle first, then verify the
   # entity SURVIVES a beat after appearing, retrying the whole login once if it got reaped.
   sleep 2
+  # Callers that want the wire session's output (the suite) set SC_STAY_LOG_DIR; default discards.
+  local staylog="${SC_STAY_LOG_DIR:+${SC_STAY_LOG_DIR}/stay_$3.log}"
   for attempt in 1 2; do
     rm -f "$SC_STAY_SENTINEL"
-    "$WC" "$1" "$2" "$3" stay "$SC_STAY_SENTINEL" >/dev/null 2>&1 &
+    "$WC" "$1" "$2" "$3" stay "$SC_STAY_SENTINEL" >"${staylog:-/dev/null}" 2>&1 &
     SC_STAY_PID=$!
     local live=""
     for _ in $(seq 1 20); do

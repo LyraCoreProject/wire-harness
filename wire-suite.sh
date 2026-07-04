@@ -28,34 +28,15 @@ LOGDIR="${WS_LOGDIR:-/tmp/wire-suite}"
 mkdir -p "$LOGDIR"
 
 # ---------- tiny helpers ----------
-sqlq() { spacetime sql "$DB" "$1" 2>/dev/null; }
+# The canonical sqlq/char_guid/scall/stay_start/stay_stop (and sql assert_*) implementations live
+# in scenario-lib.sh — ONE copy of the fiddly stay_start relogin-race settle/verify/retry, not a
+# drifting suite-local fork (the fork that used to live here had already lost that race fix).
+# SC_STAY_LOG_DIR makes the lib capture each stay session's wire log like the old fork did.
+SC_STAY_LOG_DIR="$LOGDIR"
+source tools/wire-client/scenario-lib.sh
 # COUNT(*) helper — equality-filter only (spacetime sql 2.x range-filter gotcha, danger-zones §2).
 countq() { sqlq "SELECT COUNT(*) AS n FROM $1" | grep -oE '[0-9]+' | tail -1; }
-char_guid() { sqlq "SELECT guid FROM game_character WHERE name = '$1'" | grep -oE '[0-9]+' | tail -1; }
 char_pos() { sqlq "SELECT x, y, z FROM game_character WHERE guid = $1" | tail -1; }
-
-# Background "stay" session manager: keeps a character live in game_world_entity while fixture
-# reducers run against it. stay_start CHAR ACCOUNT PASS; stay_stop must ALWAYS be called after.
-STAY_PID=""; STAY_SENTINEL=""
-stay_start() { # $1=account $2=pass $3=char -> waits until the char's entity is live
-  local guid; guid=$(char_guid "$3")
-  STAY_SENTINEL="/tmp/ws_stay_$$_${3}"
-  rm -f "$STAY_SENTINEL"
-  "$WC" "$1" "$2" "$3" stay "$STAY_SENTINEL" >"$LOGDIR/stay_$3.log" 2>&1 &
-  STAY_PID=$!
-  for _ in $(seq 1 20); do
-    [ -n "$(sqlq "SELECT guid FROM game_world_entity WHERE guid = $guid" | grep -oE '[0-9]+' | tail -1)" ] && return 0
-    sleep 1
-  done
-  echo "[suite] stay_start: $3 never went live" >&2
-  return 1
-}
-stay_stop() {
-  [ -n "$STAY_SENTINEL" ] && touch "$STAY_SENTINEL"
-  [ -n "$STAY_PID" ] && wait "$STAY_PID" 2>/dev/null
-  STAY_PID=""; STAY_SENTINEL=""
-  sleep 1 # let the logout persist_entity land before the next fixture reads game_character
-}
 
 # ---------- result accounting ----------
 PASS_N=0; FAIL_N=0; SKIP_N=0
