@@ -47,7 +47,8 @@ H_AT=$(sql1 "SELECT heal_at_pct FROM pkg_playerbots_personality WHERE character_
 assert_eq "personality: healer role default heal_at_pct=80" "${H_AT:-0}" "80"
 
 # ---- 2. party up over the wire (auto-accept) ----
-HOLD=/tmp/ws_party_bots
+# Run-scoped hold path (work-item 161): defined ONCE here, passed as the party-bots hold arg.
+HOLD=/tmp/ws_party_bots_$$
 rm -f "$HOLD" "$HOLD.ingroup"
 timeout 400 "$WC" TEST test123 Ginger party-bots "$HOLD" Tankbot1 Healbot1 Dpsbot1 >/tmp/ws_party_bots.log 2>&1 &
 LEADER=$!

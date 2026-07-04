@@ -11,7 +11,7 @@ use wow_world_messages::vanilla::{
     PartyResult, CMSG_GROUP_ACCEPT, CMSG_GROUP_DECLINE, CMSG_GROUP_DISBAND, CMSG_GROUP_INVITE,
 };
 
-use super::ModeCtx;
+use super::{drain_until_file, require_path_arg, ModeCtx};
 
 /// Run `mode` if it belongs to this family. `Ok(true)` = recognized and completed
 /// (bail!/exit on failure inside); `Ok(false)` = not this family's mode.
@@ -32,12 +32,12 @@ pub(crate) fn try_dispatch(
     Ok(true)
 }
 
-// ---- group-leader <target_name> [hold_file]: invite -> PARTY_COMMAND_RESULT(Success) ->
+// ---- group-leader <target_name> <hold_file>: invite -> PARTY_COMMAND_RESULT(Success) ->
 // (target accepts) SMSG_GROUP_LIST carrying the target -> write <hold_file>.ingroup -> hold the
 // session until <hold_file> appears -> CMSG_GROUP_DISBAND -> SMSG_GROUP_DESTROYED. ----
 fn group_leader(c: &mut WireClient, args: &mut dyn Iterator<Item = String>) -> Result<()> {
     let target: String = args.next().expect("target name");
-    let hold: String = args.next().unwrap_or_else(|| "/tmp/ws_group_leader".into());
+    let hold = require_path_arg(args, "group-leader <target_name> <hold_file>", "hold_file")?;
     let _ = std::fs::remove_file(&hold);
     let _ = std::fs::remove_file(format!("{hold}.ingroup"));
     c.set_recv_timeout(Duration::from_millis(500))?;
@@ -82,7 +82,7 @@ fn group_leader(c: &mut WireClient, args: &mut dyn Iterator<Item = String>) -> R
 // final SMSG_GROUP_LIST carries ALL names, write <hold>.ingroup, hold for the orchestrator's
 // fight phase, then disband and expect SMSG_GROUP_DESTROYED. (Work-item 148.) ----
 fn party_bots(c: &mut WireClient, args: &mut dyn Iterator<Item = String>) -> Result<()> {
-    let hold: String = args.next().expect("hold file");
+    let hold = require_path_arg(args, "party-bots <hold_file> <bot names…>", "hold_file")?;
     let names: Vec<String> = args.collect();
     if names.is_empty() {
         bail!("party-bots: need at least one bot name");
@@ -150,11 +150,11 @@ fn party_bots(c: &mut WireClient, args: &mut dyn Iterator<Item = String>) -> Res
     Ok(())
 }
 
-// ---- group-join [hold_file]: wait for SMSG_GROUP_INVITE -> CMSG_GROUP_ACCEPT ->
+// ---- group-join <hold_file>: wait for SMSG_GROUP_INVITE -> CMSG_GROUP_ACCEPT ->
 // SMSG_GROUP_LIST -> write <hold_file>.ingroup -> hold until <hold_file> -> expect
 // SMSG_GROUP_DESTROYED (the leader's disband dissolves the 2-man group). ----
 fn group_join(c: &mut WireClient, args: &mut dyn Iterator<Item = String>) -> Result<()> {
-    let hold: String = args.next().unwrap_or_else(|| "/tmp/ws_group_join".into());
+    let hold = require_path_arg(args, "group-join <hold_file>", "hold_file")?;
     let _ = std::fs::remove_file(&hold);
     let _ = std::fs::remove_file(format!("{hold}.ingroup"));
     c.set_recv_timeout(Duration::from_millis(500))?;
@@ -256,13 +256,8 @@ fn group_decline(c: &mut WireClient, _args: &mut dyn Iterator<Item = String>) ->
 /// then CMSG_GROUP_DISBAND and expect SMSG_GROUP_DESTROYED.
 fn hold_then_disband(c: &mut WireClient, hold: &str, hold_secs: u64, tag: &str) -> Result<()> {
     std::fs::write(format!("{hold}.ingroup"), "1").ok();
-    // Kept hand-rolled: drain-while-polling-a-file handshake — the hold-file check must run even
-    // on quiet stretches, and recv_for's predicate only fires on received packets.
-    let deadline = std::time::Instant::now() + Duration::from_secs(hold_secs);
-    while std::time::Instant::now() < deadline && !std::path::Path::new(hold).exists() {
-        let _ = c.recv(); // keep the socket drained while held
-    }
-    if !std::path::Path::new(hold).exists() {
+    // Drain the socket while held; only the release file (or the per-flow deadline) ends the wait.
+    if !drain_until_file(c, hold, hold_secs) {
         bail!("{tag}: orchestrator never released the hold");
     }
     let _ = std::fs::remove_file(hold);

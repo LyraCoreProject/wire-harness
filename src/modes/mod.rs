@@ -10,7 +10,7 @@ mod relay;
 mod scenario;
 mod social;
 
-use anyhow::Result;
+use anyhow::{anyhow, bail, Result};
 use wire_client::WireClient;
 use wow_world_messages::vanilla::SMSG_MESSAGECHAT;
 
@@ -47,6 +47,62 @@ pub(crate) fn dispatch(
         || relay::try_dispatch(mode, c, args, mcx)?
         || scenario::try_dispatch(mode, c, args, mcx)?
         || group::try_dispatch(mode, c, args, mcx)?)
+}
+
+/// Fetch the next CLI argument as a script-owned handshake path. Handshake paths have NO /tmp
+/// defaults (work-item 161): the orchestrator script defines each run-scoped path once (the
+/// scenario-lib `/tmp/sc_stay_$$` precedent) and passes it here, so a rename can never half-land
+/// as a byte-mismatch runtime timeout and two concurrent runs can never collide on a sentinel.
+/// A missing arg is a one-line usage bail naming the arg.
+pub(crate) fn require_path_arg(
+    args: &mut dyn Iterator<Item = String>,
+    mode_usage: &str,
+    name: &str,
+) -> Result<String> {
+    args.next()
+        .ok_or_else(|| anyhow!("usage: {mode_usage} — missing <{name}>"))
+}
+
+/// Write-sentinel half of the Rust↔shell file handshake: write "1" to `path` (a script-owned
+/// path from [`require_path_arg`]), then drain the socket until the orchestrator CONSUMES
+/// (deletes) the file or `secs` elapse. The drain is load-bearing — blocking on the file without
+/// recv()ing would stall the socket and the gateway would backpressure + drop the connection —
+/// and the file check must run even on quiet stretches, which recv_for's packet-driven predicate
+/// cannot express; that formerly per-site hand-rolled loop lives here, once. Bails with `what`
+/// (plus the path and window) if the file is still present at the deadline.
+pub(crate) fn signal_and_wait_consumed(
+    c: &mut WireClient,
+    path: &str,
+    secs: u64,
+    what: &str,
+) -> Result<()> {
+    std::fs::write(path, "1").ok();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    while std::time::Instant::now() < deadline && std::path::Path::new(path).exists() {
+        // Drain with recv_RAW deliberately (sonnet-review finding): a drain needs no decoded
+        // view of the traffic, and raw never chokes on gtker-undecodable frames (TYPE-less
+        // partial-VALUES updates) nor mutates seen_guids — recv() does both. Standardized for
+        // every handshake site, including the ones that historically drained decoded.
+        let _ = c.recv_raw(); // keep the socket drained while the orchestrator works
+    }
+    if std::path::Path::new(path).exists() {
+        bail!("{what} ({path} not consumed within {secs}s)");
+    }
+    Ok(())
+}
+
+/// Wait-for-sentinel half of the file handshake: drain the socket until `path` APPEARS or `secs`
+/// elapse, returning whether it exists at exit. Same rationale as [`signal_and_wait_consumed`]:
+/// the file poll must run even on quiet stretches, and a recv error is NOT terminal — with no
+/// ambient packet traffic it is just the socket read-timeout expiring, so only the deadline ends
+/// the wait. Callers own the per-site timeout value and any consume/remove of the file after.
+pub(crate) fn drain_until_file(c: &mut WireClient, path: &str, secs: u64) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    while std::time::Instant::now() < deadline && !std::path::Path::new(path).exists() {
+        // recv_RAW for the same reason as signal_and_wait_consumed: a drain wants no decode.
+        let _ = c.recv_raw(); // Err here = just a poll-interval read timeout on a quiet stretch
+    }
+    std::path::Path::new(path).exists()
 }
 
 /// Extract the message text from an SMSG_MESSAGECHAT for probe comparison.

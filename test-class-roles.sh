@@ -50,7 +50,8 @@ assert_eq "kit: healer learned Holy Light" "$(sql1 "SELECT COUNT(*) AS n FROM ga
 assert_eq "kit: dps learned Judgement" "$(sql1 "SELECT COUNT(*) AS n FROM game_player_spell WHERE character_guid = $DPS AND spell_id = 50134")" "1"
 
 # party up (auto-accept) so the party-scoped conditions see all four members
-HOLD=/tmp/ws_class_roles
+# Run-scoped hold path (work-item 161): defined ONCE here, passed as the party-bots hold arg.
+HOLD=/tmp/ws_class_roles_$$
 rm -f "$HOLD" "$HOLD.ingroup"
 timeout 400 "$WC" TEST test123 Ginger party-bots "$HOLD" Tankbot1 Healbot1 Dpsbot1 >/tmp/ws_class_roles.log 2>&1 &
 LEADER=$!

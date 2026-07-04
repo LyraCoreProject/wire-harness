@@ -53,9 +53,15 @@ fn main() -> Result<()> {
     // ---- M2: the orchestrator spawns a mob at Ginger's feet (she must be live) and writes
     // its exact guid to a file; we KEEP DRAINING the socket while polling that file, then
     // target + cast + assert. (Blocking on the file without draining would stall the socket
-    // and the gateway would drop the connection — so we recv() every loop.)
-    let target_file =
-        std::env::var("WIRE_TARGET_FILE").unwrap_or_else(|_| "/tmp/wc_target".into());
+    // and the gateway would drop the connection — so we recv() every loop.) The path is
+    // script-owned and REQUIRED — no /tmp default (work-item 161), so concurrent runs can
+    // never collide on the same target file.
+    let Ok(target_file) = std::env::var("WIRE_TARGET_FILE") else {
+        bail!(
+            "M2 cast mode requires WIRE_TARGET_FILE=<run-scoped path> (the orchestrator writes \
+             the target guid there; there is no /tmp default)"
+        );
+    };
     let _ = std::fs::remove_file(&target_file);
     eprintln!("[wire] M2 ready — draining socket, waiting for a target guid in {target_file}…");
     let mob = loop {

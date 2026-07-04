@@ -34,7 +34,8 @@ sqlq "DELETE FROM game_character_quest WHERE character_guid = $DFS AND quest_ent
 sqlq "UPDATE game_character SET x = $PAD_X, y = $PAD_Y, z = $PAD_Z WHERE guid = $GINGER" >/dev/null
 sqlq "UPDATE game_character SET x = -8902.0, y = -440.0, z = $PAD_Z WHERE guid = $DFS" >/dev/null
 
-HOLD_L=/tmp/ws_group_leader; HOLD_J=/tmp/ws_group_join
+# Run-scoped handshake paths (work-item 161): defined ONCE here, passed as wire-client args.
+HOLD_L=/tmp/ws_group_leader_$$; HOLD_J=/tmp/ws_group_join_$$
 rm -f "$HOLD_L" "$HOLD_J" "$HOLD_L.ingroup" "$HOLD_J.ingroup"
 
 # ---- 1. invite/accept over two live sessions ----

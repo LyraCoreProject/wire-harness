@@ -7,7 +7,7 @@ use wire_client::WireClient;
 use wow_world_messages::vanilla::opcodes::ServerOpcodeMessage as Smsg;
 use wow_world_messages::Guid;
 
-use super::ModeCtx;
+use super::{require_path_arg, signal_and_wait_consumed, ModeCtx};
 
 /// Run `mode` if it belongs to this family. `Ok(true)` = recognized and completed
 /// (bail!/exit on failure inside); `Ok(false)` = not this family's mode.
@@ -212,60 +212,48 @@ fn vendor_sell_repair_buyback(
     Ok(())
 }
 
-// ---- vendor-sell-buyback <vendor> <item_guid>: sell + buyback in ONE session (the module
-// clears the buyback ring on logout — vanilla — so the two must share a connection). The
-// orchestrator sql-asserts at the two handshake files while the session is held open. ----
+// ---- vendor-sell-buyback <vendor> <item_guid> <sold_file> <bought_file>: sell + buyback in ONE
+// session (the module clears the buyback ring on logout — vanilla — so the two must share a
+// connection). The orchestrator sql-asserts at the two handshake files while the session is
+// held open. ----
 fn vendor_sell_buyback(
     _mode: &str,
     c: &mut WireClient,
     args: &mut dyn Iterator<Item = String>,
 ) -> Result<()> {
     use wow_world_messages::vanilla::{BuybackSlot, CMSG_BUYBACK_ITEM, CMSG_SELL_ITEM};
+    const USAGE: &str = "vendor-sell-buyback <vendor_guid> <item_guid> <sold_file> <bought_file>";
     let vendor: u64 = args.next().and_then(|s| s.parse().ok()).expect("vendor guid");
     let item: u64 = args.next().and_then(|s| s.parse().ok()).expect("item guid");
+    let sold = require_path_arg(args, USAGE, "sold_file")?;
+    let bought = require_path_arg(args, USAGE, "bought_file")?;
     c.send(&CMSG_SELL_ITEM { vendor: Guid::new(vendor), item: Guid::new(item), amount: 1 })?;
-    std::fs::write("/tmp/ws_vendor_sold", "1").ok();
-    // Kept hand-rolled: drain-while-polling-a-file handshake — the file check must run even on
-    // quiet stretches, and recv_for's predicate only fires on received packets.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while std::time::Instant::now() < deadline && std::path::Path::new("/tmp/ws_vendor_sold").exists() {
-        let _ = c.recv_raw();
-    }
-    if std::path::Path::new("/tmp/ws_vendor_sold").exists() { bail!("sell: orchestrator never confirmed the sell-state asserts"); }
+    signal_and_wait_consumed(c, &sold, 30, "sell: orchestrator never confirmed the sell-state asserts")?;
     println!("[scenario] SELL OK (orchestrator confirmed money + buyback ring)");
     c.send(&CMSG_BUYBACK_ITEM { guid: Guid::new(vendor), slot: BuybackSlot::try_from(69u32).unwrap() })?;
-    std::fs::write("/tmp/ws_vendor_bought", "1").ok();
-    // Kept hand-rolled: same drain-while-polling-a-file handshake as above.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while std::time::Instant::now() < deadline && std::path::Path::new("/tmp/ws_vendor_bought").exists() {
-        let _ = c.recv_raw();
-    }
-    if std::path::Path::new("/tmp/ws_vendor_bought").exists() { bail!("buyback: orchestrator never confirmed the buyback-state asserts"); }
+    signal_and_wait_consumed(c, &bought, 30, "buyback: orchestrator never confirmed the buyback-state asserts")?;
     println!("[wire] VENDOR-SELL-BUYBACK PASS \u{2713}  sell + buyback round-trip in one session");
     Ok(())
 }
 
 // ---- scenario-train: trainer list -> buy spell -> cast it, asserting the full sequence ----
-// Usage: wire-client TEST test123 Ginger scenario-train <trainer_guid> <spell_id> <cast_ms>
+// Usage: wire-client TEST test123 Ginger scenario-train <trainer_guid> <spell_id> <cast_ms> <ready_file>
+// NOTE: <cast_ms> is positional BEFORE <ready_file> — callers must pass both (the ready file is
+// required, so an omitted cast_ms would swallow the path and bail on the missing arg).
 fn scenario_train(
     _mode: &str,
     c: &mut WireClient,
     args: &mut dyn Iterator<Item = String>,
 ) -> Result<()> {
     use wow_world_messages::vanilla::{CMSG_TRAINER_BUY_SPELL, CMSG_TRAINER_LIST};
+    const USAGE: &str = "scenario-train <trainer_guid> <spell_id> <cast_ms> <ready_file>";
     let trainer: u64 = args.next().and_then(|s| s.parse().ok()).expect("trainer guid");
     let spell: u32 = args.next().and_then(|s| s.parse().ok()).expect("spell id");
     let cast_ms: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(1500);
+    let ready = require_path_arg(args, USAGE, "ready_file")?;
 
     // Handshake: the orchestrator damages the caster (so the heal is observable) once we're live.
-    // Kept hand-rolled: drain-while-polling-a-file handshake — the file check must run even on
-    // quiet stretches, and recv_for's predicate only fires on received packets.
-    std::fs::write("/tmp/ws_train_ready", "1").ok();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while std::time::Instant::now() < deadline && std::path::Path::new("/tmp/ws_train_ready").exists() {
-        let _ = c.recv_raw(); // drain while the orchestrator works
-    }
-    if std::path::Path::new("/tmp/ws_train_ready").exists() { bail!("orchestrator never staged the caster (ready file not consumed)"); }
+    signal_and_wait_consumed(c, &ready, 30, "orchestrator never staged the caster")?;
 
     // STEP 1: the trainer window lists the offering.
     c.send(&CMSG_TRAINER_LIST { guid: Guid::new(trainer) })?;
@@ -320,24 +308,20 @@ fn scenario_train(
 }
 
 // ---- scenario-death: die (orchestrated) -> release -> wait the reclaim delay -> reclaim ----
-// Usage: wire-client TEST test123 Ginger scenario-death <corpse_guid>
+// Usage: wire-client TEST test123 Ginger scenario-death <corpse_guid> <ready_file> <reclaimed_file>
 fn scenario_death(
     _mode: &str,
     c: &mut WireClient,
     args: &mut dyn Iterator<Item = String>,
 ) -> Result<()> {
     use wow_world_messages::vanilla::CMSG_RECLAIM_CORPSE;
+    const USAGE: &str = "scenario-death <corpse_guid> <ready_file> <reclaimed_file>";
     let corpse: u64 = args.next().and_then(|s| s.parse().ok()).expect("corpse guid");
+    let ready = require_path_arg(args, USAGE, "ready_file")?;
+    let reclaimed = require_path_arg(args, USAGE, "reclaimed_file")?;
 
-    // STEP 1: signal ready; the orchestrator arranges a real death-by-mob, then removes the file.
-    // Kept hand-rolled: drain-while-polling-a-file handshake — the file check must run even on
-    // quiet stretches, and recv_for's predicate only fires on received packets.
-    std::fs::write("/tmp/ws_death_ready", "1").ok();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while std::time::Instant::now() < deadline && std::path::Path::new("/tmp/ws_death_ready").exists() {
-        let _ = c.recv_raw();
-    }
-    if std::path::Path::new("/tmp/ws_death_ready").exists() { bail!("STEP 1 FAIL: orchestrator never confirmed the death"); }
+    // STEP 1: signal ready; the orchestrator arranges a real death-by-mob, then consumes the file.
+    signal_and_wait_consumed(c, &ready, 60, "STEP 1 FAIL: orchestrator never confirmed the death")?;
     println!("[scenario] STEP 1 OK — orchestrator confirmed death (server-side)");
 
     // STEP 2: release -> the 30s reclaim-delay packet.
@@ -356,13 +340,7 @@ fn scenario_death(
     println!("[scenario] STEP 3 OK — CMSG_RECLAIM_CORPSE sent after the 30s window");
 
     // STEP 4: hold the session while the orchestrator sql-asserts the resurrected state.
-    // Kept hand-rolled: same drain-while-polling-a-file handshake as STEP 1.
-    std::fs::write("/tmp/ws_death_reclaimed", "1").ok();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while std::time::Instant::now() < deadline && std::path::Path::new("/tmp/ws_death_reclaimed").exists() {
-        let _ = c.recv_raw();
-    }
-    if std::path::Path::new("/tmp/ws_death_reclaimed").exists() { bail!("STEP 4 FAIL: orchestrator never confirmed the resurrect"); }
+    signal_and_wait_consumed(c, &reclaimed, 30, "STEP 4 FAIL: orchestrator never confirmed the resurrect")?;
     println!("[scenario] STEP 4 OK — orchestrator confirmed alive-at-50% state");
     println!("[wire] SCENARIO-DEATH PASS \u{2713}  death->release->30s delay->reclaim");
     Ok(())

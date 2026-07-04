@@ -12,6 +12,9 @@ scenario_preflight scenario-vendor
 VENDOR_ENTRY=51004; BAG_ENTRY=51001 # the 0-damage friendly trainer template doubles as a punching bag
 BLADE=50
 PAD_X=-8900; PAD_Y=-210; PAD_Z=82
+# Run-scoped handshake paths (work-item 161): defined ONCE here, passed as wire-client args.
+SOLD_FILE=/tmp/ws_vendor_sold_$$
+BOUGHT_FILE=/tmp/ws_vendor_bought_$$
 
 # repeatability: purge any stale blade instances + buyback rows from a prior run
 sqlq "DELETE FROM game_item_instance WHERE owner_guid = $GINGER AND entry = $BLADE" >/dev/null
@@ -79,27 +82,27 @@ assert_ge "unequip: blade back in a backpack slot" "${NSLOT:-0}" 23
 # STEP 6b+7: sell then buyback in ONE session (logout clears the buyback ring — vanilla), with
 # mid-session sql assertions at the two handshake points.
 MONEY_PRE_SELL=$(sql1 "SELECT money FROM game_character WHERE guid = $GINGER")
-rm -f /tmp/ws_vendor_sold /tmp/ws_vendor_bought
-timeout 120 "$WC" TEST test123 Ginger vendor-sell-buyback "$VENDOR" "${IGUID:-0}" &
+rm -f "$SOLD_FILE" "$BOUGHT_FILE"
+timeout 120 "$WC" TEST test123 Ginger vendor-sell-buyback "$VENDOR" "${IGUID:-0}" "$SOLD_FILE" "$BOUGHT_FILE" &
 WIRE=$!
-for _ in $(seq 1 20); do [ -f /tmp/ws_vendor_sold ] && break; sleep 1; done
-if [ -f /tmp/ws_vendor_sold ]; then
+for _ in $(seq 1 20); do [ -f "$SOLD_FILE" ] && break; sleep 1; done
+if [ -f "$SOLD_FILE" ]; then
   sleep 1
   # mid-session, the authoritative purse is the LIVE entity (game_character.money persists at logout)
   assert_eq "sell: money +240 (sell_price)" "$(sql1 "SELECT money FROM game_world_entity WHERE guid = $GINGER")" "$(( ${MONEY_PRE_SELL:-0} + 240 ))"
   assert_eq "sell: instance out of the inventory" "$(sql1 "SELECT COUNT(*) AS n FROM game_item_instance WHERE guid = ${IGUID:-0}")" "0"
   assert_ge "sell: buyback ring row exists" "$(sql1 "SELECT COUNT(*) AS n FROM game_character_buyback WHERE player_guid = $GINGER")" 1
   MONEY_PRE_BB=$(sql1 "SELECT money FROM game_world_entity WHERE guid = $GINGER")
-  rm -f /tmp/ws_vendor_sold
+  rm -f "$SOLD_FILE"
 else
   echo "[orch] wire client never signalled the sell" >&2; FAILED=1
 fi
-for _ in $(seq 1 20); do [ -f /tmp/ws_vendor_bought ] && break; sleep 1; done
-if [ -f /tmp/ws_vendor_bought ]; then
+for _ in $(seq 1 20); do [ -f "$BOUGHT_FILE" ] && break; sleep 1; done
+if [ -f "$BOUGHT_FILE" ]; then
   sleep 1
   assert_eq "buyback: money -240" "$(sql1 "SELECT money FROM game_world_entity WHERE guid = $GINGER")" "$(( ${MONEY_PRE_BB:-0} - 240 ))"
   assert_ge "buyback: blade instance back in the inventory" "$(sql1 "SELECT COUNT(*) AS n FROM game_item_instance WHERE owner_guid = $GINGER AND entry = $BLADE")" 1
-  rm -f /tmp/ws_vendor_bought
+  rm -f "$BOUGHT_FILE"
 else
   echo "[orch] wire client never signalled the buyback" >&2; FAILED=1
 fi

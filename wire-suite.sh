@@ -252,17 +252,20 @@ t_init_factions() {
 t_levelup_info() {
   [ "${HAS_LEVEL_STATS:-0}" -ge 1 ] || skip "game_level_stats empty — the cmangos stat curve isn't imported, so ding deltas are all zero and the probe's non-zero-stat assertion can't hold"
   # orchestrate: stage at L1 + boosted XP, kill a seeded wolf, expect SMSG_LEVELUP_INFO
+  # Run-scoped handshake path (work-item 161): defined once, passed as the levelup-info ready arg.
+  local ready=/tmp/wc_levelup_ready_$$
+  rm -f "$ready"
   spacetime call "$DB" -- debug_set_level "$GINGER" 1 >/dev/null 2>&1 || true
   spacetime call "$DB" -- debug_set_xp_rate 100 >/dev/null 2>&1 || true
   (
-    for _ in $(seq 1 30); do [ -f /tmp/wc_levelup_ready ] && break; sleep 1; done
-    rm -f /tmp/wc_levelup_ready
+    for _ in $(seq 1 30); do [ -f "$ready" ] && break; sleep 1; done
+    rm -f "$ready"
     spacetime call "$DB" -- debug_spawn_at_feet "$GINGER" 51000 5 >/dev/null 2>&1
     sleep 1
     spacetime call "$DB" -- debug_kill_nearest "$GINGER" 51000 >/dev/null 2>&1
   ) &
   local orch=$!
-  timeout 90 "$WC" TEST test123 Ginger levelup-info 1
+  timeout 90 "$WC" TEST test123 Ginger levelup-info "$ready" 1
   local rc=$?
   wait "$orch" 2>/dev/null
   spacetime call "$DB" -- debug_set_xp_rate 1 >/dev/null 2>&1 || true

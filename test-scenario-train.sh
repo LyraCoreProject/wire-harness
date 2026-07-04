@@ -11,6 +11,8 @@ scenario_preflight scenario-train
 
 TRAINER_ENTRY=51001; SPELL=2050; CAST_MS=1500; COST=100
 PAD_X=-8880; PAD_Y=-240; PAD_Z=82
+# Run-scoped handshake path (work-item 161): defined ONCE here, passed as a wire-client arg.
+TRAIN_READY=/tmp/ws_train_ready_$$
 
 # repeatability: forget the spell + normalize the purse before buying it again
 sqlq "DELETE FROM game_player_spell WHERE character_guid = $GINGER AND spell_id = $SPELL" >/dev/null
@@ -24,17 +26,17 @@ if [ -z "$TRAINER" ]; then echo "[orch] trainer spawn failed" >&2; exit 1; fi
 echo "[orch] staged: trainer=$TRAINER"
 
 # ---- run the wire scenario; stage the damaged caster at its ready-handshake ----
-rm -f /tmp/ws_train_ready
-timeout 120 "$WC" TEST test123 Ginger scenario-train "$TRAINER" $SPELL $CAST_MS &
+rm -f "$TRAIN_READY"
+timeout 120 "$WC" TEST test123 Ginger scenario-train "$TRAINER" $SPELL $CAST_MS "$TRAIN_READY" &
 WIRE=$!
 HEALTH0=""
-for _ in $(seq 1 30); do [ -f /tmp/ws_train_ready ] && break; sleep 1; done
-if [ -f /tmp/ws_train_ready ]; then
+for _ in $(seq 1 30); do [ -f "$TRAIN_READY" ] && break; sleep 1; done
+if [ -f "$TRAIN_READY" ]; then
   MAXHP=$(sql1 "SELECT max_health FROM game_world_entity WHERE guid = $GINGER")
   HEALTH0=$(( ${MAXHP:-100} - 60 )) # leave a >heal-size hole so the +50 heal is unambiguous
   scall debug_set_health "$GINGER" "$HEALTH0"
   scall debug_set_power "$GINGER" 100 # no mana curve on a no-import sandbox -> stage the 30-mana cost
-  rm -f /tmp/ws_train_ready # signals the wire client to proceed
+  rm -f "$TRAIN_READY" # signals the wire client to proceed
 else
   echo "[orch] wire client never signalled ready" >&2; FAILED=1
 fi

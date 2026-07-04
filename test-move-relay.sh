@@ -5,7 +5,8 @@
 # Client B (TEST2 / dfsdfsd) observes and asserts it receives MSG_MOVE_JUMP_Server (opcode 0xBB).
 #
 # Both characters start within 32yd of each other in Northshire — well within the 125yd AOI box.
-# Coordination via /tmp/wc_relay_ready: observer writes it when in-world; sender reads it.
+# Coordination via the run-scoped $RELAY_READY file (work-item 161), passed to both wire-client
+# sides as an arg: observer writes it when in-world; sender polls the same path.
 #
 # Usage: bash tools/wire-client/test-move-relay.sh
 # Pass exit code: 0. Fail exit code: non-zero.
@@ -20,16 +21,18 @@ if [[ ! -x "$WC" ]]; then
   cargo build -p wire-client --manifest-path "$SCRIPT_DIR/../../Cargo.toml" 2>&1
 fi
 
-rm -f /tmp/wc_relay_ready
+# Run-scoped handshake path (work-item 161): defined ONCE here, passed to both sides as an arg.
+RELAY_READY=/tmp/wc_relay_ready_$$
+rm -f "$RELAY_READY"
 
 # --- Client B (observer) — runs in background ---
 echo "[test-move-relay] launching observer (TEST2 / dfsdfsd)…"
-"$WC" TEST2 test123 dfsdfsd relay-observer >/tmp/wc_relay_observer.log 2>&1 &
+"$WC" TEST2 test123 dfsdfsd relay-observer "$RELAY_READY" >/tmp/wc_relay_observer.log 2>&1 &
 OBSERVER_PID=$!
 
 # --- Client A (sender) — wait up to 8s for observer to log in, then send jump ---
 echo "[test-move-relay] launching sender (TEST / Ginger)…"
-"$WC" TEST test123 Ginger relay-sender >/tmp/wc_relay_sender.log 2>&1 &
+"$WC" TEST test123 Ginger relay-sender "$RELAY_READY" >/tmp/wc_relay_sender.log 2>&1 &
 SENDER_PID=$!
 
 # --- Wait for both to finish ---
