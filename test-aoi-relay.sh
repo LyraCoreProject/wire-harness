@@ -75,10 +75,10 @@ wait "$MOVER" 2>/dev/null
 sleep 2
 assert_eq "disconnect: peer entity row despawned" "$(sql1 "SELECT COUNT(*) AS n FROM game_world_entity WHERE guid = $DFS")" "0"
 
-# 5. AOI LEAVE boundary: reconnect the peer in-box (fresh entity insert -> CREATE), then teleport it
-# out of the box -> DESTROY. (The reverse — an UPDATE bringing a previously-destroyed peer back into
-# the box — does NOT re-fire the gateway's CREATE today; that asymmetry is filed as its own bug
-# work-item, found by this harness. The enter boundary is asserted via step 2's update-into-scope.)
+# 5. AOI LEAVE + RE-ENTER boundary: reconnect the peer in-box (fresh entity insert -> CREATE),
+# teleport it out of the box -> DESTROY, then (5b) teleport the SAME live session back in -> CREATE
+# again. The re-enter half is work-item 144: the gateway can receive the return as an UPDATE of a
+# still-cached row (no on_insert), so the offer-on-update path must deliver the CREATE — no relog.
 sleep 3 # settle: the abrupt disconnect's cleanup must finish before the same account relogs
 # The abrupt disconnect does NOT persist the live position — stage the stored row directly so the
 # reconnect materializes INSIDE the observer's box (a genuine fresh-insert CREATE).
@@ -95,6 +95,12 @@ wait $CMDPID
 obs_cmd expect-destroy & CMDPID=$!
 sleep 1
 scall debug_teleport "$DFS" 0 $FX $FY $FZ 0
+wait $CMDPID
+
+# 5b. re-enter with the SAME live peer session (work-item 144's done-when assertion).
+obs_cmd expect-create & CMDPID=$!
+sleep 1
+scall debug_teleport "$DFS" 0 $NX $NY $NZ 0
 wait $CMDPID
 
 echo "exit" > "$CMD_MOV"

@@ -9,9 +9,9 @@
 use anyhow::{bail, Result};
 
 mod modes;
-use wire_client::{logon, WireClient};
+use wire_client::WireClient;
 use wow_world_messages::vanilla::opcodes::ServerOpcodeMessage as Smsg;
-use wow_world_messages::vanilla::{Class, WorldResult};
+use wow_world_messages::vanilla::Class;
 
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
@@ -20,67 +20,12 @@ fn main() -> Result<()> {
     let char_name = args.next().unwrap_or_else(|| "Ginger".into());
     let mode: Option<String> = args.next();
 
-    // ---- char-enum-gear probe: verify SMSG_CHAR_ENUM equipment slots carry real display_ids ----
-    // Usage: wire-client TEST test123 <char-name> char-enum-gear [slot] [want_display_id]
-    // slot defaults to 15 (main-hand weapon). want_display_id defaults to 0 (asserts nonzero).
-    // Pass: the named character's equipment slot has a non-zero display_id (or == want if given).
-    if mode.as_deref() == Some("char-enum-gear") {
-        let slot: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(15);
-        let want: Option<u32> = args.next().and_then(|s| s.parse().ok());
-        eprintln!("[wire] char-enum-gear: logon + CMSG_CHAR_ENUM, checking {char_name} slot {slot}…");
-        let (k, world_addr) = logon(&account, &password)?;
-        let mut c = WireClient::connect_world(&world_addr, &account, k)?;
-        let chars = c.char_enum_gear()?;
-        let Some((_, _, display_ids)) = chars.iter().find(|(_, n, _)| n.eq_ignore_ascii_case(&char_name)) else {
-            bail!("char-enum-gear: character {char_name:?} not found in SMSG_CHAR_ENUM ({} chars)", chars.len());
-        };
-        let got = display_ids.get(slot).copied().unwrap_or(0);
-        println!("[probe] SMSG_CHAR_ENUM {char_name} slot {slot} display_id={got}");
-        // Print full non-zero gear for inspection
-        for (i, &did) in display_ids.iter().enumerate() {
-            if did != 0 {
-                println!("[probe]   slot {i} display_id={did}");
-            }
-        }
-        let pass = match want {
-            Some(w) => got == w,
-            None => got != 0,
-        };
-        if pass {
-            let desc = want.map(|w| format!("=={w}")).unwrap_or_else(|| "!=0".into());
-            println!("[wire] CHAR-ENUM-GEAR PASS \u{2713}  {char_name} slot {slot} display_id={got} ({desc})");
+    // ---- char-select-tier probes (modes/probes.rs): these run BEFORE login_as — they operate
+    // at the character-select screen (char-enum-gear, char-delete) and never enter the world. ----
+    if let Some(m) = mode.as_deref() {
+        if modes::dispatch_charselect(m, &account, &password, &char_name, &mut args)? {
             return Ok(());
         }
-        let desc = want.map(|w| format!("want {w}, got {got}")).unwrap_or_else(|| format!("want non-zero, got 0 (naked)"));
-        bail!("char-enum-gear: {char_name} slot {slot}: {desc}");
-    }
-
-    // ---- char-delete probe: CMSG_CHAR_DELETE -> SMSG_CHAR_DELETE(success), row gone (081) ----
-    // Usage: wire-client <account> <password> <char-name-to-create-then-delete> char-delete
-    // Char-select tier only (no player_login/world-entry). Creates (or finds) a throwaway
-    // character named `char_name`, deletes it, and asserts SMSG_CHAR_DELETE(CharDeleteSuccess)
-    // AND that a follow-up CMSG_CHAR_ENUM no longer lists that guid. The gateway's own DB-row
-    // check (game_character gone + no owned item/quest/spell rows) is verified separately via
-    // `spacetime sql`.
-    if mode.as_deref() == Some("char-delete") {
-        eprintln!("[wire] char-delete probe: logon + char-select only (no world entry)…");
-        let (k, world_addr) = logon(&account, &password)?;
-        let mut c2 = WireClient::connect_world(&world_addr, &account, k)?;
-        let guid = c2.create_or_find_char(&char_name, Class::Warrior)?;
-        eprintln!("[wire] deleting {char_name} (guid={guid})…");
-        let result = c2.char_delete(guid)?;
-        println!("[probe] SMSG_CHAR_DELETE result={result:?}");
-        if result != WorldResult::CharDeleteSuccess {
-            bail!("char-delete: SMSG_CHAR_DELETE result={result:?}, want CharDeleteSuccess");
-        }
-        let remaining = c2.char_enum()?;
-        if remaining.iter().any(|(g, _, _)| *g == guid) {
-            bail!("char-delete: guid={guid} still present in CMSG_CHAR_ENUM after delete");
-        }
-        println!(
-            "[wire] CHAR-DELETE PASS \u{2713}  SMSG_CHAR_DELETE(CharDeleteSuccess); guid={guid} no longer in SMSG_CHAR_ENUM"
-        );
-        return Ok(());
     }
 
     eprintln!("[wire] logon + world handshake as {account} -> char {char_name}…");
