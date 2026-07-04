@@ -92,15 +92,18 @@ fn main() -> Result<()> {
     );
 
     // ---- named modes: the five family dispatchers own everything below (modes/*.rs) ----
-    if let Some(m) = mode.as_deref() {
-        let mcx =
-            modes::ModeCtx { account: &account, password: &password, char_name: &char_name };
-        if modes::dispatch(m, &mut c, &mut args, &mcx)? {
-            return Ok(());
-        }
+    // No mode at all is the M1 login smoke (we already printed M1 OK). A mode NOBODY claims
+    // must bail: a silent Ok(()) here turns a renamed/typo'd mode into a green suite entry.
+    let Some(mode) = mode else { return Ok(()) };
+    let mcx = modes::ModeCtx { account: &account, password: &password, char_name: &char_name };
+    if modes::dispatch(&mode, &mut c, &mut args, &mcx)? {
+        return Ok(());
     }
 
-    let Some(spell_id) = mode.and_then(|s| s.parse::<u32>().ok()) else { return Ok(()) };
+    let spell_id: u32 = match mode.parse() {
+        Ok(id) => id,
+        Err(_) => bail!("unknown mode {mode:?} — no family dispatcher claimed it and it is not an M2 spell-id"),
+    };
 
     // ---- M2: the orchestrator spawns a mob at Ginger's feet (she must be live) and writes
     // its exact guid to a file; we KEEP DRAINING the socket while polling that file, then
