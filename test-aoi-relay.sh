@@ -20,8 +20,11 @@ OX=-8940; OY=-350; OZ=82
 FX=-8940; FY=-750; FZ=82
 NX=-8935; NY=-345; NZ=82   # "near" spot: ~7yd from the observer
 
-CMD_OBS=/tmp/ws_aoi_cmd; ACK_OBS=/tmp/ws_aoi_ack; CMD_MOV=/tmp/ws_aoi_mover_cmd
-rm -f "$CMD_OBS" "$ACK_OBS" "$CMD_MOV" /tmp/ws_aoi_obs_ready /tmp/ws_aoi_mover_ready
+# Run-scoped handshake paths (work-item 161): defined ONCE here, passed as wire-client args.
+CMD_OBS=/tmp/ws_aoi_cmd_$$; ACK_OBS=/tmp/ws_aoi_ack_$$; CMD_MOV=/tmp/ws_aoi_mover_cmd_$$
+OBS_READY=/tmp/ws_aoi_obs_ready_$$; MOV_READY=/tmp/ws_aoi_mover_ready_$$
+RELAY_READY=/tmp/wc_relay_ready_$$
+rm -f "$CMD_OBS" "$ACK_OBS" "$CMD_MOV" "$OBS_READY" "$MOV_READY" "$RELAY_READY"
 
 # stage stored positions (login places each session at its stored character position)
 stay_start TEST test123 Ginger || exit 1
@@ -32,24 +35,19 @@ scall debug_teleport "$DFS" 0 $FX $FY $FZ 0
 stay_stop
 
 # mover first (so the observer's login precondition sees it already in-world but FAR)
-timeout 240 "$WC" TEST2 test123 dfsdfsd aoi-mover "$CMD_MOV" >/tmp/ws_aoi_mover.log 2>&1 &
+timeout 240 "$WC" TEST2 test123 dfsdfsd aoi-mover "$CMD_MOV" "$MOV_READY" >/tmp/ws_aoi_mover.log 2>&1 &
 MOVER=$!
-for _ in $(seq 1 20); do [ -f /tmp/ws_aoi_mover_ready ] && break; sleep 1; done
-[ -f /tmp/ws_aoi_mover_ready ] || { echo "[orch] mover never ready" >&2; kill $MOVER 2>/dev/null; exit 1; }
-rm -f /tmp/ws_aoi_mover_ready
+wait_for_file 20 "$MOV_READY" || { echo "[orch] mover never ready" >&2; kill $MOVER 2>/dev/null; exit 1; }
+rm -f "$MOV_READY"
 
-timeout 240 "$WC" TEST test123 Ginger aoi-observer "$DFS" "$CMD_OBS" "$ACK_OBS" >/tmp/ws_aoi_observer.log 2>&1 &
+timeout 240 "$WC" TEST test123 Ginger aoi-observer "$DFS" "$CMD_OBS" "$ACK_OBS" "$OBS_READY" >/tmp/ws_aoi_observer.log 2>&1 &
 OBS=$!
-for _ in $(seq 1 20); do [ -f /tmp/ws_aoi_obs_ready ] && break; sleep 1; done
-[ -f /tmp/ws_aoi_obs_ready ] || { echo "[orch] observer never ready (peer visible at login?)" >&2; cat /tmp/ws_aoi_observer.log; kill $OBS $MOVER 2>/dev/null; exit 1; }
-rm -f /tmp/ws_aoi_obs_ready
+wait_for_file 20 "$OBS_READY" || { echo "[orch] observer never ready (peer visible at login?)" >&2; cat /tmp/ws_aoi_observer.log; kill $OBS $MOVER 2>/dev/null; exit 1; }
+rm -f "$OBS_READY"
 step_ok "login precondition: peer outside AOI not visible"
 
-obs_cmd() { # $1=command -> waits for the observer's ack, asserts OK
-  rm -f "$ACK_OBS"
-  echo "$1" > "$CMD_OBS"
-  for _ in $(seq 1 35); do [ -f "$ACK_OBS" ] && break; sleep 1; done
-  local ack; ack=$(cat "$ACK_OBS" 2>/dev/null)
+obs_cmd() { # $1=command -> waits for the observer's ack (obs_cmd_send mechanics), asserts OK
+  local ack; ack=$(obs_cmd_send "$1" "$CMD_OBS" "$ACK_OBS" 35)
   if grep -q "^OK" <<<"$ack"; then step_ok "observer: $1"; else step_fail "observer: $1 -> ${ack:-no ack}"; fi
 }
 
@@ -83,13 +81,13 @@ sleep 3 # settle: the abrupt disconnect's cleanup must finish before the same ac
 # The abrupt disconnect does NOT persist the live position — stage the stored row directly so the
 # reconnect materializes INSIDE the observer's box (a genuine fresh-insert CREATE).
 sqlq "UPDATE game_character SET x = $NX, y = $NY, z = $NZ WHERE guid = $DFS" >/dev/null
-rm -f /tmp/ws_aoi_mover_ready
+rm -f "$MOV_READY"
 obs_cmd expect-create & CMDPID=$!
 sleep 1 # let the observer arm (clear the stale sighting) BEFORE the login CREATE can arrive
-timeout 120 "$WC" TEST2 test123 dfsdfsd aoi-mover "$CMD_MOV" >/tmp/ws_aoi_mover2.log 2>&1 &
+timeout 120 "$WC" TEST2 test123 dfsdfsd aoi-mover "$CMD_MOV" "$MOV_READY" >/tmp/ws_aoi_mover2.log 2>&1 &
 MOVER=$!
-for _ in $(seq 1 20); do [ -f /tmp/ws_aoi_mover_ready ] && break; sleep 1; done
-rm -f /tmp/ws_aoi_mover_ready
+wait_for_file 20 "$MOV_READY"
+rm -f "$MOV_READY"
 wait $CMDPID
 
 obs_cmd expect-destroy & CMDPID=$!
@@ -114,28 +112,28 @@ sleep 4 # settle before the relay pairs relog the same two accounts
 # 3b. move relay BOTH WAYS: the existing jump-relay pair, run in each direction. The relay-sender
 # mode sends its jump with the CANONICAL test position baked into the packet (-8968,-129 — the
 # module persists + scopes recipients by it), so stage BOTH stored rows at the canonical move-relay
-# geometry (~32yd apart, one grid box) exactly like the suite's position_apart fixture.
+# geometry (~32yd apart, one grid box) exactly like scenario-lib's position_apart fixture.
 sqlq "UPDATE game_character SET x = -8968.0, y = -129.0, z = 83.4 WHERE guid = $GINGER" >/dev/null
 sqlq "UPDATE game_character SET x = -8945.0, y = -107.0, z = 83.4 WHERE guid = $DFS" >/dev/null
 echo "[orch] move relay A->B (Ginger jumps, dfsdfsd observes)…"
-rm -f /tmp/wc_relay_ready
-"$WC" TEST2 test123 dfsdfsd relay-observer >/tmp/wc_relay_obs.log 2>&1 &
+rm -f "$RELAY_READY"
+"$WC" TEST2 test123 dfsdfsd relay-observer "$RELAY_READY" >/tmp/wc_relay_obs.log 2>&1 &
 ORC=$!
-"$WC" TEST test123 Ginger relay-sender >/tmp/wc_relay_snd.log 2>&1 &
+"$WC" TEST test123 Ginger relay-sender "$RELAY_READY" >/tmp/wc_relay_snd.log 2>&1 &
 SRC=$!
 wait $ORC; RC1=$?
 wait $SRC 2>/dev/null
 if [ $RC1 -eq 0 ]; then step_ok "move relay A->B (jump received by observer)"; else step_fail "move relay A->B (rc=$RC1)"; fi
 echo "[orch] move relay B->A (dfsdfsd jumps, Ginger observes)…"
 sleep 4 # settle: both accounts just disconnected from the A->B pair
-rm -f /tmp/wc_relay_ready
-"$WC" TEST test123 Ginger relay-observer >/tmp/wc_relay_obs2.log 2>&1 &
+rm -f "$RELAY_READY"
+"$WC" TEST test123 Ginger relay-observer "$RELAY_READY" >/tmp/wc_relay_obs2.log 2>&1 &
 ORC=$!
-"$WC" TEST2 test123 dfsdfsd relay-sender >/tmp/wc_relay_snd2.log 2>&1 &
+"$WC" TEST2 test123 dfsdfsd relay-sender "$RELAY_READY" >/tmp/wc_relay_snd2.log 2>&1 &
 SRC=$!
 wait $ORC; RC2=$?
 wait $SRC 2>/dev/null
 if [ $RC2 -eq 0 ]; then step_ok "move relay B->A (jump received by observer)"; else step_fail "move relay B->A (rc=$RC2)"; fi
 
-rm -f "$CMD_OBS" "$ACK_OBS" "$CMD_MOV"
+rm -f "$CMD_OBS" "$ACK_OBS" "$CMD_MOV" "$OBS_READY" "$MOV_READY" "$RELAY_READY"
 if [ "$FAILED" -eq 0 ]; then echo "[aoi-relay] PASS"; exit 0; else echo "[aoi-relay] FAIL"; exit 1; fi

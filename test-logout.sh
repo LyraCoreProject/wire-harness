@@ -5,7 +5,8 @@
 #   2. In-combat denial: covered by gateway unit tests (logout_while_in_combat_is_denied)
 set -e
 cd "$(dirname "$0")/../.."
+source tools/wire-client/scenario-lib.sh
 
 echo "[077] out-of-combat logout probe…"
-./target/debug/wire-client TEST test123 Ginger logout
+"$WC" TEST test123 Ginger logout
 echo "[077] PASS"

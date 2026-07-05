@@ -34,7 +34,8 @@ sqlq "DELETE FROM game_character_quest WHERE character_guid = $DFS AND quest_ent
 sqlq "UPDATE game_character SET x = $PAD_X, y = $PAD_Y, z = $PAD_Z WHERE guid = $GINGER" >/dev/null
 sqlq "UPDATE game_character SET x = -8902.0, y = -440.0, z = $PAD_Z WHERE guid = $DFS" >/dev/null
 
-HOLD_L=/tmp/ws_group_leader; HOLD_J=/tmp/ws_group_join
+# Run-scoped handshake paths (work-item 161): defined ONCE here, passed as wire-client args.
+HOLD_L=/tmp/ws_group_leader_$$; HOLD_J=/tmp/ws_group_join_$$
 rm -f "$HOLD_L" "$HOLD_J" "$HOLD_L.ingroup" "$HOLD_J.ingroup"
 
 # ---- 1. invite/accept over two live sessions ----
@@ -43,6 +44,9 @@ JOINER=$!
 sleep 3
 timeout 300 "$WC" TEST test123 Ginger group-leader dfsdfsd "$HOLD_L" >/tmp/ws_group_leader.log 2>&1 &
 LEADER=$!
+# both sides must signal in-group.
+# Kept hand-rolled: ONE 40s deadline shared by BOTH files (chained wait_for_file calls would
+# quietly double the budget to 80s and mask a join-latency regression).
 for _ in $(seq 1 40); do [ -f "$HOLD_L.ingroup" ] && [ -f "$HOLD_J.ingroup" ] && break; sleep 1; done
 if [ -f "$HOLD_L.ingroup" ] && [ -f "$HOLD_J.ingroup" ]; then
   step_ok "wire: both sessions decoded SMSG_GROUP_LIST (two-member party formed)"

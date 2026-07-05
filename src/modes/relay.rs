@@ -7,7 +7,7 @@ use wire_client::WireClient;
 use wow_world_messages::vanilla::opcodes::ServerOpcodeMessage as Smsg;
 use wow_world_messages::Guid;
 
-use super::{read_packed_guid, ModeCtx};
+use super::{drain_until_file, read_packed_guid, require_path_arg, ModeCtx};
 
 /// Run `mode` if it belongs to this family. `Ok(true)` = recognized and completed
 /// (bail!/exit on failure inside); `Ok(false)` = not this family's mode.
@@ -29,18 +29,19 @@ pub(crate) fn try_dispatch(
 }
 
 // ---- relay-observer: log in, signal ready, then listen for a relayed MSG_MOVE_JUMP_Server ----
-// Usage: wire-client TEST2 test123 dfsdfsd relay-observer
-// The orchestrator signals /tmp/wc_relay_ready; we wait, then listen for opcode 0xBB
-// (MSG_MOVE_JUMP / MSG_MOVE_JUMP_Server — same opcode value 0x00BB = 187).
+// Usage: wire-client TEST2 test123 dfsdfsd relay-observer <ready_file>
+// We write the script-owned ready file (the relay-sender side polls the same path), then listen
+// for opcode 0xBB (MSG_MOVE_JUMP / MSG_MOVE_JUMP_Server — same opcode value 0x00BB = 187).
 // Pass: opcode 0xBB received from a *different* guid (the sender's guid) within 5s.
 fn relay_observer(
     c: &mut WireClient,
-    _args: &mut dyn Iterator<Item = String>,
+    args: &mut dyn Iterator<Item = String>,
     mcx: &ModeCtx<'_>,
 ) -> Result<()> {
+    let ready = require_path_arg(args, "relay-observer <ready_file>", "ready_file")?;
     let char_name = mcx.char_name;
     eprintln!("[relay-observer] in-world as {} (guid {:#x}); signalling ready…", char_name, c.self_guid);
-    std::fs::write("/tmp/wc_relay_ready", "1").ok();
+    std::fs::write(&ready, "1").ok();
     // Drain until the sender's jump arrives, keeping the socket alive.
     let got_jump = c
         .recv_raw_for(std::time::Duration::from_secs(10), |opcode, _payload| {
@@ -50,7 +51,7 @@ fn relay_observer(
             })
         })
         .is_some();
-    std::fs::remove_file("/tmp/wc_relay_ready").ok();
+    std::fs::remove_file(&ready).ok();
     if got_jump {
         println!("[wire] RELAY-JUMP PASS \u{2713}  observer received MSG_MOVE_JUMP_Server from peer");
         return Ok(());
@@ -59,34 +60,27 @@ fn relay_observer(
 }
 
 // ---- relay-sender: wait for observer ready, then send MSG_MOVE_JUMP ----
-// Usage: wire-client TEST test123 Ginger relay-sender
-// Waits for /tmp/wc_relay_ready (set by relay-observer), then sends MSG_MOVE_JUMP.
+// Usage: wire-client TEST test123 Ginger relay-sender <ready_file>
+// Waits for the script-owned ready file (written by relay-observer), then sends MSG_MOVE_JUMP.
 fn relay_sender(
     c: &mut WireClient,
-    _args: &mut dyn Iterator<Item = String>,
+    args: &mut dyn Iterator<Item = String>,
     mcx: &ModeCtx<'_>,
 ) -> Result<()> {
     use wow_world_messages::vanilla::{MovementInfo, MovementInfo_MovementFlags, MSG_MOVE_JUMP_Client};
     use wow_world_messages::vanilla::Vector3d;
+    let ready = require_path_arg(args, "relay-sender <ready_file>", "ready_file")?;
     let char_name = mcx.char_name;
     eprintln!("[relay-sender] in-world as {} (guid {:#x}); waiting for observer…", char_name, c.self_guid);
-    // Drain + wait for observer to signal ready. A recv error here is NOT terminal: with no
-    // ambient packet traffic near the pad, recv_raw simply rides its 10s socket read-timeout —
-    // treating that as "break" collapsed the whole wait to a single file check and flaked the
-    // suite whenever the observer's login was still in flight. Use a short read-timeout so the
-    // ready-file poll stays responsive, and only the deadline ends the wait.
-    // Kept hand-rolled: drain-while-polling-a-file handshake — the ready-file check must run
-    // even on quiet stretches, and recv_for's predicate only fires on received packets.
+    // Drain + wait for observer to signal ready. A recv error inside drain_until_file is NOT
+    // terminal: with no ambient packet traffic near the pad, recv simply rides its socket
+    // read-timeout — treating that as "break" collapsed the whole wait to a single file check
+    // and flaked the suite whenever the observer's login was still in flight. Use a short
+    // read-timeout so the ready-file poll stays responsive; only the 20s deadline ends the wait.
     let _ = c.set_recv_timeout(std::time::Duration::from_millis(500));
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    while std::time::Instant::now() < deadline {
-        if std::path::Path::new("/tmp/wc_relay_ready").exists() {
-            break;
-        }
-        let _ = c.recv_raw(); // keep the socket drained; Err = just the poll-interval timeout
-    }
+    let observer_ready = drain_until_file(c, &ready, 20);
     let _ = c.set_recv_timeout(std::time::Duration::from_secs(10));
-    if !std::path::Path::new("/tmp/wc_relay_ready").exists() {
+    if !observer_ready {
         bail!("relay-sender: observer never became ready within 20s");
     }
     eprintln!("[relay-sender] observer ready — sending MSG_MOVE_JUMP…");
@@ -117,7 +111,7 @@ fn relay_sender(
     Ok(())
 }
 
-// ---- aoi-observer <peer_guid> <cmd_file> <ack_file>: command-driven event assertions ----
+// ---- aoi-observer <peer_guid> <cmd_file> <ack_file> <ready_file>: command-driven assertions ----
 // The orchestrator writes a command into cmd_file ("expect-create" / "expect-move" /
 // "expect-destroy" / "done"); the observer satisfies it against the live packet stream within
 // 30s and answers "OK <cmd>" or "FAIL <cmd>" in ack_file. Login-time precondition: the peer
@@ -127,9 +121,11 @@ fn aoi_observer(
     args: &mut dyn Iterator<Item = String>,
     _mcx: &ModeCtx<'_>,
 ) -> Result<()> {
+    const USAGE: &str = "aoi-observer <peer_guid> <cmd_file> <ack_file> <ready_file>";
     let peer: u64 = args.next().and_then(|s| s.parse().ok()).expect("peer guid");
-    let cmd_file: String = args.next().unwrap_or_else(|| "/tmp/ws_aoi_cmd".into());
-    let ack_file: String = args.next().unwrap_or_else(|| "/tmp/ws_aoi_ack".into());
+    let cmd_file = require_path_arg(args, USAGE, "cmd_file")?;
+    let ack_file = require_path_arg(args, USAGE, "ack_file")?;
+    let ready_file = require_path_arg(args, USAGE, "ready_file")?;
     let _ = std::fs::remove_file(&cmd_file);
     let _ = std::fs::remove_file(&ack_file);
     if c.seen_guids.contains(&peer) {
@@ -137,7 +133,7 @@ fn aoi_observer(
     }
     println!("[aoi] login precondition OK — peer {peer:#x} not visible (outside AOI)");
     c.set_recv_timeout(std::time::Duration::from_millis(300))?;
-    std::fs::write("/tmp/ws_aoi_obs_ready", "1").ok();
+    std::fs::write(&ready_file, "1").ok();
     let mut moves_from_peer = 0u32;
     loop {
         // poll for a command, draining the socket meanwhile (records CREATE guids)
@@ -218,18 +214,21 @@ fn aoi_observer(
     }
 }
 
-// ---- aoi-mover <cmd_file>: holds a session; on "burst <x> <y> <z>" sends 10 MSG_MOVE_HEARTBEATs
-// stepping around that position (the relay+persist path); on "exit" disconnects abruptly. ----
+// ---- aoi-mover <cmd_file> <ready_file>: holds a session; on "burst <x> <y> <z>" sends 10
+// MSG_MOVE_HEARTBEATs stepping around that position (the relay+persist path); on "exit"
+// disconnects abruptly. ----
 fn aoi_mover(
     c: &mut WireClient,
     args: &mut dyn Iterator<Item = String>,
     _mcx: &ModeCtx<'_>,
 ) -> Result<()> {
     use wow_world_messages::vanilla::{MovementInfo, MovementInfo_MovementFlags, Vector3d, MSG_MOVE_HEARTBEAT_Client};
-    let cmd_file: String = args.next().unwrap_or_else(|| "/tmp/ws_aoi_mover_cmd".into());
+    const USAGE: &str = "aoi-mover <cmd_file> <ready_file>";
+    let cmd_file = require_path_arg(args, USAGE, "cmd_file")?;
+    let ready_file = require_path_arg(args, USAGE, "ready_file")?;
     let _ = std::fs::remove_file(&cmd_file);
     c.set_recv_timeout(std::time::Duration::from_millis(300))?;
-    std::fs::write("/tmp/ws_aoi_mover_ready", "1").ok();
+    std::fs::write(&ready_file, "1").ok();
     loop {
         let _ = c.recv();
         let Ok(cmdtext) = std::fs::read_to_string(&cmd_file) else { continue };

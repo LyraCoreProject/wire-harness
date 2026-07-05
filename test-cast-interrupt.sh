@@ -9,14 +9,17 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 
+source tools/wire-client/scenario-lib.sh
 SPELL="${1:-686}"   # 686 = Shadow Bolt (1.7s timed)
 ENTRY="${2:-103}"   # 103 = Garrick Padfoot (hostile Defias) — melee attacker
-CHAR="Ginger"; DB=spacetime-core
-CGUID=$(spacetime sql "$DB" "SELECT guid FROM game_character WHERE name = '$CHAR'" 2>&1 | grep -oE '[0-9]+' | tail -1)
+CHAR="Ginger"
+CGUID=$(char_guid "$CHAR")
 [ -z "$CGUID" ] && { echo "[test] character '$CHAR' not found in game_character" >&2; exit 1; }
 
 cargo build -q -p wire-client || exit 1
 TGT="$(mktemp -u /tmp/wc_target_XXXXXX)"; rm -f "$TGT"
+# Run-scoped side-channel for the spawned mob's guid (work-item 161: no shared /tmp literal).
+MOB_FILE=/tmp/wc_mobguid_$$
 MOBGUID=""
 
 orchestrate() {
@@ -31,7 +34,7 @@ orchestrate() {
   spacetime call "$DB" debug_set_health $CGUID 100000 >/dev/null 2>&1
   MOB=$(spacetime sql "$DB" "SELECT guid, x, y FROM game_world_entity WHERE entry=$ENTRY AND owner_guid=0" 2>&1 \
         | awk -F'|' -v gx="$GX" -v gy="$GY" '$1 ~ /[0-9]/ {g=$1;x=$2+0;y=$3+0;dx=x-gx;dy=y-gy;d=dx*dx+dy*dy; if(best==""||d<best){best=d;bg=g}} END{gsub(/ /,"",bg);print bg}')
-  echo "$MOB" > /tmp/wc_mobguid
+  echo "$MOB" > "$MOB_FILE"
   # let the mob aggro + get onto its melee swing timer so a swing lands inside the 1.7s cast window
   sleep 4
   spacetime call "$DB" debug_set_health $CGUID 100000 >/dev/null 2>&1   # re-top after the first swings
@@ -46,7 +49,7 @@ RC=$?
 wait "$ORCH" 2>/dev/null || true
 rm -f "$TGT"
 # cleanup the debug-spawned mob
-MOBGUID=$(cat /tmp/wc_mobguid 2>/dev/null || echo "")
+MOBGUID=$(cat "$MOB_FILE" 2>/dev/null || echo "")
 [ -n "$MOBGUID" ] && spacetime sql "$DB" "DELETE FROM game_world_entity WHERE guid = $MOBGUID" >/dev/null 2>&1 || true
-rm -f /tmp/wc_mobguid
+rm -f "$MOB_FILE"
 exit $RC

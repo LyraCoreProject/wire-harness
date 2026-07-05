@@ -11,6 +11,9 @@ scenario_preflight scenario-death
 
 WOLF_ENTRY=51000; SICKNESS=15007
 PAD_X=-8860; PAD_Y=-270; PAD_Z=82
+# Run-scoped handshake paths (work-item 161): defined ONCE here, passed as wire-client args.
+DEATH_READY=/tmp/ws_death_ready_$$
+DEATH_RECLAIMED=/tmp/ws_death_reclaimed_$$
 # u64 corpse guid exceeds bash's signed 64-bit arithmetic — compute in python
 CORPSE=$(python3 -c "print((0xF101 << 48) | $GINGER)")
 
@@ -44,11 +47,11 @@ DUR0=$(sql1 "SELECT durability FROM game_item_instance WHERE owner_guid = $GINGE
 echo "[orch] staged: wolf=$WOLF corpse_guid=$CORPSE mainhand_dur0=${DUR0:-none}"
 
 # ---- run the wire scenario; arrange the real death at its ready-handshake ----
-rm -f /tmp/ws_death_ready /tmp/ws_death_reclaimed
-timeout 180 "$WC" TEST test123 Ginger scenario-death "$CORPSE" &
+rm -f "$DEATH_READY" "$DEATH_RECLAIMED"
+timeout 180 "$WC" TEST test123 Ginger scenario-death "$CORPSE" "$DEATH_READY" "$DEATH_RECLAIMED" &
 WIRE=$!
-for _ in $(seq 1 30); do [ -f /tmp/ws_death_ready ] && break; sleep 1; done
-if [ -f /tmp/ws_death_ready ]; then
+wait_for_file 30 "$DEATH_READY"
+if [ -f "$DEATH_READY" ]; then
   scall debug_set_health "$GINGER" 1
   scall debug_engage "$WOLF" "$GINGER" # the wolf lands the real killing blow
   DEAD=""
@@ -58,7 +61,7 @@ if [ -f /tmp/ws_death_ready ]; then
     sleep 1
   done
   assert_eq "death: entity died to the mob's swing" "$DEAD" "1"
-  rm -f /tmp/ws_death_ready # signal: death confirmed, release now
+  rm -f "$DEATH_READY" # signal: death confirmed, release now
 else
   echo "[orch] wire client never signalled ready" >&2; FAILED=1
 fi
@@ -76,8 +79,8 @@ assert_ge "release: corpse row exists" "${CORPSE_SEEN:-0}" 1
 scall debug_teleport "$GINGER" 0 $PAD_X $PAD_Y $PAD_Z 0
 
 # wait for the wire client's reclaim, then assert the resurrected state and let it finish
-for _ in $(seq 1 60); do [ -f /tmp/ws_death_reclaimed ] && break; sleep 1; done
-if [ -f /tmp/ws_death_reclaimed ]; then
+wait_for_file 60 "$DEATH_RECLAIMED"
+if [ -f "$DEATH_RECLAIMED" ]; then
   sleep 2
   HP=$(sql1 "SELECT health FROM game_world_entity WHERE guid = $GINGER")
   MAXHP=$(sql1 "SELECT max_health FROM game_world_entity WHERE guid = $GINGER")
@@ -98,7 +101,7 @@ if [ -f /tmp/ws_death_reclaimed ]; then
     "$(sql1 "SELECT COUNT(*) AS n FROM game_melee_attack WHERE attacker_guid = $GINGER")" "0"
   assert_eq "combat clean: no melee row with Ginger as target" \
     "$(sql1 "SELECT COUNT(*) AS n FROM game_melee_attack WHERE target_guid = $GINGER")" "0"
-  rm -f /tmp/ws_death_reclaimed # let the wire client exit
+  rm -f "$DEATH_RECLAIMED" # let the wire client exit
 else
   echo "[orch] wire client never reclaimed" >&2; FAILED=1
 fi

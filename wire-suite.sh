@@ -31,8 +31,10 @@ mkdir -p "$LOGDIR"
 # The canonical sqlq/char_guid/scall/stay_start/stay_stop (and sql assert_*) implementations live
 # in scenario-lib.sh — ONE copy of the fiddly stay_start relogin-race settle/verify/retry, not a
 # drifting suite-local fork (the fork that used to live here had already lost that race fix).
-# SC_STAY_LOG_DIR makes the lib capture each stay session's wire log like the old fork did.
-SC_STAY_LOG_DIR="$LOGDIR"
+# SC_STAY_LOG_DIR makes the lib capture each stay session's wire log like the old fork did —
+# exported so the test-*.sh child processes (which now own their staging, work-item 162) keep
+# capturing their staging stay logs under suite runs too.
+export SC_STAY_LOG_DIR="$LOGDIR"
 source tools/wire-client/scenario-lib.sh
 # COUNT(*) helper — equality-filter only (spacetime sql 2.x range-filter gotcha, danger-zones §2).
 countq() { sqlq "SELECT COUNT(*) AS n FROM $1" | grep -oE '[0-9]+' | tail -1; }
@@ -105,6 +107,7 @@ echo "[suite] fixtures: Ginger=$GINGER dfsdfsd=$DFS"
 
 # ---------- data-gate probes (sandbox vs fully-imported node) ----------
 HAS_SPELL_686=$(countq "game_spell WHERE spell_id = 686")
+HAS_SPELL_635=$(countq "game_spell WHERE spell_id = 635")   # curated paladin kit imported? (176)
 HAS_CREATURE_103=$(countq "game_creature_template WHERE entry = 103")
 HAS_COMBAT_REGEN_EFFECT=$(countq "game_spell_effect WHERE kind = 169")
 HAS_FACTIONS=$(countq "game_faction")
@@ -165,47 +168,15 @@ t_friend() {
   return $rc
 }
 
-t_ignore_whisper() {
-  # The probe asserts a strict IgnoreAdded, so purge Ginger's contact rows first (repeatability),
-  # and leave them purged after (the friend test tolerates Already, but a stale ignore row would
-  # silently eat unrelated whisper traffic in later tests).
-  sqlq "DELETE FROM game_character_contact WHERE owner_guid = $GINGER" >/dev/null
-  timeout 90 "$WC" TEST test123 Ginger ignore-whisper TEST2 test123 dfsdfsd
-  local rc=$?
-  sqlq "DELETE FROM game_character_contact WHERE owner_guid = $GINGER" >/dev/null
-  return $rc
-}
-
-position_apart() { # say-range/move-relay geometry: ~32yd apart (out of 25yd SAY, inside 125yd AOI)
-  stay_start TEST test123 Ginger || return 1
-  spacetime call "$DB" -- debug_teleport "$GINGER" 0 -8968 -129 83.4 0 || { stay_stop; return 1; }
-  stay_stop
-  stay_start TEST2 test123 dfsdfsd || return 1
-  spacetime call "$DB" -- debug_teleport "$DFS" 0 -8945 -107 83.4 0 || { stay_stop; return 1; }
-  stay_stop
-}
-
-t_say_range()  { position_apart || exit 1; bash tools/wire-client/test-say-range.sh; }
-t_move_relay() { position_apart || exit 1; bash tools/wire-client/test-move-relay.sh; }
-
-t_persist_health() {
-  bash tools/wire-client/test-persist-health.sh
-  local rc=$?
-  # teardown: heal the 22hp residue so later combat tests don't start near-dead
-  stay_start TEST test123 Ginger && spacetime call "$DB" -- debug_set_health "$GINGER" 100000; stay_stop
-  return $rc
-}
-
-t_repop_delay() {
-  bash tools/wire-client/test-repop-delay.sh
-  local rc=$?
-  # teardown: the test leaves Ginger dead/ghost — resurrect + heal for whatever runs next
-  stay_start TEST test123 Ginger || return $rc
-  spacetime call "$DB" -- debug_spirit_healer_res "$GINGER" >/dev/null 2>&1 || true
-  spacetime call "$DB" -- debug_set_health "$GINGER" 100000 >/dev/null 2>&1 || true
-  stay_stop
-  return $rc
-}
+# Staging/teardown for the next five live in their OWNING scripts (work-item 162): the contact
+# purge/restore in test-ignore-whisper.sh, the position_apart geometry in test-say-range.sh /
+# test-move-relay.sh (via scenario-lib), the heal/resurrect teardowns in test-persist-health.sh /
+# test-repop-delay.sh — standalone runs and suite runs are now the same path.
+t_ignore_whisper() { bash tools/wire-client/test-ignore-whisper.sh; }
+t_say_range()      { bash tools/wire-client/test-say-range.sh; }
+t_move_relay()     { bash tools/wire-client/test-move-relay.sh; }
+t_persist_health() { bash tools/wire-client/test-persist-health.sh; }
+t_repop_delay()    { bash tools/wire-client/test-repop-delay.sh; }
 
 t_ding()         { bash tools/wire-client/test-ding.sh; }
 t_combat_regen() {
@@ -252,17 +223,20 @@ t_init_factions() {
 t_levelup_info() {
   [ "${HAS_LEVEL_STATS:-0}" -ge 1 ] || skip "game_level_stats empty — the cmangos stat curve isn't imported, so ding deltas are all zero and the probe's non-zero-stat assertion can't hold"
   # orchestrate: stage at L1 + boosted XP, kill a seeded wolf, expect SMSG_LEVELUP_INFO
+  # Run-scoped handshake path (work-item 161): defined once, passed as the levelup-info ready arg.
+  local ready=/tmp/wc_levelup_ready_$$
+  rm -f "$ready"
   spacetime call "$DB" -- debug_set_level "$GINGER" 1 >/dev/null 2>&1 || true
   spacetime call "$DB" -- debug_set_xp_rate 100 >/dev/null 2>&1 || true
   (
-    for _ in $(seq 1 30); do [ -f /tmp/wc_levelup_ready ] && break; sleep 1; done
-    rm -f /tmp/wc_levelup_ready
+    wait_for_file 30 "$ready"
+    rm -f "$ready"
     spacetime call "$DB" -- debug_spawn_at_feet "$GINGER" 51000 5 >/dev/null 2>&1
     sleep 1
     spacetime call "$DB" -- debug_kill_nearest "$GINGER" 51000 >/dev/null 2>&1
   ) &
   local orch=$!
-  timeout 90 "$WC" TEST test123 Ginger levelup-info 1
+  timeout 90 "$WC" TEST test123 Ginger levelup-info "$ready" 1
   local rc=$?
   wait "$orch" 2>/dev/null
   spacetime call "$DB" -- debug_set_xp_rate 1 >/dev/null 2>&1 || true
@@ -289,7 +263,12 @@ t_scenario_death()  { bash tools/wire-client/test-scenario-death.sh; }
 t_group() { bash tools/wire-client/test-group.sh; }
 t_party_brains() { bash tools/wire-client/test-party-brains.sh; }
 t_bot_goals() { bash tools/wire-client/test-bot-goals.sh; }
-t_class_roles() { bash tools/wire-client/test-class-roles.sh; }
+t_class_roles() {
+  # 176: rotations cast REAL imported ids — a no-import sandbox skips loudly, like the other
+  # DBC-gated probes (the mechanism itself is covered headlessly by cargo tests).
+  [ "${HAS_SPELL_635:-0}" -ge 1 ] || skip "needs the curated class-spell import (game_spell 635 absent)"
+  bash tools/wire-client/test-class-roles.sh
+}
 
 # ---- playerbots package acceptance (work-item 142) — the script self-SKIPs (exit 77) when the
 # packages/playerbots drop-in isn't installed/published. ----

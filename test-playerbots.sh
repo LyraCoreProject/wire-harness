@@ -45,13 +45,15 @@ echo "[orch] bot under test: guid=$BOT name=$BOTNAME"
 # affects ALL pre-existing entities (creatures included), is NOT bot-specific, and is filed as its
 # own bug work-item; the durable-across-restart claim below is asserted via sql + name resolution.
 sqlq "UPDATE game_character SET x = $PAD_X, y = $PAD_Y, z = $PAD_Z WHERE guid = $GINGER" >/dev/null
-CMD=/tmp/ws_bots_cmd; ACK=/tmp/ws_bots_ack
-rm -f "$CMD" "$ACK" /tmp/ws_aoi_obs_ready
-timeout 180 "$WC" TEST test123 Ginger aoi-observer 999999999 "$CMD" "$ACK" >/tmp/ws_bots_observer.log 2>&1 &
+# Run-scoped handshake paths (work-item 161): defined ONCE here, passed as wire-client args.
+CMD=/tmp/ws_bots_cmd_$$; ACK=/tmp/ws_bots_ack_$$; OBS_READY=/tmp/ws_bots_obs_ready_$$
+rm -f "$CMD" "$ACK" "$OBS_READY"
+timeout 180 "$WC" TEST test123 Ginger aoi-observer 999999999 "$CMD" "$ACK" "$OBS_READY" >/tmp/ws_bots_observer.log 2>&1 &
 OBS=$!
-for _ in $(seq 1 20); do [ -f /tmp/ws_aoi_obs_ready ] && break; sleep 1; done
-rm -f /tmp/ws_aoi_obs_ready
-obs_ack() { rm -f "$ACK"; echo "$1" > "$CMD"; for _ in $(seq 1 35); do [ -f "$ACK" ] && break; sleep 1; done; grep -q "^OK" "$ACK" 2>/dev/null; }
+wait_for_file 20 "$OBS_READY"
+rm -f "$OBS_READY"
+# obs_cmd_send does the cmd/ack file mechanics; this test's reporting is rc-only (caller if/else).
+obs_ack() { obs_cmd_send "$1" "$CMD" "$ACK" 35 | grep -q "^OK"; }
 scall playerbots_spawn 1 $PAD_X $PAD_Y $PAD_Z || step_fail "wire-phase spawn failed"
 sleep 1
 NEWBOT=$(sqlq "SELECT character_guid FROM pkg_playerbots_bot" | grep -oE '[0-9]+' | sort -n | tail -1)

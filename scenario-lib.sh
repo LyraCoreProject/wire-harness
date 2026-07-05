@@ -108,6 +108,46 @@ clear_hostility() {
   sqlq "DELETE FROM game_faction_template WHERE id = 1" >/dev/null
 }
 
+# Poll once per second for up to $1 seconds until file $2 exists. Echoes nothing; returns 0 when
+# the file appears, 1 on timeout — the ONE copy of the hand-rolled `for _ in $(seq 1 N); do [ -f
+# FILE ] && break; sleep 1; done` handshake poll. The caller keeps its own error message:
+# `wait_for_file 30 "$READY" || { echo "[orch] never ready" >&2; exit 1; }`.
+wait_for_file() { # $1=secs $2=path
+  local i
+  for i in $(seq 1 "$1"); do
+    [ -f "$2" ] && return 0
+    sleep 1
+  done
+  return 1
+}
+
+# Observer cmd/ack file protocol (the aoi-observer wire mode): clear the ack, write the command,
+# wait up to $4 (default 35) seconds for the ack file, then echo its content (empty on timeout).
+# Mechanics ONLY — the CALLER interprets OK/FAIL in the echoed ack and does its own
+# step_ok/step_fail (or rc) reporting, which intentionally differs per test.
+obs_cmd_send() { # $1=cmd $2=cmd_file $3=ack_file [$4=secs]
+  rm -f "$3"
+  echo "$1" > "$2"
+  wait_for_file "${4:-35}" "$3"
+  cat "$3" 2>/dev/null
+}
+
+# Canonical say-range/move-relay geometry: park the STORED rows of Ginger (TEST) and dfsdfsd
+# (TEST2) ~32yd apart — outside the 25yd SAY range, inside the 125yd AOI box — via short stay
+# sessions (login places each session at its stored character position). Owned by
+# test-say-range.sh/test-move-relay.sh so standalone runs stage the same fixture as suite runs.
+position_apart() {
+  local G D
+  G=$(char_guid Ginger); D=$(char_guid dfsdfsd)
+  { [ -n "$G" ] && [ -n "$D" ]; } || { echo "[orch] position_apart: missing fixture character (Ginger=$G dfsdfsd=$D)" >&2; return 1; }
+  stay_start TEST test123 Ginger || return 1
+  scall debug_teleport "$G" 0 -8968 -129 83.4 0 || { stay_stop; return 1; }
+  stay_stop
+  stay_start TEST2 test123 dfsdfsd || return 1
+  scall debug_teleport "$D" 0 -8945 -107 83.4 0 || { stay_stop; return 1; }
+  stay_stop
+}
+
 # Poll a 1-value sql query once per second for up to $1 seconds until it compares true against
 # $3 (eq/ge). Echoes nothing; returns 0 on success, 1 on timeout — `wait_for_sql_eq 30 "SELECT
 # ..." 4 && step_ok ... || step_fail ...` replaces the hand-rolled seq/sleep loops.

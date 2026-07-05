@@ -8,7 +8,7 @@ use wow_world_messages::vanilla::opcodes::ServerOpcodeMessage as Smsg;
 use wow_world_messages::vanilla::{Class, LogoutResult, WorldResult};
 use wow_world_messages::Guid;
 
-use super::ModeCtx;
+use super::{drain_until_file, require_path_arg, signal_and_wait_consumed, ModeCtx};
 
 /// Run `mode` if it belongs to this family. `Ok(true)` = recognized and completed
 /// (bail!/exit on failure inside); `Ok(false)` = not this family's mode.
@@ -258,19 +258,20 @@ fn played_time_live(
 }
 
 // ---- levelup-info probe: decode SMSG_LEVELUP_INFO on a REAL XP-driven ding, asserting the popup
-// deltas (033). Signals /tmp/wc_levelup_ready, then the orchestrator grants kill-XP (through
+// deltas (033). Signals the script-owned ready file, then the orchestrator grants kill-XP (through
 // grant_xp, e.g. debug_kill_nearest) until the character dings; we decode the resulting
 // SMSG_LEVELUP_INFO and print every field. For a mana class the mana delta must be non-zero and at
 // least one stat delta non-zero (the pre-033 gateway hardcoded all of them 0). ----
-// Usage: wire-client TEST test123 <char-name> levelup-info [expect_mana: 0|1 (default 1)]
+// Usage: wire-client TEST test123 <char-name> levelup-info <ready_file> [expect_mana: 0|1 (default 1)]
 fn levelup_info(
     c: &mut WireClient,
     args: &mut dyn Iterator<Item = String>,
     _mcx: &ModeCtx<'_>,
 ) -> Result<()> {
+    let ready = require_path_arg(args, "levelup-info <ready_file> [expect_mana]", "ready_file")?;
     let expect_mana: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(1);
     eprintln!("[levelup] in-world as guid {:#x}; signalling orchestrator…", c.self_guid);
-    std::fs::write("/tmp/wc_levelup_ready", "1").ok();
+    std::fs::write(&ready, "1").ok();
     let done = c.recv_for(std::time::Duration::from_secs(60), |m| match m {
         Smsg::SMSG_LEVELUP_INFO(m) => {
             println!(
@@ -409,10 +410,11 @@ fn ghost(
     let healer: u64 = args
         .next()
         .and_then(|s| s.parse().ok())
-        .expect("usage: … ghost <healer_guid>");
+        .expect("usage: … ghost <healer_guid> <ready_file>");
+    let ready = require_path_arg(args, "ghost <healer_guid> <ready_file>", "ready_file")?;
     let before = c.seen_guids.contains(&healer);
     println!("[ghost] healer {healer:#x} visible while ALIVE: {before}  (want false — the alive-gate)");
-    std::fs::write("/tmp/wc_ghost_ready", "1").ok();
+    std::fs::write(&ready, "1").ok();
     eprintln!("[ghost] ready — waiting for kill+repop, then the reveal CREATE…");
     // recv() records every CREATE into seen_guids en route; matching the healer's own CREATE
     // closes the window as soon as the reveal lands.
@@ -434,7 +436,7 @@ fn ghost(
 }
 
 // ---- stay probe: login + stay connected until a sentinel file appears, then exit Ok.
-// Usage: wire-client [account] [password] [char-name] stay [sentinel_file]
+// Usage: wire-client [account] [password] [char-name] stay <sentinel_file>
 // The external orchestrator writes anything to sentinel_file to signal done; we exit 0.
 // Useful when the test only needs the character to be live in game_world_entity while an
 // external script calls spacetime reducers (e.g. work-item #092 combat-regen probe).
@@ -443,21 +445,15 @@ fn stay(
     args: &mut dyn Iterator<Item = String>,
     _mcx: &ModeCtx<'_>,
 ) -> Result<()> {
-    let sentinel: String = args.next().unwrap_or_else(|| "/tmp/wc_stay_done".into());
+    let sentinel = require_path_arg(args, "stay <sentinel_file>", "sentinel_file")?;
     let _ = std::fs::remove_file(&sentinel);
     eprintln!("[wire] stay: draining socket until {sentinel} appears…");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    // Kept hand-rolled: drain-while-polling-a-file handshake — the sentinel check must run even
-    // on quiet stretches, and recv_for's predicate only fires on received packets.
-    while std::time::Instant::now() < deadline {
-        let _ = c.recv(); // keep gateway connection alive
-        if std::path::Path::new(&sentinel).exists() {
-            let _ = std::fs::remove_file(&sentinel);
-            println!("[wire] STAY DONE — sentinel received, exiting.");
-            return Ok(());
-        }
+    if drain_until_file(c, &sentinel, 60) {
+        let _ = std::fs::remove_file(&sentinel);
+        println!("[wire] STAY DONE — sentinel received, exiting.");
+    } else {
+        println!("[wire] STAY TIMEOUT — orchestrator did not signal within 60s.");
     }
-    println!("[wire] STAY TIMEOUT — orchestrator did not signal within 60s.");
     Ok(())
 }
 
@@ -482,18 +478,19 @@ fn logout_probe(
 }
 
 // ---- ding probe: verify mid-session L10 ding pushes PLAYER_CHARACTER_POINTS1=1 ----
-// Usage: wire-client [account] [password] [char-name] ding
-// The orchestrator (test-ding.sh) must first set the char to L9, wait for wc_ding_ready,
+// Usage: wire-client [account] [password] [char-name] ding <ready_file>
+// The orchestrator (test-ding.sh) must first set the char to L9, wait for its ready file,
 // then call `spacetime call spacetime-core debug_set_level <guid> 10`.
 // Pass: an SMSG_UPDATE_OBJECT arrives that contains BOTH a level=10 word [0x0a 00 00 00]
 // AND a character_points1=1 word [0x01 00 00 00] — the levelup VALUES packet (#032 fix).
 fn ding(
     c: &mut WireClient,
-    _args: &mut dyn Iterator<Item = String>,
+    args: &mut dyn Iterator<Item = String>,
     _mcx: &ModeCtx<'_>,
 ) -> Result<()> {
+    let ready = require_path_arg(args, "ding <ready_file>", "ready_file")?;
     eprintln!("[ding] in-world as {} (guid {}), signalling orchestrator…", c.self_guid, c.self_guid);
-    std::fs::write("/tmp/wc_ding_ready", "1").ok();
+    std::fs::write(&ready, "1").ok();
 
     // SMSG_UPDATE_OBJECT opcode (vanilla 1.12) = 0x00A9 = 169.
     // Scan raw frames: the gtker reader rejects TYPE-less Player masks (it requires
@@ -539,8 +536,8 @@ fn ding(
 }
 
 // ---- repop-delay probe: CMSG_REPOP_REQUEST → assert SMSG_CORPSE_RECLAIM_DELAY(30s) ----
-// Usage: wire-client [account] [password] [char-name] repop [char-small-guid]
-// The orchestrator must kill the character (debug_set_health 0) before signalling;
+// Usage: wire-client [account] [password] [char-name] repop <char-small-guid> <ready_file>
+// The orchestrator must kill the character (debug_set_health 0) then consume the ready file;
 // then we send CMSG_REPOP_REQUEST and assert the gateway emits the 30s delay packet.
 // Pass: SMSG_CORPSE_RECLAIM_DELAY with delay == Duration::from_secs(30).
 fn repop(
@@ -552,16 +549,11 @@ fn repop(
     let char_guid: u64 = args
         .next()
         .and_then(|s| s.parse().ok())
-        .expect("usage: … repop <char-guid>");
+        .expect("usage: … repop <char-guid> <ready_file>");
+    let ready = require_path_arg(args, "repop <char-guid> <ready_file>", "ready_file")?;
     eprintln!("[repop] in-world as {char_name} (guid {:#x}); signalling orchestrator…", c.self_guid);
-    std::fs::write("/tmp/wc_repop_ready", "1").ok();
-
-    // Wait for the orchestrator to kill the character.
-    for _ in 0..30 {
-        if !std::path::Path::new("/tmp/wc_repop_ready").exists() { break; }
-        // drain so the gateway doesn't drop us
-        match c.recv() { Ok(_) => {} Err(_) => break }
-    }
+    // Signal ready, then wait for the orchestrator to kill the character (it consumes the file).
+    signal_and_wait_consumed(c, &ready, 30, "repop: orchestrator never confirmed the kill")?;
     eprintln!("[repop] sending CMSG_REPOP_REQUEST for char_guid={char_guid:#x}…");
     c.repop_request()?;
 
@@ -569,7 +561,6 @@ fn repop(
         Smsg::SMSG_CORPSE_RECLAIM_DELAY(d) => Some(d.delay),
         _ => None,
     });
-    std::fs::remove_file("/tmp/wc_repop_ready").ok();
     let want = std::time::Duration::from_secs(30);
     match got_delay {
         Some(d) if d == want => {

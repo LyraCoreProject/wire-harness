@@ -8,7 +8,7 @@
 #   1. Login as Ginger (Human Warlock, guid=5) via the "stay" wire-client mode to create a
 #      live world entity. The wire client drains the socket to keep the gateway happy.
 #   2. Baseline check: confirm debug_verify_combat_regen returns an error (no aura yet, pct=0).
-#   3. Apply Demon Skin rank 2 (spell 696, kind=169 A_COMBAT_HEALTH_REGEN_PCT, base_points=5)
+#   3. Apply Test Regeneration (fixture 50137, kind=169 A_COMBAT_HEALTH_REGEN_PCT, base_points=5)
 #      via debug_cast_at (self-cast, no spellbook gate).
 #   4. Call debug_verify_combat_regen — returns Ok only when pct > 0 AND delta > 0.
 #   5. Confirm via STDB logs.
@@ -18,12 +18,14 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 
-DB=spacetime-core
+source tools/wire-client/scenario-lib.sh
 CHAR=Ginger
-CGUID=$(spacetime sql "$DB" "SELECT guid FROM game_character WHERE name = '$CHAR'" 2>&1 | grep -oE '[0-9]+' | tail -1)
+CGUID=$(char_guid "$CHAR")
 [ -z "$CGUID" ] && { echo "[test] character '$CHAR' not found in game_character" >&2; exit 1; }
-# Spell 696 (Demon Skin rank 2) has kind=169 (A_COMBAT_HEALTH_REGEN_PCT), base_points=5
-REGEN_SPELL=696
+# Test Regeneration (152 fixture): the ONE kind-169 (A_COMBAT_HEALTH_REGEN_PCT) source on a
+# mock-seed node — Demon Skin 696 lost its kind-169 effect to the 024 reclassification
+# (A_PERIODIC_HEAL), which is exactly how this probe silently lost its fixture.
+REGEN_SPELL=50137
 SENTINEL=/tmp/wc_regen_done_$$
 
 echo "[092] Building wire-client..."
@@ -65,7 +67,7 @@ orchestrate() {
     echo "[092] Note: baseline pct not 0 — aura may already be present or pct line not found."
   fi
 
-  # Step 3: Apply Demon Skin rank 2 (A_COMBAT_HEALTH_REGEN_PCT, base_points=5) via debug_cast_at.
+  # Step 3: Apply Test Regeneration (A_COMBAT_HEALTH_REGEN_PCT, base_points=5) via debug_cast_at.
   echo "[092] Step 3: debug_cast_at $CGUID spell=$REGEN_SPELL target=self..."
   spacetime call "$DB" debug_cast_at $CGUID $REGEN_SPELL $CGUID 2>&1 || true
   sleep 1
