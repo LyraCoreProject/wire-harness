@@ -107,6 +107,7 @@ echo "[suite] fixtures: Ginger=$GINGER dfsdfsd=$DFS"
 
 # ---------- data-gate probes (sandbox vs fully-imported node) ----------
 HAS_SPELL_686=$(countq "game_spell WHERE spell_id = 686")
+HAS_SPELL_635=$(countq "game_spell WHERE spell_id = 635")   # curated paladin kit imported? (176)
 HAS_CREATURE_103=$(countq "game_creature_template WHERE entry = 103")
 HAS_COMBAT_REGEN_EFFECT=$(countq "game_spell_effect WHERE kind = 169")
 HAS_FACTIONS=$(countq "game_faction")
@@ -262,7 +263,12 @@ t_scenario_death()  { bash tools/wire-client/test-scenario-death.sh; }
 t_group() { bash tools/wire-client/test-group.sh; }
 t_party_brains() { bash tools/wire-client/test-party-brains.sh; }
 t_bot_goals() { bash tools/wire-client/test-bot-goals.sh; }
-t_class_roles() { bash tools/wire-client/test-class-roles.sh; }
+t_class_roles() {
+  # 176: rotations cast REAL imported ids — a no-import sandbox skips loudly, like the other
+  # DBC-gated probes (the mechanism itself is covered headlessly by cargo tests).
+  [ "${HAS_SPELL_635:-0}" -ge 1 ] || skip "needs the curated class-spell import (game_spell 635 absent)"
+  bash tools/wire-client/test-class-roles.sh
+}
 
 # ---- playerbots package acceptance (work-item 142) — the script self-SKIPs (exit 77) when the
 # packages/playerbots drop-in isn't installed/published. ----
