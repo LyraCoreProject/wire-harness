@@ -19,7 +19,7 @@ BOUGHT_FILE=/tmp/ws_vendor_bought_$$
 # repeatability: purge any stale blade instances + buyback rows from a prior run
 sqlq "DELETE FROM game_item_instance WHERE owner_guid = $GINGER AND entry = $BLADE" >/dev/null
 sqlq "DELETE FROM game_character_buyback WHERE player_guid = $GINGER" >/dev/null
-scall debug_grant_money "$GINGER" 2000
+scall debug_set_money "$GINGER" 2000
 
 stay_start TEST test123 Ginger || exit 1
 scall debug_teleport "$GINGER" 0 $PAD_X $PAD_Y $PAD_Z 0
@@ -121,7 +121,7 @@ if [ -z "$(sql1 "SELECT durability FROM game_item_instance WHERE owner_guid = $G
 fi
 sqlq "DELETE FROM game_item_instance WHERE owner_guid = $GINGER AND entry = $BLADE" >/dev/null
 sqlq "DELETE FROM game_character_buyback WHERE player_guid = $GINGER" >/dev/null
-scall debug_grant_money "$GINGER" 0
+scall debug_set_money "$GINGER" 0
 purge_entry $VENDOR_ENTRY
 sqlq "DELETE FROM game_creature_spawn WHERE entry = $BAG_ENTRY AND x > -8910" >/dev/null
 sqlq "DELETE FROM game_world_entity WHERE guid = ${BAG:-0}" >/dev/null
