@@ -180,6 +180,7 @@ t_say_range()      { bash tools/wire-client/test-say-range.sh; }
 t_move_relay()     { bash tools/wire-client/test-move-relay.sh; }
 t_persist_health() { bash tools/wire-client/test-persist-health.sh; }
 t_repop_delay()    { bash tools/wire-client/test-repop-delay.sh; }
+t_respec()         { bash tools/wire-client/test-respec.sh; }
 
 t_ding()         { bash tools/wire-client/test-ding.sh; }
 t_combat_regen() {
@@ -258,6 +259,7 @@ t_soak() { SOAK_SECS="${SOAK_SECS:-60}" bash tools/wire-client/test-soak.sh; }
 # ---- scenario runner (work-item 140): the four multi-step gameplay flows ----
 t_scenario_quest()  { bash tools/wire-client/test-scenario-quest.sh; }
 t_scenario_vendor() { bash tools/wire-client/test-scenario-vendor.sh; }
+t_scenario_weaponmaster() { bash tools/wire-client/test-scenario-weaponmaster.sh; }
 t_scenario_train()  { bash tools/wire-client/test-scenario-train.sh; }
 t_scenario_death()  { bash tools/wire-client/test-scenario-death.sh; }
 
@@ -282,9 +284,9 @@ ALL_TESTS=(
   logout who roll text_emote played_time played_time_live initial_spells char_enum_gear
   char_create_gear
   query_item char_delete bindpoint inspect friend ignore_whisper say_range move_relay
-  persist_health repop_delay ding combat_regen cast_flow cast_interrupt ghost_reveal
+  persist_health repop_delay respec ding combat_regen cast_flow cast_interrupt ghost_reveal
   init_factions levelup_info
-  scenario_quest scenario_vendor scenario_train scenario_death
+  scenario_quest scenario_vendor scenario_train scenario_weaponmaster scenario_death
   aoi_relay soak playerbots group party_brains bot_goals class_roles
 )
 START=$(date +%s)
