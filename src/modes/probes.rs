@@ -53,6 +53,7 @@ pub(crate) fn try_dispatch_charselect(
 ) -> Result<bool> {
     match mode {
         "char-enum-gear" => char_enum_gear(account, password, char_name, args)?,
+        "char-create-gear" => char_create_gear(account, password, char_name, args)?,
         "char-delete" => char_delete(account, password, char_name, args)?,
         _ => return Ok(false),
     }
@@ -97,6 +98,44 @@ fn char_enum_gear(
     }
     let desc = want.map(|w| format!("want {w}, got {got}")).unwrap_or_else(|| format!("want non-zero, got 0 (naked)"));
     bail!("char-enum-gear: {char_name} slot {slot}: {desc}");
+}
+
+// ---- char-create-gear probe: a FRESH, never-logged-in character must already show gear ----
+// Usage: wire-client TEST test123 <throwaway-name> char-create-gear [slot]
+// Work-item 180: the loadout is granted at CREATION, so SMSG_CHAR_ENUM renders the model armed
+// on the very first char-select — before any world entry. The existing char-enum-gear probe
+// can't catch a regression here (its subject has logged in, and the first-login safety-net
+// grant would have dressed it). Creates <throwaway-name>, asserts, then deletes it.
+fn char_create_gear(
+    account: &str,
+    password: &str,
+    char_name: &str,
+    args: &mut dyn Iterator<Item = String>,
+) -> Result<()> {
+    let slot: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(15);
+    eprintln!("[wire] char-create-gear: create {char_name}, check slot {slot} WITHOUT logging in…");
+    let (k, world_addr) = logon(account, password)?;
+    let mut c = WireClient::connect_world(&world_addr, account, k)?;
+    if c.char_enum()?.iter().any(|(_, n, _)| n.eq_ignore_ascii_case(char_name)) {
+        bail!("char-create-gear: {char_name:?} already exists — pass a throwaway name (it may have logged in before, which would mask the creation-time grant)");
+    }
+    let guid = c.create_or_find_char(char_name, Class::Warrior)?;
+    let chars = c.char_enum_gear()?;
+    let Some((_, _, display_ids)) = chars.iter().find(|(g, _, _)| *g == guid) else {
+        bail!("char-create-gear: created guid={guid} missing from SMSG_CHAR_ENUM");
+    };
+    let got = display_ids.get(slot).copied().unwrap_or(0);
+    println!("[probe] SMSG_CHAR_ENUM fresh {char_name} slot {slot} display_id={got}");
+    // Delete the throwaway BEFORE judging, so a failed assert doesn't leak it into later runs.
+    let del = c.char_delete(guid)?;
+    if del != WorldResult::CharDeleteSuccess {
+        eprintln!("[wire] warning: cleanup delete of {char_name} returned {del:?}");
+    }
+    if got == 0 {
+        bail!("char-create-gear: {char_name} slot {slot} display_id=0 — a never-logged-in character is NAKED on char select (creation-time loadout grant regressed)");
+    }
+    println!("[wire] CHAR-CREATE-GEAR PASS \u{2713}  fresh {char_name} slot {slot} display_id={got} before any login");
+    Ok(())
 }
 
 // ---- char-delete probe: CMSG_CHAR_DELETE -> SMSG_CHAR_DELETE(success), row gone (081) ----

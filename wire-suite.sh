@@ -135,6 +135,9 @@ t_char_enum_gear()   { timeout 60 "$WC" TEST test123 Ginger char-enum-gear 15; }
 # entry 25 (Worn Shortsword) is init-seeded everywhere; asserts the reply decodes with its known armor.
 t_query_item()       { timeout 60 "$WC" TEST test123 Ginger query-item 25 0; }
 t_char_delete()      { timeout 60 "$WC" TEST test123 Wsthrowaway char-delete; }
+# 180: a FRESH never-logged-in character must already carry gear on char select — the loadout is
+# granted at creation. Uses (and deletes) its own throwaway so first-login grants can't mask it.
+t_char_create_gear() { timeout 60 "$WC" TEST test123 Wsnakedcheck char-create-gear 15; }
 
 t_bindpoint() {
   # Fixture: home at A, then move to B and logout — SMSG_BINDPOINTUPDATE must carry A (not B).
@@ -277,6 +280,7 @@ t_playerbots() { bash tools/wire-client/test-playerbots.sh; }
 # ---------- the run ----------
 ALL_TESTS=(
   logout who roll text_emote played_time played_time_live initial_spells char_enum_gear
+  char_create_gear
   query_item char_delete bindpoint inspect friend ignore_whisper say_range move_relay
   persist_health repop_delay ding combat_regen cast_flow cast_interrupt ghost_reveal
   init_factions levelup_info
