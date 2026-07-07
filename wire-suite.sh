@@ -20,6 +20,7 @@
 # --features=debug_reducers (scripts/publish-module.sh), cargo able to build wire-client.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+source scripts/import-manifest.sh
 
 DB=spacetime-core
 WC=./target/debug/wire-client
@@ -106,13 +107,13 @@ fi
 echo "[suite] fixtures: Ginger=$GINGER dfsdfsd=$DFS"
 
 # ---------- data-gate probes (sandbox vs fully-imported node) ----------
-HAS_SPELL_686=$(countq "game_spell WHERE spell_id = 686")
-HAS_SPELL_635=$(countq "game_spell WHERE spell_id = 635")   # curated paladin kit imported? (176)
-HAS_CREATURE_103=$(countq "game_creature_template WHERE entry = 103")
+HAS_SPELL_686=$(countq "game_spell WHERE spell_id = $GATE_SPELL_SHADOWBOLT")
+HAS_SPELL_635=$(countq "game_spell WHERE spell_id = $GATE_SPELL_PALADIN")   # curated paladin kit imported? (176)
+HAS_CREATURE_103=$(countq "game_creature_template WHERE entry = $GATE_CREATURE_TEST")
 HAS_COMBAT_REGEN_EFFECT=$(countq "game_spell_effect WHERE kind = 169")
 HAS_FACTIONS=$(countq "game_faction")
 HAS_LEVEL_STATS=$(countq "game_level_stats")
-HAS_HEALER=$(countq "game_world_entity WHERE entry = 6491")
+HAS_HEALER=$(countq "game_world_entity WHERE entry = $GATE_HEALER_ENTRY")
 
 # ===================================================================================
 #  Tests. Every wire-client probe mode + orchestrated .sh test is either RUN here or
