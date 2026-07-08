@@ -475,23 +475,41 @@ fn ghost(
 }
 
 // ---- stay probe: login + stay connected until a sentinel file appears, then exit Ok.
-// Usage: wire-client [account] [password] [char-name] stay <sentinel_file>
+// Usage: wire-client [account] [password] [char-name] stay <sentinel_file> [deadline_secs]
 // The external orchestrator writes anything to sentinel_file to signal done; we exit 0.
 // Useful when the test only needs the character to be live in game_world_entity while an
 // external script calls spacetime reducers (e.g. work-item #092 combat-regen probe).
+//
+// `deadline_secs` is OPTIONAL (defaults to 60, the historical hardcoded value) so every
+// pre-existing 1-arg caller is unaffected. Work-item 157: scenario-vendor's stay session from
+// Step 3 was held live across Step 4's up-to-120s fight-durability poll — the old hardcoded 60s
+// self-deadline could silently end the session (exit 0, "STAY TIMEOUT" — NOT an error) mid-poll,
+// dropping the character's connection and starving the fight of real swings. Callers that hold a
+// stay session across a longer window now pass a deadline that exceeds it (scenario-lib's
+// `stay_start`'s optional 4th arg).
 fn stay(
     c: &mut WireClient,
     args: &mut dyn Iterator<Item = String>,
     _mcx: &ModeCtx<'_>,
 ) -> Result<()> {
-    let sentinel = require_path_arg(args, "stay <sentinel_file>", "sentinel_file")?;
+    let sentinel = require_path_arg(args, "stay <sentinel_file> [deadline_secs]", "sentinel_file")?;
+    // An ABSENT deadline defaults to 60 (every pre-existing 1-arg caller). A PRESENT-but-malformed
+    // deadline is a hard error, NOT a default: silently falling back to 60 would recreate the exact
+    // silent mid-poll self-exit this arg exists to fix (a typo'd call site would reintroduce the
+    // 157 flake with no error anywhere — stay's log defaults to /dev/null under stay_start).
+    let secs: u64 = match args.next() {
+        None => 60,
+        Some(s) => s
+            .parse()
+            .map_err(|_| anyhow!("stay: deadline_secs must be an integer, got {s:?}"))?,
+    };
     let _ = std::fs::remove_file(&sentinel);
-    eprintln!("[wire] stay: draining socket until {sentinel} appears…");
-    if drain_until_file(c, &sentinel, 60) {
+    eprintln!("[wire] stay: draining socket until {sentinel} appears (deadline {secs}s)…");
+    if drain_until_file(c, &sentinel, secs) {
         let _ = std::fs::remove_file(&sentinel);
         println!("[wire] STAY DONE — sentinel received, exiting.");
     } else {
-        println!("[wire] STAY TIMEOUT — orchestrator did not signal within 60s.");
+        println!("[wire] STAY TIMEOUT — orchestrator did not signal within {secs}s.");
     }
     Ok(())
 }

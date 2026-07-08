@@ -24,8 +24,14 @@ assert_gt() { if [ -n "$2" ] && [ "$2" -gt "$3" ] 2>/dev/null; then step_ok "$1 
 assert_lt() { if [ -n "$2" ] && [ "$2" -lt "$3" ] 2>/dev/null; then step_ok "$1 ($2 < $3)"; else step_fail "$1: got '$2' want < $3"; fi; }
 
 SC_STAY_PID=""; SC_STAY_SENTINEL=""
-stay_start() { # $1=account $2=pass $3=char
+stay_start() { # $1=account $2=pass $3=char $4=deadline_secs (optional, default 60)
+  # deadline_secs (work-item 157): the wire client's stay mode self-exits (rc 0, silent) once its
+  # own deadline elapses, regardless of whether stay_stop has been called yet. A caller that holds
+  # the session live across a longer poll window than 60s (scenario-vendor's Step 4 fight-durability
+  # poll runs up to 120s) MUST pass a deadline that exceeds that window, or the session — and the
+  # character's live connection — can vanish mid-poll.
   local guid attempt; guid=$(char_guid "$3")
+  local deadline="${4:-60}"
   SC_STAY_SENTINEL="/tmp/sc_stay_$$_$3"
   # A fast relogin can race the PREVIOUS session's disconnect cleanup (which despawns the character
   # guid and would delete the NEW session's entity from under us) — settle first, then verify the
@@ -35,7 +41,7 @@ stay_start() { # $1=account $2=pass $3=char
   local staylog="${SC_STAY_LOG_DIR:+${SC_STAY_LOG_DIR}/stay_$3.log}"
   for attempt in 1 2; do
     rm -f "$SC_STAY_SENTINEL"
-    "$WC" "$1" "$2" "$3" stay "$SC_STAY_SENTINEL" >"${staylog:-/dev/null}" 2>&1 &
+    "$WC" "$1" "$2" "$3" stay "$SC_STAY_SENTINEL" "$deadline" >"${staylog:-/dev/null}" 2>&1 &
     SC_STAY_PID=$!
     local live=""
     for _ in $(seq 1 20); do

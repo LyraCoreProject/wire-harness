@@ -49,7 +49,14 @@ assert_eq "buy: full durability" "$(awk -F'|' '{gsub(/ /,"",$3); print $3}' <<<"
 timeout 60 "$WC" TEST test123 Ginger equip-from "${ISLOT:-0}" || FAILED=1
 sleep 1
 assert_eq "equip: blade now in main-hand slot 15" "$(sql1 "SELECT slot FROM game_item_instance WHERE guid = ${IGUID:-0}")" "15"
-stay_start TEST test123 Ginger || exit 1
+# work-item 157: this session is held live across Step 4's up-to-120s fight-durability poll below
+# (stay_stop isn't called until after that loop) — the stay mode's default 60s self-deadline could
+# silently end the session (rc 0, no error) mid-poll, dropping Ginger's connection and starving the
+# fight of real swings ("zero durability wear" flake). The deadline clock starts at wire-client
+# launch inside stay_start, so it must absorb stay_start's own live-wait + this step's scall/sql
+# tail + the poll's 60 sleeps AND 60 spacetime-CLI roundtrips (the suite-load CLI latency that
+# caused the original flake). 200s dominates that worst case; 150 did not (wave-2 review finding).
+stay_start TEST test123 Ginger 200 || exit 1
 scall debug_compute_swing "$GINGER" "$BAG"
 SWING1=$(sql1 "SELECT final_max FROM game_debug_readout WHERE key = 'swing'")
 assert_gt "equip: compute-swing max rose with the blade (stat fold)" "${SWING1:-0}" "${SWING0:-0}"
