@@ -16,7 +16,7 @@ TRAIN_READY=/tmp/ws_train_ready_$$
 
 # repeatability: forget the spell + normalize the purse before buying it again
 sqlq "DELETE FROM game_player_spell WHERE character_guid = $GINGER AND spell_id = $SPELL" >/dev/null
-scall debug_grant_money "$GINGER" 1000
+scall debug_set_money "$GINGER" 1000
 
 stay_start TEST test123 Ginger || exit 1
 scall debug_teleport "$GINGER" 0 $PAD_X $PAD_Y $PAD_Z 0
@@ -54,7 +54,7 @@ assert_ge "cast effect: health rose by >= the 50 heal" "$(( ${HEALTH1:-0} - ${HE
 # ---- teardown (asserted): the pad trainer only (the seeded start-area trainer stays) ----
 sqlq "DELETE FROM game_creature_spawn WHERE entry = $TRAINER_ENTRY AND x > -8890" >/dev/null
 sqlq "DELETE FROM game_world_entity WHERE guid = ${TRAINER:-0}" >/dev/null
-scall debug_grant_money "$GINGER" 0
+scall debug_set_money "$GINGER" 0
 assert_eq "teardown: pad trainer gone" "$(sql1 "SELECT COUNT(*) AS n FROM game_world_entity WHERE guid = ${TRAINER:-0}")" "0"
 
 if [ "$FAILED" -eq 0 ]; then echo "[scenario-train] PASS"; exit 0; else echo "[scenario-train] FAIL"; exit 1; fi

@@ -19,7 +19,7 @@ BOUGHT_FILE=/tmp/ws_vendor_bought_$$
 # repeatability: purge any stale blade instances + buyback rows from a prior run
 sqlq "DELETE FROM game_item_instance WHERE owner_guid = $GINGER AND entry = $BLADE" >/dev/null
 sqlq "DELETE FROM game_character_buyback WHERE player_guid = $GINGER" >/dev/null
-scall debug_grant_money "$GINGER" 2000
+scall debug_set_money "$GINGER" 2000
 
 stay_start TEST test123 Ginger || exit 1
 scall debug_teleport "$GINGER" 0 $PAD_X $PAD_Y $PAD_Z 0
@@ -49,7 +49,14 @@ assert_eq "buy: full durability" "$(awk -F'|' '{gsub(/ /,"",$3); print $3}' <<<"
 timeout 60 "$WC" TEST test123 Ginger equip-from "${ISLOT:-0}" || FAILED=1
 sleep 1
 assert_eq "equip: blade now in main-hand slot 15" "$(sql1 "SELECT slot FROM game_item_instance WHERE guid = ${IGUID:-0}")" "15"
-stay_start TEST test123 Ginger || exit 1
+# work-item 157: this session is held live across Step 4's up-to-120s fight-durability poll below
+# (stay_stop isn't called until after that loop) — the stay mode's default 60s self-deadline could
+# silently end the session (rc 0, no error) mid-poll, dropping Ginger's connection and starving the
+# fight of real swings ("zero durability wear" flake). The deadline clock starts at wire-client
+# launch inside stay_start, so it must absorb stay_start's own live-wait + this step's scall/sql
+# tail + the poll's 60 sleeps AND 60 spacetime-CLI roundtrips (the suite-load CLI latency that
+# caused the original flake). 200s dominates that worst case; 150 did not (wave-2 review finding).
+stay_start TEST test123 Ginger 200 || exit 1
 scall debug_compute_swing "$GINGER" "$BAG"
 SWING1=$(sql1 "SELECT final_max FROM game_debug_readout WHERE key = 'swing'")
 assert_gt "equip: compute-swing max rose with the blade (stat fold)" "${SWING1:-0}" "${SWING0:-0}"
@@ -121,7 +128,7 @@ if [ -z "$(sql1 "SELECT durability FROM game_item_instance WHERE owner_guid = $G
 fi
 sqlq "DELETE FROM game_item_instance WHERE owner_guid = $GINGER AND entry = $BLADE" >/dev/null
 sqlq "DELETE FROM game_character_buyback WHERE player_guid = $GINGER" >/dev/null
-scall debug_grant_money "$GINGER" 0
+scall debug_set_money "$GINGER" 0
 purge_entry $VENDOR_ENTRY
 sqlq "DELETE FROM game_creature_spawn WHERE entry = $BAG_ENTRY AND x > -8910" >/dev/null
 sqlq "DELETE FROM game_world_entity WHERE guid = ${BAG:-0}" >/dev/null

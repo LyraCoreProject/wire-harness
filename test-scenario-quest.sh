@@ -86,6 +86,18 @@ assert_eq "reward item: +2 Tough Jerky (entry 52)" "$JERKY1" "$(( JERKY0 + 2 ))"
 assert_eq "reputation: +250 with fixture faction 79" "${REP1:-0}" "$(( REP0 + 250 ))"
 assert_ge "quest row marked rewarded" "${REWARDED:-0}" 1
 
+# 186: LOOTABLE follows the rule (loot rows remain OR money > 0) on the money-looted corpse.
+# The wire flow took wolf2's money and released; whether the flag must be 0 or 1 depends on
+# whether the item roll left rows — compute the expectation from the same tables the module
+# reads (SpacetimeDB's SQL subset has no EXISTS/bitwise, so the rule is evaluated in shell).
+W2_FLAGS=$(sql1 "SELECT dynamic_flags FROM game_world_entity WHERE guid = $WOLF2")
+W2_MONEY=$(sql1 "SELECT money FROM game_world_entity WHERE guid = $WOLF2")
+W2_ROWS=$(sqlq "SELECT id FROM game_corpse_loot WHERE corpse_guid = $WOLF2" | grep -cE '[0-9]')
+if [ -n "$W2_FLAGS" ]; then # corpse may have despawned by now — rule is only assertable while it stands
+  WANT=0; { [ "${W2_ROWS:-0}" -gt 0 ] || [ "${W2_MONEY:-0}" -gt 0 ]; } && WANT=1
+  assert_eq "LOOTABLE flag matches the rule (rows=$W2_ROWS money=$W2_MONEY)" "$(( ${W2_FLAGS:-0} % 2 ))" "$WANT"
+fi
+
 # ---- teardown (asserted): fixture NPCs, wolves, corpses, spawn rows all gone ----
 sqlq "DELETE FROM game_melee_attack WHERE attacker_guid = $GINGER" >/dev/null
 purge_entry $GIVER_ENTRY

@@ -53,6 +53,7 @@ pub(crate) fn try_dispatch_charselect(
 ) -> Result<bool> {
     match mode {
         "char-enum-gear" => char_enum_gear(account, password, char_name, args)?,
+        "char-create-gear" => char_create_gear(account, password, char_name, args)?,
         "char-delete" => char_delete(account, password, char_name, args)?,
         _ => return Ok(false),
     }
@@ -97,6 +98,44 @@ fn char_enum_gear(
     }
     let desc = want.map(|w| format!("want {w}, got {got}")).unwrap_or_else(|| format!("want non-zero, got 0 (naked)"));
     bail!("char-enum-gear: {char_name} slot {slot}: {desc}");
+}
+
+// ---- char-create-gear probe: a FRESH, never-logged-in character must already show gear ----
+// Usage: wire-client TEST test123 <throwaway-name> char-create-gear [slot]
+// Work-item 180: the loadout is granted at CREATION, so SMSG_CHAR_ENUM renders the model armed
+// on the very first char-select — before any world entry. The existing char-enum-gear probe
+// can't catch a regression here (its subject has logged in, and the first-login safety-net
+// grant would have dressed it). Creates <throwaway-name>, asserts, then deletes it.
+fn char_create_gear(
+    account: &str,
+    password: &str,
+    char_name: &str,
+    args: &mut dyn Iterator<Item = String>,
+) -> Result<()> {
+    let slot: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(15);
+    eprintln!("[wire] char-create-gear: create {char_name}, check slot {slot} WITHOUT logging in…");
+    let (k, world_addr) = logon(account, password)?;
+    let mut c = WireClient::connect_world(&world_addr, account, k)?;
+    if c.char_enum()?.iter().any(|(_, n, _)| n.eq_ignore_ascii_case(char_name)) {
+        bail!("char-create-gear: {char_name:?} already exists — pass a throwaway name (it may have logged in before, which would mask the creation-time grant)");
+    }
+    let guid = c.create_or_find_char(char_name, Class::Warrior)?;
+    let chars = c.char_enum_gear()?;
+    let Some((_, _, display_ids)) = chars.iter().find(|(g, _, _)| *g == guid) else {
+        bail!("char-create-gear: created guid={guid} missing from SMSG_CHAR_ENUM");
+    };
+    let got = display_ids.get(slot).copied().unwrap_or(0);
+    println!("[probe] SMSG_CHAR_ENUM fresh {char_name} slot {slot} display_id={got}");
+    // Delete the throwaway BEFORE judging, so a failed assert doesn't leak it into later runs.
+    let del = c.char_delete(guid)?;
+    if del != WorldResult::CharDeleteSuccess {
+        eprintln!("[wire] warning: cleanup delete of {char_name} returned {del:?}");
+    }
+    if got == 0 {
+        bail!("char-create-gear: {char_name} slot {slot} display_id=0 — a never-logged-in character is NAKED on char select (creation-time loadout grant regressed)");
+    }
+    println!("[wire] CHAR-CREATE-GEAR PASS \u{2713}  fresh {char_name} slot {slot} display_id={got} before any login");
+    Ok(())
 }
 
 // ---- char-delete probe: CMSG_CHAR_DELETE -> SMSG_CHAR_DELETE(success), row gone (081) ----
@@ -436,23 +475,41 @@ fn ghost(
 }
 
 // ---- stay probe: login + stay connected until a sentinel file appears, then exit Ok.
-// Usage: wire-client [account] [password] [char-name] stay <sentinel_file>
+// Usage: wire-client [account] [password] [char-name] stay <sentinel_file> [deadline_secs]
 // The external orchestrator writes anything to sentinel_file to signal done; we exit 0.
 // Useful when the test only needs the character to be live in game_world_entity while an
 // external script calls spacetime reducers (e.g. work-item #092 combat-regen probe).
+//
+// `deadline_secs` is OPTIONAL (defaults to 60, the historical hardcoded value) so every
+// pre-existing 1-arg caller is unaffected. Work-item 157: scenario-vendor's stay session from
+// Step 3 was held live across Step 4's up-to-120s fight-durability poll — the old hardcoded 60s
+// self-deadline could silently end the session (exit 0, "STAY TIMEOUT" — NOT an error) mid-poll,
+// dropping the character's connection and starving the fight of real swings. Callers that hold a
+// stay session across a longer window now pass a deadline that exceeds it (scenario-lib's
+// `stay_start`'s optional 4th arg).
 fn stay(
     c: &mut WireClient,
     args: &mut dyn Iterator<Item = String>,
     _mcx: &ModeCtx<'_>,
 ) -> Result<()> {
-    let sentinel = require_path_arg(args, "stay <sentinel_file>", "sentinel_file")?;
+    let sentinel = require_path_arg(args, "stay <sentinel_file> [deadline_secs]", "sentinel_file")?;
+    // An ABSENT deadline defaults to 60 (every pre-existing 1-arg caller). A PRESENT-but-malformed
+    // deadline is a hard error, NOT a default: silently falling back to 60 would recreate the exact
+    // silent mid-poll self-exit this arg exists to fix (a typo'd call site would reintroduce the
+    // 157 flake with no error anywhere — stay's log defaults to /dev/null under stay_start).
+    let secs: u64 = match args.next() {
+        None => 60,
+        Some(s) => s
+            .parse()
+            .map_err(|_| anyhow!("stay: deadline_secs must be an integer, got {s:?}"))?,
+    };
     let _ = std::fs::remove_file(&sentinel);
-    eprintln!("[wire] stay: draining socket until {sentinel} appears…");
-    if drain_until_file(c, &sentinel, 60) {
+    eprintln!("[wire] stay: draining socket until {sentinel} appears (deadline {secs}s)…");
+    if drain_until_file(c, &sentinel, secs) {
         let _ = std::fs::remove_file(&sentinel);
         println!("[wire] STAY DONE — sentinel received, exiting.");
     } else {
-        println!("[wire] STAY TIMEOUT — orchestrator did not signal within 60s.");
+        println!("[wire] STAY TIMEOUT — orchestrator did not signal within {secs}s.");
     }
     Ok(())
 }

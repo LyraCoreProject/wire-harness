@@ -20,6 +20,7 @@
 # --features=debug_reducers (scripts/publish-module.sh), cargo able to build wire-client.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+source scripts/import-manifest.sh
 
 DB=spacetime-core
 WC=./target/debug/wire-client
@@ -106,13 +107,13 @@ fi
 echo "[suite] fixtures: Ginger=$GINGER dfsdfsd=$DFS"
 
 # ---------- data-gate probes (sandbox vs fully-imported node) ----------
-HAS_SPELL_686=$(countq "game_spell WHERE spell_id = 686")
-HAS_SPELL_635=$(countq "game_spell WHERE spell_id = 635")   # curated paladin kit imported? (176)
-HAS_CREATURE_103=$(countq "game_creature_template WHERE entry = 103")
+HAS_SPELL_686=$(countq "game_spell WHERE spell_id = $GATE_SPELL_SHADOWBOLT")
+HAS_SPELL_635=$(countq "game_spell WHERE spell_id = $GATE_SPELL_PALADIN")   # curated paladin kit imported? (176)
+HAS_CREATURE_103=$(countq "game_creature_template WHERE entry = $GATE_CREATURE_TEST")
 HAS_COMBAT_REGEN_EFFECT=$(countq "game_spell_effect WHERE kind = 169")
 HAS_FACTIONS=$(countq "game_faction")
 HAS_LEVEL_STATS=$(countq "game_level_stats")
-HAS_HEALER=$(countq "game_world_entity WHERE entry = 6491")
+HAS_HEALER=$(countq "game_world_entity WHERE entry = $GATE_HEALER_ENTRY")
 
 # ===================================================================================
 #  Tests. Every wire-client probe mode + orchestrated .sh test is either RUN here or
@@ -135,6 +136,9 @@ t_char_enum_gear()   { timeout 60 "$WC" TEST test123 Ginger char-enum-gear 15; }
 # entry 25 (Worn Shortsword) is init-seeded everywhere; asserts the reply decodes with its known armor.
 t_query_item()       { timeout 60 "$WC" TEST test123 Ginger query-item 25 0; }
 t_char_delete()      { timeout 60 "$WC" TEST test123 Wsthrowaway char-delete; }
+# 180: a FRESH never-logged-in character must already carry gear on char select — the loadout is
+# granted at creation. Uses (and deletes) its own throwaway so first-login grants can't mask it.
+t_char_create_gear() { timeout 60 "$WC" TEST test123 Wsnakedcheck char-create-gear 15; }
 
 t_bindpoint() {
   # Fixture: home at A, then move to B and logout — SMSG_BINDPOINTUPDATE must carry A (not B).
@@ -177,6 +181,7 @@ t_say_range()      { bash tools/wire-client/test-say-range.sh; }
 t_move_relay()     { bash tools/wire-client/test-move-relay.sh; }
 t_persist_health() { bash tools/wire-client/test-persist-health.sh; }
 t_repop_delay()    { bash tools/wire-client/test-repop-delay.sh; }
+t_respec()         { bash tools/wire-client/test-respec.sh; }
 
 t_ding()         { bash tools/wire-client/test-ding.sh; }
 t_combat_regen() {
@@ -255,6 +260,7 @@ t_soak() { SOAK_SECS="${SOAK_SECS:-60}" bash tools/wire-client/test-soak.sh; }
 # ---- scenario runner (work-item 140): the four multi-step gameplay flows ----
 t_scenario_quest()  { bash tools/wire-client/test-scenario-quest.sh; }
 t_scenario_vendor() { bash tools/wire-client/test-scenario-vendor.sh; }
+t_scenario_weaponmaster() { bash tools/wire-client/test-scenario-weaponmaster.sh; }
 t_scenario_train()  { bash tools/wire-client/test-scenario-train.sh; }
 t_scenario_death()  { bash tools/wire-client/test-scenario-death.sh; }
 
@@ -277,10 +283,11 @@ t_playerbots() { bash tools/wire-client/test-playerbots.sh; }
 # ---------- the run ----------
 ALL_TESTS=(
   logout who roll text_emote played_time played_time_live initial_spells char_enum_gear
+  char_create_gear
   query_item char_delete bindpoint inspect friend ignore_whisper say_range move_relay
-  persist_health repop_delay ding combat_regen cast_flow cast_interrupt ghost_reveal
+  persist_health repop_delay respec ding combat_regen cast_flow cast_interrupt ghost_reveal
   init_factions levelup_info
-  scenario_quest scenario_vendor scenario_train scenario_death
+  scenario_quest scenario_vendor scenario_train scenario_weaponmaster scenario_death
   aoi_relay soak playerbots group party_brains bot_goals class_roles
 )
 START=$(date +%s)
