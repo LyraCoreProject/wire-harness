@@ -686,6 +686,15 @@ fn raw_audit(
         if op == 0x00A9 {
             println!("[audit] UPDATE_OBJECT len={}", payload.len());
         }
+        // Item-gain feedback (185/#15): surface the push-result + quest-item toast opcodes.
+        if op == 0x0166 {
+            let item = u32::from_le_bytes([payload[25], payload[26], payload[27], payload[28]]);
+            let count = u32::from_le_bytes([payload[37], payload[38], payload[39], payload[40]]);
+            println!("[audit] ITEM_PUSH_RESULT len={} item={item} count={count}", payload.len());
+        }
+        if op == 0x019A {
+            println!("[audit] QUESTUPDATE_ADD_ITEM len={}", payload.len());
+        }
         None::<()>
     });
     Ok(())
