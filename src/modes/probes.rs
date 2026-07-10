@@ -680,11 +680,43 @@ fn raw_audit(
     _mcx: &ModeCtx<'_>,
 ) -> Result<()> {
     let secs: u64 = args.next().and_then(|s| s.parse().ok()).unwrap_or(8);
-    println!("[audit] initial seen_guids: {:x?}", c.seen_guids);
-    c.set_recv_timeout(std::time::Duration::from_millis(500))?;
+    // Optional "move": stream MSG_MOVE_HEARTBEATs while auditing (254 — self-echo detection).
+    let moving = args.next().as_deref() == Some("move");
+    println!("[audit] initial seen_guids: {:x?} moving={moving}", c.seen_guids);
+    c.set_recv_timeout(std::time::Duration::from_millis(250))?;
+    let t0 = std::time::Instant::now();
+    if moving {
+        use wow_world_messages::vanilla::{MovementInfo, MovementInfo_MovementFlags, Vector3d, MSG_MOVE_HEARTBEAT_Client};
+        let (sx, sy, sz) = (-8940.0f32, -120.0f32, 78.0f32); // the Northshire test pad
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+        let mut step = 0f32;
+        while std::time::Instant::now() < deadline {
+            step += 1.0;
+            c.send(&MSG_MOVE_HEARTBEAT_Client {
+                info: MovementInfo {
+                    flags: MovementInfo_MovementFlags::empty(),
+                    timestamp: t0.elapsed().as_millis() as u32,
+                    position: Vector3d { x: sx + step * 2.0, y: sy, z: sz },
+                    orientation: 0.0,
+                    fall_time: 0.0,
+                },
+            })?;
+            let _ = c.recv_raw_for(std::time::Duration::from_millis(480), |op, payload| {
+                if (0x00B5..=0x00EE).contains(&op) {
+                    println!("[audit] t={}ms SELF-WINDOW MOVE-OP 0x{op:04X} len={}", t0.elapsed().as_millis(), payload.len());
+                }
+                None::<()>
+            });
+        }
+        return Ok(());
+    }
     let _ = c.recv_raw_for(std::time::Duration::from_secs(secs), |op, payload| {
         if op == 0x00A9 {
-            println!("[audit] UPDATE_OBJECT len={}", payload.len());
+            println!("[audit] t={}ms UPDATE_OBJECT len={}", t0.elapsed().as_millis(), payload.len());
+        }
+        // 254: MSG_MOVE_* / SMSG_MONSTER_MOVE arrival timing — rhythmic relay gaps show here.
+        if op == 0x00DD {
+            println!("[audit] t={}ms MONSTER_MOVE len={}", t0.elapsed().as_millis(), payload.len());
         }
         // Item-gain feedback (185/#15): surface the push-result + quest-item toast opcodes.
         if op == 0x0166 {
