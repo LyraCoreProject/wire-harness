@@ -695,6 +695,10 @@ fn raw_audit(
         if op == 0x019A {
             println!("[audit] QUESTUPDATE_ADD_ITEM len={}", payload.len());
         }
+        if op == 0x0150 {
+            let amount = u32::from_le_bytes([payload[payload.len()-5], payload[payload.len()-4], payload[payload.len()-3], payload[payload.len()-2]]);
+            println!("[audit] SPELLHEALLOG len={} amount~{amount}", payload.len());
+        }
         None::<()>
     });
     Ok(())
