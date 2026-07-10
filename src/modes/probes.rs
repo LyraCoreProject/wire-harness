@@ -435,6 +435,34 @@ fn gossip(
             "gateway sent NO gossip message (handler aborted server-side)"
         }
     );
+    // Optional: `… gossip <npc> select <index>` — click that option and report what routes back
+    // (work-item 247 follow-up: the trainer option closed the window because every imported
+    // option's action was a broadcast_text id, so the TRAINER match never fired).
+    if args.next().as_deref() == Some("select") {
+        use wow_world_messages::vanilla::CMSG_GOSSIP_SELECT_OPTION;
+        let idx: u32 = args.next().and_then(|s| s.parse().ok()).expect("select <index>");
+        eprintln!("[wire] gossip-probe: CMSG_GOSSIP_SELECT_OPTION({idx}) -> {npc:#x}");
+        c.send(&CMSG_GOSSIP_SELECT_OPTION { guid: Guid::new(npc), gossip_list_id: idx, unknown: None })?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while std::time::Instant::now() < deadline {
+            match c.recv() {
+                Ok(Smsg::SMSG_TRAINER_LIST(t)) => {
+                    println!(
+                        "[probe] SMSG_TRAINER_LIST guid={:#x} spells={} greeting={:?}",
+                        t.guid.guid(), t.spells.len(), t.greeting
+                    );
+                    return Ok(());
+                }
+                Ok(Smsg::SMSG_GOSSIP_COMPLETE) => {
+                    println!("[probe] SMSG_GOSSIP_COMPLETE (window closed — option routed nowhere)");
+                    return Ok(());
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        println!("[probe] select: NO routed response within 3s");
+    }
     Ok(())
 }
 
