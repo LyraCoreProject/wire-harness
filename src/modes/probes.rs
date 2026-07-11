@@ -35,6 +35,7 @@ pub(crate) fn try_dispatch(
         "cast-dump" => cast_dump(c, args, mcx)?,
         "swing-flow" => swing_flow(c, args, mcx)?,
         "armor-audit" => armor_audit(c, args, mcx)?,
+        "fall" => fall_probe(c, args, mcx)?,
         "raw-audit" => raw_audit(c, args, mcx)?,
         "name-query" => name_query(c, args, mcx)?,
         "bindpoint" => bindpoint(c, args, mcx)?,
@@ -906,6 +907,41 @@ fn armor_audit(
         }
     }
     println!("[armor] done");
+    Ok(())
+}
+
+// ---- fall <fall_time_ms>: send MSG_MOVE_FALL_LAND with the given airborne time (058) and report
+// the SMSG_ENVIRONMENTAL_DAMAGE_LOG that comes back. The wire carries fall time as raw u32 ms
+// (cmangos truth); gtker types the field f32, so the raw value rides via from_bits.
+fn fall_probe(
+    c: &mut WireClient,
+    args: &mut dyn Iterator<Item = String>,
+    _mcx: &ModeCtx<'_>,
+) -> Result<()> {
+    use wow_world_messages::vanilla::{MovementInfo, MovementInfo_MovementFlags, Vector3d, MSG_MOVE_FALL_LAND_Client};
+    let ms: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(2000);
+    c.send(&MSG_MOVE_FALL_LAND_Client {
+        info: MovementInfo {
+            flags: MovementInfo_MovementFlags::empty(),
+            timestamp: 1,
+            position: Vector3d { x: -8949.95, y: -132.49, z: 83.5 },
+            orientation: 0.0,
+            fall_time: f32::from_bits(ms),
+        },
+    })?;
+    c.set_recv_timeout(std::time::Duration::from_millis(400))?;
+    let t0 = std::time::Instant::now();
+    while t0.elapsed() < std::time::Duration::from_secs(4) {
+        match c.recv() {
+            Ok(Smsg::SMSG_ENVIRONMENTAL_DAMAGE_LOG(l)) => {
+                println!("[fall] ENV_DAMAGE_LOG type={:?} dmg={} guid={:#x}", l.damage_type, l.damage, l.guid.guid());
+                return Ok(());
+            }
+            Ok(_) => {}
+            Err(_) => {}
+        }
+    }
+    println!("[fall] no ENV_DAMAGE_LOG within 4s (fall_time={ms}ms)");
     Ok(())
 }
 
