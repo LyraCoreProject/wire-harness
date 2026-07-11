@@ -33,6 +33,7 @@ pub(crate) fn try_dispatch(
         "ding" => ding(c, args, mcx)?,
         "repop" => repop(c, args, mcx)?,
         "cast-dump" => cast_dump(c, args, mcx)?,
+        "swing-flow" => swing_flow(c, args, mcx)?,
         "raw-audit" => raw_audit(c, args, mcx)?,
         "name-query" => name_query(c, args, mcx)?,
         "bindpoint" => bindpoint(c, args, mcx)?,
@@ -724,6 +725,133 @@ fn cast_dump(
         println!("[dump] opcode 0x{op:04X} len={}", payload.len());
         None::<()>
     });
+    Ok(())
+}
+
+// ---- swing-flow <mob_guid> <spell_id> <queue|seal>: the 114 melee-spell split. ----
+// queue (Heroic Strike 78): engage -> after a swing, cast -> assert NO SPELL_GO arrives at cast
+//   time (the button-hold contract) -> assert SPELL_GO(spell) + SPELLNONMELEEDAMAGELOG(spell)
+//   arrive with a LATER swing (the queued fire).
+// seal (Seal of Righteousness 20154): cast (a normal instant buff: one GO now) -> engage ->
+//   assert SPELLNONMELEEDAMAGELOG(spell, holy) proc lines arrive per landed swing with NO
+//   further SPELL_GO for the seal.
+fn swing_flow(
+    c: &mut WireClient,
+    args: &mut dyn Iterator<Item = String>,
+    _mcx: &ModeCtx<'_>,
+) -> Result<()> {
+    use std::time::{Duration, Instant};
+    use wow_world_messages::vanilla::CMSG_ATTACKSWING;
+    let mob: u64 = args.next().and_then(|s| s.parse().ok()).expect("usage: swing-flow <mob_guid> <spell_id> <queue|seal> [x y z]");
+    let spell: u32 = args.next().and_then(|s| s.parse().ok()).expect("spell id");
+    let seal_mode = args.next().as_deref() == Some("seal");
+    // Optional [x y z]: heartbeat ourselves next to the mob first — movement is client-authoritative,
+    // so this stands in for walking there (the same trick raw-audit's move mode uses).
+    if let (Some(x), Some(y), Some(z)) = (
+        args.next().and_then(|s| s.parse::<f32>().ok()),
+        args.next().and_then(|s| s.parse::<f32>().ok()),
+        args.next().and_then(|s| s.parse::<f32>().ok()),
+    ) {
+        use wow_world_messages::vanilla::{MovementInfo, MovementInfo_MovementFlags, Vector3d, MSG_MOVE_HEARTBEAT_Client};
+        // Stand 2 yd WEST of the given point (pass the MOB's coords) facing +x (orientation 0), so
+        // the module's is_facing gate passes — a swing at a target behind you is silently skipped
+        // (that gate ate this probe's every swing on the first attempt: 20 "white swings" that were
+        // all the WOLF hitting US).
+        for i in 0..3u32 {
+            c.send(&MSG_MOVE_HEARTBEAT_Client {
+                info: MovementInfo {
+                    flags: MovementInfo_MovementFlags::empty(),
+                    timestamp: i * 100,
+                    position: Vector3d { x: x - 2.0, y, z },
+                    orientation: 0.0,
+                    fall_time: 0.0,
+                },
+            })?;
+            std::thread::sleep(Duration::from_millis(120));
+        }
+        println!("[flow] repositioned to ({}, {y}, {z}) facing +x at the mob", x - 2.0);
+    }
+
+    if seal_mode {
+        // The seal buff itself is a normal instant self-cast (sync START/GO — expected, not counted).
+        c.cast_spell(spell, 0)?;
+        std::thread::sleep(Duration::from_millis(300));
+    } else {
+        // queue mode: Bloodrage (2687, warrior kit) — a white swing vs an armored L1 wolf builds
+        // ~8 internal rage while Heroic Strike costs 150; the probe would starve. +10 rage now
+        // + the 10s trickle covers the cost within a couple of swings.
+        c.cast_spell(2687, 0)?;
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    c.set_selection(mob)?;
+    c.send(&CMSG_ATTACKSWING { guid: Guid::new(mob) })?;
+    c.set_recv_timeout(Duration::from_millis(400))?;
+
+    let t0 = Instant::now();
+    let deadline = Duration::from_secs(40);
+    let mut swings = 0u32;
+    let mut cast_at: Option<Instant> = None; // queue mode: when the cast went out
+    let mut premature_go = false;
+    let mut go_at_swing = false;
+    let mut proc_logs = 0u32;
+    let mut stray_seal_go = 0u32;
+    while t0.elapsed() < deadline {
+        match c.recv() {
+            Ok(Smsg::SMSG_ATTACKERSTATEUPDATE(a)) => {
+                swings += 1;
+                println!("[flow] white swing #{swings} dmg={}", a.total_damage);
+                // queue mode: cast AFTER the first swing (some rage has built); re-send after a
+                // rejection (rage still short) — a queued cast produces no reply until it fires.
+                if !seal_mode && cast_at.is_none() && !go_at_swing {
+                    c.cast_spell(spell, mob)?;
+                    cast_at = Some(Instant::now());
+                    println!("[flow] cast {spell} sent (after swing #{swings})");
+                }
+            }
+            Ok(Smsg::SMSG_CAST_RESULT(_)) if !seal_mode => {
+                println!("[flow] CAST_RESULT failure — likely rage-short; retry after next swing");
+                cast_at = None;
+            }
+            Ok(Smsg::SMSG_SPELL_GO(g)) if g.spell == spell => {
+                if seal_mode {
+                    // The seal BUFF cast's own GO (sent at cast) can straggle past the 300ms drain —
+                    // only a GO arriving once swings are flowing is a real stray (a proc must never GO).
+                    if swings == 0 {
+                        println!("[flow] (seal buff cast GO — expected)");
+                    } else {
+                        stray_seal_go += 1;
+                        println!("[flow] UNEXPECTED SPELL_GO({spell}) in seal mode");
+                    }
+                } else if let Some(t) = cast_at {
+                    let ms = t.elapsed().as_millis();
+                    println!("[flow] SPELL_GO({spell}) {ms}ms after cast");
+                    // Within one recv-timeout of the cast = sent at queue time (the old bug).
+                    if ms < 500 { premature_go = true; } else { go_at_swing = true; }
+                } else {
+                    premature_go = true; // GO with no cast outstanding
+                    println!("[flow] UNEXPECTED SPELL_GO({spell}) with no cast outstanding");
+                }
+            }
+            Ok(Smsg::SMSG_SPELLNONMELEEDAMAGELOG(l)) if l.spell == spell => {
+                proc_logs += 1;
+                println!("[flow] SPELLNONMELEEDAMAGELOG({spell}) dmg={} school={:?}", l.damage, l.school);
+                if !seal_mode && go_at_swing { break; } // queue verified end-to-end
+                if seal_mode && proc_logs >= 2 { break; } // two proc lines = seal verified
+            }
+            Ok(_) => {}
+            Err(_) => {} // recv timeout tick — keep polling until the deadline
+        }
+    }
+    println!(
+        "[flow] RESULT swings={swings} premature_go={premature_go} go_at_swing={go_at_swing} proc_logs={proc_logs} stray_seal_go={stray_seal_go}"
+    );
+    if seal_mode {
+        if proc_logs == 0 || stray_seal_go > 0 { bail!("seal-flow FAIL"); }
+        println!("[flow] SEAL PASS — named holy proc lines, no stray GO");
+    } else {
+        if premature_go || !go_at_swing || proc_logs == 0 { bail!("queue-flow FAIL"); }
+        println!("[flow] QUEUE PASS — no GO at cast, GO+named damage at the swing");
+    }
     Ok(())
 }
 
