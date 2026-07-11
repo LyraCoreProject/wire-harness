@@ -702,6 +702,12 @@ fn raw_audit(
                 },
             })?;
             let _ = c.recv_raw_for(std::time::Duration::from_millis(480), |op, payload| {
+                if op == 0x00A9 {
+                    println!("[audit] t={}ms MOVING UPDATE_OBJECT len={}", t0.elapsed().as_millis(), payload.len());
+                }
+                if op == 0x00AA {
+                    println!("[audit] t={}ms MOVING DESTROY_OBJECT", t0.elapsed().as_millis());
+                }
                 if (0x00B5..=0x00EE).contains(&op) {
                     let mask = payload[0];
                     let mut g: u64 = 0;
