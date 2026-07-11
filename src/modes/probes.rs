@@ -34,6 +34,7 @@ pub(crate) fn try_dispatch(
         "repop" => repop(c, args, mcx)?,
         "cast-dump" => cast_dump(c, args, mcx)?,
         "swing-flow" => swing_flow(c, args, mcx)?,
+        "armor-audit" => armor_audit(c, args, mcx)?,
         "raw-audit" => raw_audit(c, args, mcx)?,
         "name-query" => name_query(c, args, mcx)?,
         "bindpoint" => bindpoint(c, args, mcx)?,
@@ -857,6 +858,54 @@ fn swing_flow(
         if premature_go || !go_at_swing || proc_logs == 0 { bail!("queue-flow FAIL"); }
         println!("[flow] QUEUE PASS — no GO at cast, GO+named damage at the swing");
     }
+    Ok(())
+}
+
+// ---- armor-audit [seconds]: print every armor (UNIT_FIELD_RESISTANCES[0]) value the client
+// receives for SELF, in arrival order — CREATE blocks and VALUES partials both. Diagnoses the
+// "login shows less armor until I re-equip" class: the LAST value printed is what the paperdoll
+// shows; compare against the CREATE's and the SQL-side fold to see who pushed the wrong number.
+fn armor_audit(
+    c: &mut WireClient,
+    args: &mut dyn Iterator<Item = String>,
+    _mcx: &ModeCtx<'_>,
+) -> Result<()> {
+    use wow_world_messages::vanilla::{Object, UpdateMask};
+    let secs: u64 = args.next().and_then(|s| s.parse().ok()).unwrap_or(8);
+    let me = c.self_guid;
+    c.set_recv_timeout(std::time::Duration::from_millis(400))?;
+    let t0 = std::time::Instant::now();
+    while t0.elapsed() < std::time::Duration::from_secs(secs) {
+        match c.recv() {
+            Ok(Smsg::SMSG_UPDATE_OBJECT(u)) => {
+                for o in &u.objects {
+                    let (guid, mask, kind) = match o {
+                        Object::Values { guid1, mask1 } => (guid1.guid(), mask1, "VALUES"),
+                        Object::CreateObject { guid3, mask2, .. } => (guid3.guid(), mask2, "CREATE"),
+                        Object::CreateObject2 { guid3, mask2, .. } => (guid3.guid(), mask2, "CREATE2"),
+                        _ => continue,
+                    };
+                    if guid != me {
+                        continue;
+                    }
+                    let (armor, str_, ap) = match mask {
+                        UpdateMask::Unit(m) => (m.unit_normal_resistance(), m.unit_strength(), m.unit_attack_power()),
+                        UpdateMask::Player(m) => (m.unit_normal_resistance(), m.unit_strength(), m.unit_attack_power()),
+                        _ => (None, None, None),
+                    };
+                    if armor.is_some() || str_.is_some() || ap.is_some() {
+                        println!(
+                            "[armor] t={}ms {kind} armor={:?} str={:?} ap={:?}",
+                            t0.elapsed().as_millis(), armor, str_, ap
+                        );
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(_) => {}
+        }
+    }
+    println!("[armor] done");
     Ok(())
 }
 
