@@ -703,7 +703,16 @@ fn raw_audit(
             })?;
             let _ = c.recv_raw_for(std::time::Duration::from_millis(480), |op, payload| {
                 if (0x00B5..=0x00EE).contains(&op) {
-                    println!("[audit] t={}ms SELF-WINDOW MOVE-OP 0x{op:04X} len={}", t0.elapsed().as_millis(), payload.len());
+                    let mask = payload[0];
+                    let mut g: u64 = 0;
+                    let mut off = 1;
+                    for i in 0..8 {
+                        if mask & (1 << i) != 0 {
+                            g |= (payload[off] as u64) << (8 * i);
+                            off += 1;
+                        }
+                    }
+                    println!("[audit] t={}ms SELF-WINDOW MOVE-OP 0x{op:04X} guid={g:#x} len={}", t0.elapsed().as_millis(), payload.len());
                 }
                 None::<()>
             });
@@ -716,7 +725,18 @@ fn raw_audit(
         }
         // 254: MSG_MOVE_* / SMSG_MONSTER_MOVE arrival timing — rhythmic relay gaps show here.
         if op == 0x00DD {
-            println!("[audit] t={}ms MONSTER_MOVE len={}", t0.elapsed().as_millis(), payload.len());
+            // Decode the leading packed guid — a MONSTER_MOVE carrying the PLAYER's own guid
+            // spline-drags their character (the rubber-band suspect).
+            let mask = payload[0];
+            let mut g: u64 = 0;
+            let mut off = 1;
+            for i in 0..8 {
+                if mask & (1 << i) != 0 {
+                    g |= (payload[off] as u64) << (8 * i);
+                    off += 1;
+                }
+            }
+            println!("[audit] t={}ms MONSTER_MOVE guid={g:#x} len={}", t0.elapsed().as_millis(), payload.len());
         }
         // Item-gain feedback (185/#15): surface the push-result + quest-item toast opcodes.
         if op == 0x0166 {
