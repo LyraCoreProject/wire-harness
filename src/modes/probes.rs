@@ -44,6 +44,29 @@ pub(crate) fn try_dispatch(
 /// Run `mode` if it is a CHAR-SELECT-TIER probe: these run BEFORE `login_as` (no world entry),
 /// each opening its own logon + world-handshake connection. `Ok(true)` = recognized and
 /// completed; `Ok(false)` = not a char-select-tier mode (main.rs proceeds to `login_as`).
+/// make-char <class>: create the named character (idempotent) and exit — for staging a
+/// class-specific probe char (e.g. a paladin for trainer-state checks).
+fn make_char(
+    account: &str,
+    password: &str,
+    char_name: &str,
+    args: &mut dyn Iterator<Item = String>,
+) -> Result<()> {
+    let class = match args.next().as_deref() {
+        Some("paladin") => Class::Paladin,
+        Some("mage") => Class::Mage,
+        Some("rogue") => Class::Rogue,
+        Some("priest") => Class::Priest,
+        Some("warlock") => Class::Warlock,
+        _ => Class::Warrior,
+    };
+    let (k, world_addr) = logon(account, password)?;
+    let mut c = WireClient::connect_world(&world_addr, account, k)?;
+    let guid = c.create_or_find_char(char_name, class)?;
+    println!("[probe] make-char: {char_name} ({class:?}) guid={guid}");
+    Ok(())
+}
+
 pub(crate) fn try_dispatch_charselect(
     mode: &str,
     account: &str,
@@ -53,6 +76,7 @@ pub(crate) fn try_dispatch_charselect(
 ) -> Result<bool> {
     match mode {
         "char-enum-gear" => char_enum_gear(account, password, char_name, args)?,
+        "make-char" => make_char(account, password, char_name, args)?,
         "char-create-gear" => char_create_gear(account, password, char_name, args)?,
         "char-delete" => char_delete(account, password, char_name, args)?,
         _ => return Ok(false),
@@ -451,6 +475,37 @@ fn gossip(
                         "[probe] SMSG_TRAINER_LIST guid={:#x} spells={} greeting={:?}",
                         t.guid.guid(), t.spells.len(), t.greeting
                     );
+                    for sp in &t.spells {
+                        println!(
+                            "[probe]   spell={} state={:?} cost={} req_level={} req_skill={:?} first_rank={}",
+                            sp.spell, sp.state, sp.spell_cost, sp.required_level, sp.required_skill, sp.first_rank
+                        );
+                    }
+                    // Optional trailing: `buy <spell_id>` — exercise the purchase and report.
+                    if args.next().as_deref() == Some("buy") {
+                        use wow_world_messages::vanilla::CMSG_TRAINER_BUY_SPELL;
+                        let id: u32 = args.next().and_then(|s| s.parse().ok()).expect("buy <spell_id>");
+                        c.send(&CMSG_TRAINER_BUY_SPELL { guid: Guid::new(npc), id })?;
+                        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+                        while std::time::Instant::now() < deadline {
+                            match c.recv() {
+                                Ok(Smsg::SMSG_TRAINER_BUY_SUCCEEDED(r)) => {
+                                    println!("[probe] BUY SUCCEEDED spell={}", r.id);
+                                    return Ok(());
+                                }
+                                Ok(Smsg::SMSG_TRAINER_BUY_FAILED(r)) => {
+                                    println!("[probe] BUY FAILED spell={} error={:?}", r.id, r.error);
+                                    return Ok(());
+                                }
+                                Ok(Smsg::SMSG_LEARNED_SPELL(r)) => {
+                                    println!("[probe] LEARNED spell={}", r.id);
+                                }
+                                Ok(_) => {}
+                                Err(_) => break,
+                            }
+                        }
+                        println!("[probe] buy: no reply in 4s");
+                    }
                     return Ok(());
                 }
                 Ok(Smsg::SMSG_GOSSIP_COMPLETE) => {
