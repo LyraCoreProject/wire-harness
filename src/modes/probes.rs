@@ -491,7 +491,11 @@ fn gossip(
                         while std::time::Instant::now() < deadline {
                             match c.recv() {
                                 Ok(Smsg::SMSG_TRAINER_BUY_SUCCEEDED(r)) => {
+                                    // keep listening: LEARNED or SUPERCEDED (258) follows
                                     println!("[probe] BUY SUCCEEDED spell={}", r.id);
+                                }
+                                Ok(Smsg::SMSG_SUPERCEDED_SPELL(r)) => {
+                                    println!("[probe] SUPERCEDED wire=[{}, {}] (cmangos order: old, new)", r.new_spell_id, r.old_spell_id);
                                     return Ok(());
                                 }
                                 Ok(Smsg::SMSG_TRAINER_BUY_FAILED(r)) => {
@@ -500,6 +504,7 @@ fn gossip(
                                 }
                                 Ok(Smsg::SMSG_LEARNED_SPELL(r)) => {
                                     println!("[probe] LEARNED spell={}", r.id);
+                                    return Ok(());
                                 }
                                 Ok(_) => {}
                                 Err(_) => break,
