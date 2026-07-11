@@ -36,6 +36,7 @@ pub(crate) fn try_dispatch(
         "swing-flow" => swing_flow(c, args, mcx)?,
         "armor-audit" => armor_audit(c, args, mcx)?,
         "fall" => fall_probe(c, args, mcx)?,
+        "engage-retreat" => engage_retreat(c, args, mcx)?,
         "raw-audit" => raw_audit(c, args, mcx)?,
         "name-query" => name_query(c, args, mcx)?,
         "bindpoint" => bindpoint(c, args, mcx)?,
@@ -942,6 +943,63 @@ fn fall_probe(
         }
     }
     println!("[fall] no ENV_DAMAGE_LOG within 4s (fall_time={ms}ms)");
+    Ok(())
+}
+
+// ---- engage-retreat <mob_guid> <x> <y> <z> <retreat_yd> <secs>: engage the mob in melee, then
+// back off `retreat_yd` (heartbeat — client-authoritative) and hold the session open `secs` while
+// the shell samples the mob's position via SQL (049: an offensive caster should HOLD at spell
+// range instead of gluing to us; a melee mob should chase). Prints swings/casts seen either way.
+fn engage_retreat(
+    c: &mut WireClient,
+    args: &mut dyn Iterator<Item = String>,
+    _mcx: &ModeCtx<'_>,
+) -> Result<()> {
+    use std::time::{Duration, Instant};
+    use wow_world_messages::vanilla::{CMSG_ATTACKSWING, MovementInfo, MovementInfo_MovementFlags, Vector3d, MSG_MOVE_HEARTBEAT_Client};
+    let mob: u64 = args.next().and_then(|s| s.parse().ok()).expect("mob guid");
+    let x: f32 = args.next().and_then(|s| s.parse().ok()).expect("x");
+    let y: f32 = args.next().and_then(|s| s.parse().ok()).expect("y");
+    let z: f32 = args.next().and_then(|s| s.parse().ok()).expect("z");
+    let retreat: f32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(20.0);
+    let secs: u64 = args.next().and_then(|s| s.parse().ok()).unwrap_or(15);
+    let hb = |c: &mut WireClient, px: f32, py: f32, ts: u32| -> Result<()> {
+        c.send(&MSG_MOVE_HEARTBEAT_Client {
+            info: MovementInfo {
+                flags: MovementInfo_MovementFlags::empty(),
+                timestamp: ts,
+                position: Vector3d { x: px, y: py, z },
+                orientation: 0.0,
+                fall_time: 0.0,
+            },
+        })
+    };
+    // adjacent (2 yd west, facing +x — the is_facing lesson), engage, trade a couple swings
+    hb(c, x - 2.0, y, 1)?;
+    c.set_selection(mob)?;
+    c.send(&CMSG_ATTACKSWING { guid: Guid::new(mob) })?;
+    c.set_recv_timeout(Duration::from_millis(300))?;
+    let t0 = Instant::now();
+    while t0.elapsed() < Duration::from_secs(4) {
+        let _ = c.recv();
+    }
+    // back off — a few heartbeats so coalescing can't hold the retreat
+    for i in 0..3u32 {
+        hb(c, x - 2.0 - retreat, y, 100 + i * 120)?;
+        std::thread::sleep(Duration::from_millis(120));
+    }
+    println!("[hold] retreated {retreat} yd; holding session {secs}s (sample the mob via SQL now)");
+    let (mut swings, mut casts) = (0u32, 0u32);
+    let t1 = Instant::now();
+    while t1.elapsed() < Duration::from_secs(secs) {
+        match c.recv() {
+            Ok(Smsg::SMSG_ATTACKERSTATEUPDATE(_)) => swings += 1,
+            Ok(Smsg::SMSG_SPELL_GO(g)) if g.caster.guid() == mob => casts += 1,
+            Ok(_) => {}
+            Err(_) => {}
+        }
+    }
+    println!("[hold] done — swings_seen={swings} mob_casts={casts}");
     Ok(())
 }
 
