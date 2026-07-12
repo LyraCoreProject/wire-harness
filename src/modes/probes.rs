@@ -37,6 +37,8 @@ pub(crate) fn try_dispatch(
         "armor-audit" => armor_audit(c, args, mcx)?,
         "fall" => fall_probe(c, args, mcx)?,
         "engage-retreat" => engage_retreat(c, args, mcx)?,
+        "watch-casts" => watch_casts(c, args, mcx)?,
+        "channel" => channel_probe(c, args, mcx)?,
         "raw-audit" => raw_audit(c, args, mcx)?,
         "name-query" => name_query(c, args, mcx)?,
         "bindpoint" => bindpoint(c, args, mcx)?,
@@ -1000,6 +1002,79 @@ fn engage_retreat(
         }
     }
     println!("[hold] done — swings_seen={swings} mob_casts={casts}");
+    Ok(())
+}
+
+// ---- watch-casts [secs]: passively print every SMSG_SPELL_START/GO the session receives
+// (caster + spell id). 088 verify: a server-side debug_force_cast on THIS character must now
+// deliver the caster their own START/GO through the relay (the old gate suppressed them).
+fn watch_casts(
+    c: &mut WireClient,
+    args: &mut dyn Iterator<Item = String>,
+    _mcx: &ModeCtx<'_>,
+) -> Result<()> {
+    let secs: u64 = args.next().and_then(|s| s.parse().ok()).unwrap_or(12);
+    c.set_recv_timeout(std::time::Duration::from_millis(400))?;
+    let t0 = std::time::Instant::now();
+    while t0.elapsed() < std::time::Duration::from_secs(secs) {
+        match c.recv() {
+            Ok(Smsg::SMSG_SPELL_START(m)) => println!("[watch] START caster={:#x} spell={}", m.caster.guid(), m.spell),
+            Ok(Smsg::SMSG_SPELL_GO(m)) => println!("[watch] GO caster={:#x} spell={}", m.caster.guid(), m.spell),
+            Ok(_) => {}
+            Err(_) => {}
+        }
+    }
+    println!("[watch] done");
+    Ok(())
+}
+
+// ---- channel <name> [say <msg>] [secs]: join the chat channel (065), optionally speak, then
+// listen — prints the CHANNEL_NOTIFY ack and every Channel-type SMSG_MESSAGECHAT received.
+fn channel_probe(
+    c: &mut WireClient,
+    args: &mut dyn Iterator<Item = String>,
+    _mcx: &ModeCtx<'_>,
+) -> Result<()> {
+    use wow_world_messages::vanilla::{CMSG_JOIN_CHANNEL, CMSG_MESSAGECHAT, CMSG_MESSAGECHAT_ChatType, Language, SMSG_MESSAGECHAT_ChatType};
+    let name = args.next().expect("usage: channel <name> [say <msg>] [secs]");
+    let mut say: Option<String> = None;
+    let mut secs = 10u64;
+    while let Some(a) = args.next() {
+        if a == "say" {
+            say = args.next();
+        } else if let Ok(n) = a.parse() {
+            secs = n;
+        }
+    }
+    c.send(&CMSG_JOIN_CHANNEL { channel_name: name.clone(), channel_password: String::new() })?;
+    c.set_recv_timeout(std::time::Duration::from_millis(400))?;
+    let t0 = std::time::Instant::now();
+    let mut sent = say.is_none();
+    while t0.elapsed() < std::time::Duration::from_secs(secs) {
+        match c.recv() {
+            Ok(Smsg::SMSG_CHANNEL_NOTIFY(n)) => {
+                println!("[chan] NOTIFY {:?} channel={}", n.notify_type, n.channel_name);
+                if !sent {
+                    if let Some(msg) = &say {
+                        c.send(&CMSG_MESSAGECHAT {
+                            chat_type: CMSG_MESSAGECHAT_ChatType::Channel { channel: name.clone() },
+                            language: Language::Universal,
+                            message: msg.clone(),
+                        })?;
+                        sent = true;
+                    }
+                }
+            }
+            Ok(Smsg::SMSG_MESSAGECHAT(m)) => {
+                if let SMSG_MESSAGECHAT_ChatType::Channel { channel_name, player, .. } = &m.chat_type {
+                    println!("[chan] MSG channel={} from={:#x} text={:?}", channel_name, player.guid(), m.message);
+                }
+            }
+            Ok(_) => {}
+            Err(_) => {}
+        }
+    }
+    println!("[chan] done");
     Ok(())
 }
 
