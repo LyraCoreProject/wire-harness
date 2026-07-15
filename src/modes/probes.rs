@@ -1556,29 +1556,37 @@ fn groundcast(
         MovementInfo, MovementInfo_MovementFlags, Object, ObjectType, Vector3d,
         MSG_MOVE_HEARTBEAT_Client,
     };
-    let spell: u32 = args.next().and_then(|s| s.parse().ok()).expect("usage: groundcast <spell_id> <x> <y> <z>");
+    let spell: u32 = args.next().and_then(|s| s.parse().ok()).expect("usage: groundcast <spell_id> <x> <y> <z> [dest]");
     let x: f32 = args.next().and_then(|s| s.parse().ok()).expect("x");
     let y: f32 = args.next().and_then(|s| s.parse().ok()).expect("y");
     let z: f32 = args.next().and_then(|s| s.parse().ok()).expect("z");
+    // "dest" (262, Flamestrike): stand ~20 yd WEST of (x,y,z) and cast WITH a DEST_LOCATION block at
+    // it — the clicked-ground shape. Default (Consecration) stands ON the point and self-casts.
+    let dest_mode = args.next().as_deref() == Some("dest");
+    let (sx, sy) = if dest_mode { (x - 20.0, y) } else { (x, y) };
     for i in 0..3u32 {
         c.send(&MSG_MOVE_HEARTBEAT_Client {
             info: MovementInfo {
                 flags: MovementInfo_MovementFlags::empty(),
                 timestamp: i * 100,
-                position: Vector3d { x, y, z },
-                orientation: 0.0,
+                position: Vector3d { x: sx, y: sy, z },
+                orientation: 0.0, // facing +x = the dest point in dest mode
                 fall_time: 0.0,
             },
         })?;
         std::thread::sleep(Duration::from_millis(120));
     }
-    println!("[ground] at ({x},{y},{z}); casting {spell}");
-    c.cast_spell(spell, 0)?;
+    println!("[ground] at ({sx},{sy},{z}); casting {spell} (dest_mode={dest_mode})");
+    if dest_mode {
+        c.cast_spell_at_dest(spell, x, y, z)?;
+    } else {
+        c.cast_spell(spell, 0)?;
+    }
     c.set_recv_timeout(Duration::from_millis(400))?;
     let t0 = Instant::now();
     let (mut go_hits, mut go_seen) = (0usize, false);
     let (mut dynobj_creates, mut ticks, mut reaps) = (0u32, 0u32, 0u32);
-    while t0.elapsed() < Duration::from_secs(12) {
+    while t0.elapsed() < Duration::from_secs(if dest_mode { 18 } else { 12 }) {
         match c.recv() {
             Ok(Smsg::SMSG_SPELL_GO(g)) if g.spell == spell => {
                 go_seen = true;
@@ -1610,9 +1618,19 @@ fn groundcast(
     }
     println!("[ground] RESULT go_seen={go_seen} go_hits={go_hits} dynobj_creates={dynobj_creates} ticks={ticks} reaps={reaps}");
     if !go_seen { bail!("groundcast FAIL: no SPELL_GO (cast rejected? mana?)"); }
-    if go_hits != 0 { bail!("groundcast FAIL: GO hit list not empty ({go_hits}) — caster impact animation"); }
+    if dest_mode {
+        // The clicked-ground nuke (Flamestrike eff0) must HIT the mobs at the click.
+        if go_hits == 0 { bail!("groundcast FAIL: dest-mode GO hit nobody — the nuke didn't anchor on the click"); }
+    } else if go_hits != 0 {
+        bail!("groundcast FAIL: GO hit list not empty ({go_hits}) — caster impact animation");
+    }
     if dynobj_creates == 0 { bail!("groundcast FAIL: no DYNAMICOBJECT CREATE (no swirl)"); }
-    if ticks < 2 { bail!("groundcast FAIL: only {ticks} tick damage log(s) — feedback missing or no hostile in radius"); }
+    // dest mode: >=1 damage log proves the dest pipeline delivers feedback (the nuke one-shots a
+    // low-level mob and a survivor CHASES out of the 5 yd patch before the 2s first tick — patch
+    // TICK mechanics are pinned by the self-anchored Consecration run, same engine). Self mode
+    // keeps >=2 (the caster stands in the area with the mob, ticks accumulate).
+    let min_ticks = if dest_mode { 1 } else { 2 };
+    if ticks < min_ticks { bail!("groundcast FAIL: only {ticks} tick damage log(s) — feedback missing or no hostile in radius"); }
     if reaps == 0 { bail!("groundcast FAIL: swirl never reaped (no DESTROY)"); }
     println!("[ground] GROUNDCAST PASS \u{2713}");
     Ok(())

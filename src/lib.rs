@@ -32,7 +32,8 @@ use wow_srp::PublicKey;
 use wow_world_messages::vanilla::opcodes::ServerOpcodeMessage as WorldSmsg;
 use wow_world_messages::vanilla::{
     Class, Gender, Language, LogoutResult, Race, SpellCastTargets,
-    SpellCastTargets_SpellCastTargetFlags, SpellCastTargets_SpellCastTargetFlags_Unit, WorldResult,
+    SpellCastTargets_SpellCastTargetFlags, SpellCastTargets_SpellCastTargetFlags_DestLocation,
+    SpellCastTargets_SpellCastTargetFlags_Unit, Vector3d as CastVector3d, WorldResult,
     CMSG_AUTH_SESSION, CMSG_CAST_SPELL, CMSG_CHAR_CREATE, CMSG_CHAR_DELETE, CMSG_CHAR_ENUM, CMSG_GOSSIP_HELLO,
     CMSG_ITEM_QUERY_SINGLE, CMSG_LOGOUT_REQUEST, CMSG_MESSAGECHAT, CMSG_MESSAGECHAT_ChatType,
     CMSG_NPC_TEXT_QUERY, CMSG_PLAYED_TIME, CMSG_PLAYER_LOGIN, CMSG_REPOP_REQUEST, CMSG_SET_SELECTION, CMSG_WHO,
@@ -589,6 +590,22 @@ impl WireClient {
             targets: SpellCastTargets {
                 target_flags: SpellCastTargets_SpellCastTargetFlags::new_unit(
                     SpellCastTargets_SpellCastTargetFlags_Unit { unit_target: Guid::new(target) },
+                ),
+            },
+        })
+    }
+
+    /// Cast `spell_id` at a clicked GROUND point (CMSG_CAST_SPELL with TARGET_FLAG_DEST_LOCATION) —
+    /// the ground-targeted AoE shape (Flamestrike/Blizzard). The gateway routes the dest block to
+    /// `cast_spell_at`, which anchors the area/nuke at these coords (118 phase 2 / 262).
+    pub fn cast_spell_at_dest(&mut self, spell_id: u32, x: f32, y: f32, z: f32) -> Result<()> {
+        self.send(&CMSG_CAST_SPELL {
+            spell: spell_id,
+            targets: SpellCastTargets {
+                target_flags: SpellCastTargets_SpellCastTargetFlags::new_dest_location(
+                    SpellCastTargets_SpellCastTargetFlags_DestLocation {
+                        destination: CastVector3d { x, y, z },
+                    },
                 ),
             },
         })
