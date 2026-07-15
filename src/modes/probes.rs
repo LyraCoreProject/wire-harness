@@ -40,6 +40,11 @@ pub(crate) fn try_dispatch(
         "watch-casts" => watch_casts(c, args, mcx)?,
         "channel" => channel_probe(c, args, mcx)?,
         "raw-audit" => raw_audit(c, args, mcx)?,
+        "autoshot" => autoshot(c, args, mcx)?,
+        "talent" => talent_probe(c, args, mcx)?,
+        "groundcast" => groundcast(c, args, mcx)?,
+        "backswing" => backswing(c, args, mcx)?,
+        "setbutton" => setbutton(c, args, mcx)?,
         "name-query" => name_query(c, args, mcx)?,
         "bindpoint" => bindpoint(c, args, mcx)?,
         _ => return Ok(false),
@@ -1258,4 +1263,452 @@ fn bindpoint(
             Ok(())
         }
     }
+}
+
+// ---- autoshot <mob_guid> <loop|melee|reject> <mob_x> <mob_y> <mob_z>: the ranged auto-repeat
+// wire contract (097). Repositions WEST of the mob facing +x (like swing-flow), then:
+//   loop   — stands 15 yd out, activates Auto Shot (75), watches ~20s. PASS = activation
+//            SMSG_SPELL_START(75) with timer==0 + the AMMO block, >=2 SMSG_SPELL_GO(75) (the loop
+//            repeats), >=1 SMSG_SPELLNONMELEEDAMAGELOG(75) (vanilla shot damage packet), and ZERO
+//            self SMSG_ATTACKERSTATEUPDATE while ranged (the melee-swing packet must not fire per
+//            shot). Logs any server-initiated SMSG_CANCEL_AUTO_REPEAT (min-range teardown when the
+//            mob closes) — expected once the wolf reaches us, not asserted (timing).
+//   melee  — stands 15 yd out, activates, then after the FIRST shot GO emulates the 5875 client's
+//            melee press: CMSG_ATTACKSWING + CMSG_CANCEL_AUTO_REPEAT_SPELL back-to-back (the live-
+//            logged order). PASS = >=1 self white melee swing lands after the pair — ONE press
+//            engages melee (the cancel must not kill the just-armed melee row).
+//   reject — stands 45 yd out (beyond the 35 yd max) and activates. PASS = SMSG_CAST_RESULT
+//            arrives and NO SMSG_SPELL_START/GO for spell 75 (arm-first rejection keeps the
+//            client toggle in lockstep).
+fn autoshot(
+    c: &mut WireClient,
+    args: &mut dyn Iterator<Item = String>,
+    _mcx: &ModeCtx<'_>,
+) -> Result<()> {
+    use std::time::{Duration, Instant};
+    use wow_world_messages::vanilla::{
+        CMSG_ATTACKSWING, CMSG_ATTACKSTOP, CMSG_CANCEL_AUTO_REPEAT_SPELL, MovementInfo,
+        MovementInfo_MovementFlags, Vector3d, MSG_MOVE_HEARTBEAT_Client,
+    };
+    const AUTO_SHOT: u32 = 75;
+    let mob: u64 = args.next().and_then(|s| s.parse().ok()).expect("usage: autoshot <mob_guid> <loop|melee|reject> <mob_x> <mob_y> <mob_z>");
+    let mode = args.next().expect("mode: loop|melee|reject");
+    let mx: f32 = args.next().and_then(|s| s.parse().ok()).expect("mob x");
+    let my: f32 = args.next().and_then(|s| s.parse().ok()).expect("mob y");
+    let mz: f32 = args.next().and_then(|s| s.parse().ok()).expect("mob z");
+
+    // loop mode stands farther out: the wolf charges after the first LANDED shot and a point-blank
+    // due shot tears the loop down (min-range) — 25 yd buys ≥2 shot cycles before it closes.
+    let stand_off = match mode.as_str() { "reject" => 45.0, "loop" | "moving" => 25.0, _ => 15.0 };
+    for i in 0..3u32 {
+        c.send(&MSG_MOVE_HEARTBEAT_Client {
+            info: MovementInfo {
+                flags: MovementInfo_MovementFlags::empty(),
+                timestamp: i * 100,
+                position: Vector3d { x: mx - stand_off, y: my, z: mz },
+                orientation: 0.0, // facing +x = facing the mob (is_facing gate)
+                fall_time: 0.0,
+            },
+        })?;
+        std::thread::sleep(Duration::from_millis(120));
+    }
+    println!("[shot] standing {stand_off} yd west of mob, facing it; activating Auto Shot");
+    c.set_selection(mob)?;
+    c.cast_spell(AUTO_SHOT, mob)?;
+    c.set_recv_timeout(Duration::from_millis(400))?;
+
+    if mode == "moving" {
+        return autoshot_moving(c, mob, mx, my, mz, stand_off);
+    }
+    let t0 = Instant::now();
+    let deadline = Duration::from_secs(if mode == "reject" { 5 } else { 22 });
+    let self_guid = c.self_guid;
+    let (mut start_seen, mut start_timer, mut start_ammo) = (false, u32::MAX, false);
+    let mut cast_result = 0u32;
+    let (mut gos, mut go_misses, mut dmg_logs, mut self_melee_asu, mut cancels) = (0u32, 0u32, 0u32, 0u32, 0u32);
+    let mut last_go_at: Option<Instant> = None;
+    let mut first_impact_gap_ms: Option<u128> = None; // GO->damage-log gap of the FIRST shot (fired at the known 25yd standoff; later gaps shrink as the wolf charges)
+    let mut melee_pair_sent_at: Option<Instant> = None;
+    let mut self_melee_after_pair = 0u32;
+
+    while t0.elapsed() < deadline {
+        match c.recv() {
+            Ok(Smsg::SMSG_SPELL_START(s)) if s.spell == AUTO_SHOT => {
+                start_seen = true;
+                start_timer = s.timer;
+                start_ammo = s.flags.get_ammo().is_some();
+                println!("[shot] SPELL_START(75) timer={} ammo_block={} @{}ms", s.timer, start_ammo, t0.elapsed().as_millis());
+            }
+            Ok(Smsg::SMSG_CAST_RESULT(_)) => {
+                cast_result += 1;
+                println!("[shot] CAST_RESULT @{}ms", t0.elapsed().as_millis());
+            }
+            Ok(Smsg::SMSG_SPELL_GO(g)) if g.spell == AUTO_SHOT => {
+                gos += 1;
+                go_misses += g.misses.len() as u32;
+                println!("[shot] SPELL_GO(75) #{gos} hits={} misses={} ammo={} @{}ms", g.hits.len(), g.misses.len(), g.flags.get_ammo().is_some(), t0.elapsed().as_millis());
+                last_go_at = Some(Instant::now());
+                if mode == "melee" && melee_pair_sent_at.is_none() {
+                    // Emulate the client's melee press DURING the repeat loop: swing then cancel,
+                    // back-to-back (the live-captured 5875 order).
+                    c.send(&CMSG_ATTACKSWING { guid: Guid::new(mob) })?;
+                    c.send(&CMSG_CANCEL_AUTO_REPEAT_SPELL {})?;
+                    melee_pair_sent_at = Some(Instant::now());
+                    println!("[shot] >> sent ATTACKSWING + CANCEL_AUTO_REPEAT_SPELL pair");
+                }
+            }
+            Ok(Smsg::SMSG_SPELLNONMELEEDAMAGELOG(l)) if l.spell == AUTO_SHOT => {
+                dmg_logs += 1;
+                let gap = last_go_at.map(|t| t.elapsed().as_millis()).unwrap_or(0);
+                if first_impact_gap_ms.is_none() { first_impact_gap_ms = Some(gap); }
+                println!("[shot] SPELLNONMELEEDAMAGELOG(75) dmg={} @{}ms (impact gap {}ms after its GO)", l.damage, t0.elapsed().as_millis(), gap);
+            }
+            Ok(Smsg::SMSG_ATTACKERSTATEUPDATE(a)) if a.attacker.guid() == self_guid => {
+                if let Some(t) = melee_pair_sent_at {
+                    self_melee_after_pair += 1;
+                    println!("[shot] self MELEE swing dmg={} {}ms after pair", a.total_damage, t.elapsed().as_millis());
+                    if self_melee_after_pair >= 2 { break; }
+                } else {
+                    self_melee_asu += 1;
+                    println!("[shot] UNEXPECTED self ATTACKERSTATEUPDATE during ranged (dmg={})", a.total_damage);
+                }
+            }
+            Ok(Smsg::SMSG_CANCEL_AUTO_REPEAT) => {
+                cancels += 1;
+                println!("[shot] SMSG_CANCEL_AUTO_REPEAT (server-initiated) @{}ms", t0.elapsed().as_millis());
+                if mode == "loop" && gos >= 2 { break; } // min-range teardown after a healthy loop = done
+            }
+            Ok(Smsg::SMSG_ATTACKSTOP(s)) => {
+                println!("[shot] ATTACKSTOP player={:?} @{}ms", s.player, t0.elapsed().as_millis());
+            }
+            Ok(_) => {}
+            Err(_) => {}
+        }
+    }
+    // Clean up: stop whatever is still armed (melee row or ranged loop).
+    let _ = c.send(&CMSG_ATTACKSTOP {});
+    let _ = c.send(&CMSG_CANCEL_AUTO_REPEAT_SPELL {});
+
+    println!("[shot] RESULT mode={mode} start={start_seen}(timer={start_timer},ammo={start_ammo}) cast_result={cast_result} gos={gos} misses={go_misses} dmg_logs={dmg_logs} self_melee_during_ranged={self_melee_asu} cancels={cancels} melee_after_pair={self_melee_after_pair}");
+    match mode.as_str() {
+        "loop" => {
+            if !start_seen || start_timer != 0 || !start_ammo {
+                bail!("autoshot-loop FAIL: activation START wrong (seen={start_seen} timer={start_timer} ammo={start_ammo})");
+            }
+            if gos < 2 { bail!("autoshot-loop FAIL: loop did not repeat (gos={gos})"); }
+            if dmg_logs == 0 && go_misses < 2 { bail!("autoshot-loop FAIL: no SPELLNONMELEEDAMAGELOG (and not all-miss)"); }
+            // Projectile travel (097): the FIRST shot fires from the known 25 yd standoff → the
+            // arrow flies ~625ms (40 yd/s); its damage log must trail its GO by roughly that.
+            // Later shots fire at shrinking distance (the wolf charges), so only the first is pinned.
+            if let Some(gap) = first_impact_gap_ms {
+                if !(400..=900).contains(&(gap as u64)) {
+                    bail!("autoshot-loop FAIL: first-shot damage log {gap}ms after its GO (expected ~625ms for 25yd)");
+                }
+            }
+            if self_melee_asu > 0 { bail!("autoshot-loop FAIL: melee ATTACKERSTATEUPDATE sent for ranged shots"); }
+            println!("[shot] LOOP PASS \u{2713}");
+        }
+        "melee" => {
+            if self_melee_after_pair == 0 { bail!("autoshot-melee FAIL: no melee swing after one ATTACKSWING+CANCEL press"); }
+            println!("[shot] MELEE-SWAP PASS \u{2713} one press engaged melee");
+        }
+        "reject" => {
+            if cast_result == 0 || start_seen || gos > 0 {
+                bail!("autoshot-reject FAIL: cast_result={cast_result} start={start_seen} gos={gos}");
+            }
+            println!("[shot] REJECT PASS \u{2713} out-of-range activation refused, nothing armed");
+        }
+        m => bail!("unknown autoshot mode {m}"),
+    }
+    Ok(())
+}
+
+// ---- talent <talent_id>: spend one talent point live and assert the 1.12 TalentFrame refresh
+// packets (the "talents work server-side but the pane doesn't update" fix): SMSG_LEARNED_SPELL /
+// SMSG_SUPERCEDED_SPELL for the picked rank-spell (SPELLS_CHANGED) and the raw partial-VALUES
+// SMSG_UPDATE_OBJECT carrying the decremented PLAYER_CHARACTER_POINTS1 (CHARACTER_POINTS_CHANGED).
+// Needs a level-10+ character with unspent points and the talent seeded in game_talent.
+fn talent_probe(
+    c: &mut WireClient,
+    args: &mut dyn Iterator<Item = String>,
+    _mcx: &ModeCtx<'_>,
+) -> Result<()> {
+    use std::time::{Duration, Instant};
+    use wow_world_messages::vanilla::{Talent, CMSG_LEARN_TALENT};
+    let talent_id: u32 = args.next().and_then(|s| s.parse().ok()).expect("usage: talent <talent_id>");
+    let talent = Talent::try_from(talent_id).map_err(|_| anyhow!("talent id {talent_id} not in the 1.12 Talent enum"))?;
+    c.send(&CMSG_LEARN_TALENT { talent, requested_rank: 0 })?;
+    c.set_recv_timeout(Duration::from_millis(400))?;
+    let t0 = Instant::now();
+    let (mut learned, mut superceded, mut values) = (0u32, 0u32, 0u32);
+    while t0.elapsed() < Duration::from_secs(5) {
+        match c.recv_raw() {
+            Ok((0x012B, body)) => {
+                learned = u32::from_le_bytes(body[0..4].try_into().unwrap());
+                println!("[talent] SMSG_LEARNED_SPELL({learned})");
+            }
+            Ok((0x012C, body)) => {
+                let old = u16::from_le_bytes(body[0..2].try_into().unwrap());
+                let new = u16::from_le_bytes(body[2..4].try_into().unwrap());
+                superceded = new as u32;
+                println!("[talent] SMSG_SUPERCEDED_SPELL(old={old} -> new={new})");
+            }
+            Ok((0x00A9, body)) => {
+                values += 1;
+                println!("[talent] SMSG_UPDATE_OBJECT partial VALUES ({} bytes)", body.len());
+            }
+            Ok(_) => {}
+            Err(_) => {}
+        }
+        if (learned != 0 || superceded != 0) && values > 0 {
+            break;
+        }
+    }
+    println!("[talent] RESULT learned={learned} superceded={superceded} values_frames={values}");
+    if learned == 0 && superceded == 0 { bail!("talent FAIL: no rank-spell LEARNED/SUPERCEDED relayed"); }
+    if values == 0 { bail!("talent FAIL: no CHARACTER_POINTS1 VALUES push"); }
+    println!("[talent] PASS \u{2713} pane-refresh packets on the wire");
+    Ok(())
+}
+
+// The `autoshot moving` body (097): assert vanilla's defer-while-moving. Kites BACKWARD while
+// "running" so the aggroed wolf can't close to melee mid-test (a point-blank due shot would
+// legitimately cancel the loop and mask the thing under test).
+fn autoshot_moving(c: &mut WireClient, _mob: u64, mx: f32, my: f32, mz: f32, stand_off: f32) -> Result<()> {
+    use std::time::{Duration, Instant};
+    use wow_world_messages::vanilla::{
+        CMSG_CANCEL_AUTO_REPEAT_SPELL, MovementInfo, MovementInfo_MovementFlags, Vector3d,
+        MSG_MOVE_HEARTBEAT_Client, MSG_MOVE_STOP_Client,
+    };
+    const AUTO_SHOT: u32 = 75;
+    // Wait for the first shot to fire before starting to run.
+    let mut fired = false;
+    let tw = Instant::now();
+    while tw.elapsed() < Duration::from_secs(4) {
+        if let Ok(Smsg::SMSG_SPELL_GO(g)) = c.recv() {
+            if g.spell == AUTO_SHOT { fired = true; break; }
+        }
+    }
+    if !fired { bail!("autoshot-moving FAIL: first shot never fired"); }
+    println!("[shot] first shot fired; RUNNING (kiting backward) for 3s…");
+    let run_start = Instant::now();
+    let mut gos_while_moving = 0u32;
+    let mut i = 0u32;
+    let mut px = mx - stand_off;
+    while run_start.elapsed() < Duration::from_secs(3) {
+        i += 1;
+        px -= 0.95; // ~6.3 yd/s backward — just under the wolf's ~7 yd/s chase, so it can't reach melee before the post-stop resume shot
+        c.send(&MSG_MOVE_HEARTBEAT_Client {
+            info: MovementInfo {
+                flags: MovementInfo_MovementFlags::new_backward(),
+                timestamp: 1_000_000 + i * 150,
+                position: Vector3d { x: px, y: my, z: mz },
+                orientation: 0.0, // still facing the wolf (+x)
+                fall_time: 0.0,
+            },
+        })?;
+        let tick = Instant::now();
+        while tick.elapsed() < Duration::from_millis(150) {
+            if let Ok(Smsg::SMSG_SPELL_GO(g)) = c.recv() {
+                if g.spell == AUTO_SHOT { gos_while_moving += 1; }
+            }
+        }
+    }
+    c.send(&MSG_MOVE_STOP_Client {
+        info: MovementInfo {
+            flags: MovementInfo_MovementFlags::empty(),
+            timestamp: 2_000_000,
+            position: Vector3d { x: px, y: my, z: mz },
+            orientation: 0.0,
+            fall_time: 0.0,
+        },
+    })?;
+    println!("[shot] stopped at x={px:.1}; waiting for the loop to resume…");
+    let mut resumed_ms: Option<u128> = None;
+    let ts = Instant::now();
+    while ts.elapsed() < Duration::from_secs(4) {
+        if let Ok(Smsg::SMSG_SPELL_GO(g)) = c.recv() {
+            if g.spell == AUTO_SHOT { resumed_ms = Some(ts.elapsed().as_millis()); break; }
+        }
+    }
+    let _ = c.send(&CMSG_CANCEL_AUTO_REPEAT_SPELL {});
+    println!("[shot] RESULT mode=moving gos_while_moving={gos_while_moving} resumed_after_stop_ms={resumed_ms:?}");
+    if gos_while_moving > 0 { bail!("autoshot-moving FAIL: {gos_while_moving} shot(s) fired WHILE RUNNING"); }
+    let Some(ms) = resumed_ms else { bail!("autoshot-moving FAIL: loop never resumed after stopping"); };
+    if ms > 3200 { bail!("autoshot-moving FAIL: resume took {ms}ms (expected ≤ ~re-arm + timer)"); }
+    println!("[shot] MOVING PASS \u{2713} deferred while running, resumed {ms}ms after stop");
+    Ok(())
+}
+
+// ---- groundcast <spell_id> <x> <y> <z>: the ground-AoE wire contract (118, Consecration).
+// Repositions to (x,y,z) (stand ON the mob pack), casts the spell (instant self-anchored area),
+// then watches ~12s. PASS = the GO carries an EMPTY hit list (no impact animation on the caster),
+// >=1 DYNAMICOBJECT CreateObject2 arrives (the ground swirl), >=2 SMSG_SPELLNONMELEEDAMAGELOG
+// ticks land on nearby hostiles (per-tick feedback), and the swirl's SMSG_DESTROY_OBJECT reaps
+// within the watch window (8s duration).
+fn groundcast(
+    c: &mut WireClient,
+    args: &mut dyn Iterator<Item = String>,
+    _mcx: &ModeCtx<'_>,
+) -> Result<()> {
+    use std::time::{Duration, Instant};
+    use wow_world_messages::vanilla::{
+        MovementInfo, MovementInfo_MovementFlags, Object, ObjectType, Vector3d,
+        MSG_MOVE_HEARTBEAT_Client,
+    };
+    let spell: u32 = args.next().and_then(|s| s.parse().ok()).expect("usage: groundcast <spell_id> <x> <y> <z>");
+    let x: f32 = args.next().and_then(|s| s.parse().ok()).expect("x");
+    let y: f32 = args.next().and_then(|s| s.parse().ok()).expect("y");
+    let z: f32 = args.next().and_then(|s| s.parse().ok()).expect("z");
+    for i in 0..3u32 {
+        c.send(&MSG_MOVE_HEARTBEAT_Client {
+            info: MovementInfo {
+                flags: MovementInfo_MovementFlags::empty(),
+                timestamp: i * 100,
+                position: Vector3d { x, y, z },
+                orientation: 0.0,
+                fall_time: 0.0,
+            },
+        })?;
+        std::thread::sleep(Duration::from_millis(120));
+    }
+    println!("[ground] at ({x},{y},{z}); casting {spell}");
+    c.cast_spell(spell, 0)?;
+    c.set_recv_timeout(Duration::from_millis(400))?;
+    let t0 = Instant::now();
+    let (mut go_hits, mut go_seen) = (0usize, false);
+    let (mut dynobj_creates, mut ticks, mut reaps) = (0u32, 0u32, 0u32);
+    while t0.elapsed() < Duration::from_secs(12) {
+        match c.recv() {
+            Ok(Smsg::SMSG_SPELL_GO(g)) if g.spell == spell => {
+                go_seen = true;
+                go_hits = g.hits.len();
+                println!("[ground] SPELL_GO({spell}) hits={} @{}ms", g.hits.len(), t0.elapsed().as_millis());
+            }
+            Ok(Smsg::SMSG_UPDATE_OBJECT(u)) => {
+                for o in &u.objects {
+                    if let Object::CreateObject2 { object_type: ObjectType::DynamicObject, guid3, .. } = o {
+                        dynobj_creates += 1;
+                        println!("[ground] DYNAMICOBJECT CREATE guid={:#x} @{}ms", guid3.guid(), t0.elapsed().as_millis());
+                    }
+                }
+            }
+            Ok(Smsg::SMSG_SPELLNONMELEEDAMAGELOG(l)) if l.spell == spell => {
+                ticks += 1;
+                println!("[ground] tick dmg={} on {:#x} @{}ms", l.damage, l.target.guid(), t0.elapsed().as_millis());
+            }
+            Ok(Smsg::SMSG_DESTROY_OBJECT(d)) if d.guid.guid() >> 48 == 0xF100 => {
+                reaps += 1;
+                println!("[ground] swirl DESTROY guid={:#x} @{}ms", d.guid.guid(), t0.elapsed().as_millis());
+            }
+            Ok(_) => {}
+            Err(_) => {}
+        }
+        if reaps > 0 && ticks >= 2 {
+            break;
+        }
+    }
+    println!("[ground] RESULT go_seen={go_seen} go_hits={go_hits} dynobj_creates={dynobj_creates} ticks={ticks} reaps={reaps}");
+    if !go_seen { bail!("groundcast FAIL: no SPELL_GO (cast rejected? mana?)"); }
+    if go_hits != 0 { bail!("groundcast FAIL: GO hit list not empty ({go_hits}) — caster impact animation"); }
+    if dynobj_creates == 0 { bail!("groundcast FAIL: no DYNAMICOBJECT CREATE (no swirl)"); }
+    if ticks < 2 { bail!("groundcast FAIL: only {ticks} tick damage log(s) — feedback missing or no hostile in radius"); }
+    if reaps == 0 { bail!("groundcast FAIL: swirl never reaped (no DESTROY)"); }
+    println!("[ground] GROUNDCAST PASS \u{2713}");
+    Ok(())
+}
+
+// ---- backswing <mob_guid> <mob_x> <mob_y> <mob_z>: neutral-mob aggro contract (user find).
+// Stands 3 yd WEST of the mob FACING AWAY (-x) and toggles melee attack: the facing gate eats
+// every swing, so the mob must NOT retaliate (vanilla: neutral mobs react to being ATTACKED, not
+// to a stance toggle). Then turns to face it: the first swing fires and the mob must retaliate.
+fn backswing(
+    c: &mut WireClient,
+    args: &mut dyn Iterator<Item = String>,
+    _mcx: &ModeCtx<'_>,
+) -> Result<()> {
+    use std::time::{Duration, Instant};
+    use wow_world_messages::vanilla::{
+        CMSG_ATTACKSWING, CMSG_ATTACKSTOP, MovementInfo, MovementInfo_MovementFlags, Vector3d,
+        MSG_MOVE_HEARTBEAT_Client,
+    };
+    let mob: u64 = args.next().and_then(|s| s.parse().ok()).expect("usage: backswing <mob_guid> <x> <y> <z>");
+    let mx: f32 = args.next().and_then(|s| s.parse().ok()).expect("mob x");
+    let my: f32 = args.next().and_then(|s| s.parse().ok()).expect("mob y");
+    let mz: f32 = args.next().and_then(|s| s.parse().ok()).expect("mob z");
+    let heartbeat = |c: &mut WireClient, o: f32, ts: u32| -> Result<()> {
+        c.send(&MSG_MOVE_HEARTBEAT_Client {
+            info: MovementInfo {
+                flags: MovementInfo_MovementFlags::empty(),
+                timestamp: ts,
+                position: Vector3d { x: mx - 3.0, y: my, z: mz },
+                orientation: o,
+                fall_time: 0.0,
+            },
+        })
+    };
+    for i in 0..3u32 {
+        heartbeat(c, std::f32::consts::PI, i * 100)?; // facing -x = BACK to the mob
+        std::thread::sleep(Duration::from_millis(120));
+    }
+    c.set_selection(mob)?;
+    c.send(&CMSG_ATTACKSWING { guid: Guid::new(mob) })?;
+    c.set_recv_timeout(Duration::from_millis(300))?;
+    println!("[back] attack toggled, back turned; watching 4s for (wrong) retaliation…");
+    let t0 = Instant::now();
+    let mut wolf_hits_while_backturned = 0u32;
+    while t0.elapsed() < Duration::from_secs(4) {
+        match c.recv() {
+            Ok(Smsg::SMSG_ATTACKSTART(a)) if a.attacker.guid() == mob => {
+                wolf_hits_while_backturned += 1;
+                println!("[back] mob ATTACKSTART @{}ms (should NOT happen)", t0.elapsed().as_millis());
+            }
+            Ok(Smsg::SMSG_ATTACKERSTATEUPDATE(a)) if a.attacker.guid() == mob => {
+                wolf_hits_while_backturned += 1;
+            }
+            _ => {}
+        }
+    }
+    println!("[back] turning to face the mob…");
+    for i in 0..2u32 {
+        heartbeat(c, 0.0, 10_000 + i * 100)?; // face +x = the mob
+        std::thread::sleep(Duration::from_millis(120));
+    }
+    let t1 = Instant::now();
+    let (mut own_swing, mut retaliated) = (0u32, 0u32);
+    while t1.elapsed() < Duration::from_secs(6) {
+        match c.recv() {
+            Ok(Smsg::SMSG_ATTACKERSTATEUPDATE(a)) => {
+                if a.attacker.guid() == c.self_guid { own_swing += 1; }
+                if a.attacker.guid() == mob { retaliated += 1; }
+            }
+            Ok(Smsg::SMSG_ATTACKSTART(a)) if a.attacker.guid() == mob => { retaliated += 1; }
+            _ => {}
+        }
+        if own_swing > 0 && retaliated > 0 { break; }
+    }
+    let _ = c.send(&CMSG_ATTACKSTOP {});
+    println!("[back] RESULT backturned_retaliation={wolf_hits_while_backturned} own_swings_after_turn={own_swing} retaliation_after_turn={retaliated}");
+    if wolf_hits_while_backturned > 0 { bail!("backswing FAIL: mob retaliated against a swing that never fired"); }
+    if own_swing == 0 { bail!("backswing FAIL: no own swing after turning (probe geometry?)"); }
+    if retaliated == 0 { bail!("backswing FAIL: mob never retaliated after a REAL swing landed"); }
+    println!("[back] BACKSWING PASS \u{2713} no aggro while back-turned; retaliation after a real swing");
+    Ok(())
+}
+
+// ---- setbutton <slot> <action> <type>: send one CMSG_SET_ACTION_BUTTON (the drag) and exit —
+// the orchestrator SQL-asserts the game_player_action row (and the login builder is unit-tested).
+fn setbutton(
+    c: &mut WireClient,
+    args: &mut dyn Iterator<Item = String>,
+    _mcx: &ModeCtx<'_>,
+) -> Result<()> {
+    use wow_world_messages::vanilla::CMSG_SET_ACTION_BUTTON;
+    let button: u8 = args.next().and_then(|s| s.parse().ok()).expect("usage: setbutton <slot> <action> <type>");
+    let action: u16 = args.next().and_then(|s| s.parse().ok()).expect("action");
+    let action_type: u8 = args.next().and_then(|s| s.parse().ok()).expect("type");
+    c.send(&CMSG_SET_ACTION_BUTTON { button, action, misc: 0, action_type })?;
+    std::thread::sleep(std::time::Duration::from_millis(800)); // let the reducer land before logout
+    println!("[btn] sent SET_ACTION_BUTTON slot={button} action={action} type={action_type}");
+    Ok(())
 }
