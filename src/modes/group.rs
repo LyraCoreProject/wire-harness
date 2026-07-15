@@ -8,8 +8,11 @@ use anyhow::{anyhow, bail, Result};
 use wire_client::WireClient;
 use wow_world_messages::vanilla::opcodes::ServerOpcodeMessage as Smsg;
 use wow_world_messages::vanilla::{
-    PartyResult, CMSG_GROUP_ACCEPT, CMSG_GROUP_DECLINE, CMSG_GROUP_DISBAND, CMSG_GROUP_INVITE,
+    GroupLootSetting, ItemQuality, PartyResult, RollVote, CMSG_GROUP_ACCEPT, CMSG_GROUP_DECLINE,
+    CMSG_GROUP_DISBAND, CMSG_GROUP_INVITE, CMSG_LOOT_METHOD,
 };
+use wow_world_messages::Guid;
+use wow_world_messages::vanilla::CMSG_LOOT_ROLL;
 
 use super::{drain_until_file, require_path_arg, ModeCtx};
 
@@ -27,6 +30,8 @@ pub(crate) fn try_dispatch(
         "group-join" => group_join(c, args)?,
         "group-invite-expect-decline" => group_invite_expect_decline(c, args)?,
         "group-decline" => group_decline(c, args)?,
+        "loot-leader" => loot_leader(c, args)?,
+        "loot-voter" => loot_voter(c, args)?,
         _ => return Ok(false),
     }
     Ok(true)
@@ -268,5 +273,127 @@ fn hold_then_disband(c: &mut WireClient, hold: &str, hold_secs: u64, tag: &str) 
     {
         bail!("{tag}: no SMSG_GROUP_DESTROYED within 10s of CMSG_GROUP_DISBAND");
     }
+    Ok(())
+}
+
+/// One group-loot ROLL cycle (187): wait for `SMSG_LOOT_START_ROLL`, answer with `vote`
+/// ("need"/"greed"), then record the `SMSG_LOOT_ROLL_WON` outcome into `<hold>.won` as
+/// "winner_guid item_entry". Both party members run this concurrently after the orchestrator's
+/// debug kill; the module resolves the roll when every member has voted (else the 60s deadline).
+fn loot_roll_cycle(c: &mut WireClient, vote: &str, hold: &str, tag: &str) -> Result<()> {
+    let vote = match vote {
+        "need" => RollVote::Need,
+        "greed" => RollVote::Greed,
+        v => bail!("{tag}: vote must be need|greed, got {v:?}"),
+    };
+    let Some((creature, slot, item)) = c.recv_for(Duration::from_secs(60), |m| match m {
+        Smsg::SMSG_LOOT_START_ROLL(r) => Some((r.creature.guid(), r.loot_slot, r.item)),
+        _ => None,
+    }) else {
+        bail!("{tag}: no SMSG_LOOT_START_ROLL within 60s of the kill");
+    };
+    println!("[loot] START_ROLL item={item} slot={slot}; voting {vote:?}");
+    c.send(&CMSG_LOOT_ROLL { item: Guid::new(creature), item_slot: slot, vote })?;
+    let Some((winner, won_item)) = c.recv_for(Duration::from_secs(90), |m| match m {
+        Smsg::SMSG_LOOT_ROLL_WON(w) => Some((w.winning_player.guid(), w.item)),
+        _ => None,
+    }) else {
+        bail!("{tag}: no SMSG_LOOT_ROLL_WON (votes in, resolve missed?)");
+    };
+    println!("[loot] ROLL_WON winner={winner:#x} item={won_item}");
+    std::fs::write(format!("{hold}.won"), format!("{winner} {won_item}")).ok();
+    Ok(())
+}
+
+// ---- loot-leader <target_name> <vote> <hold_file>: the 187 done-when scenario, leader side.
+// Forms the party (group-leader steps 1-2), sets GROUP LOOT at UNCOMMON threshold and asserts the
+// SMSG_GROUP_LIST echo carries it (clause 3), writes <hold>.method, then runs one roll cycle
+// (clause 1) and holds until the orchestrator releases -> disband. ----
+fn loot_leader(c: &mut WireClient, args: &mut dyn Iterator<Item = String>) -> Result<()> {
+    let target: String = args.next().expect("usage: loot-leader <target_name> <vote> <hold_file>");
+    let vote: String = args.next().expect("vote (need|greed)");
+    let hold = require_path_arg(args, "loot-leader <target_name> <vote> <hold_file>", "hold_file")?;
+    let _ = std::fs::remove_file(&hold);
+    for suffix in [".ingroup", ".method", ".won"] {
+        let _ = std::fs::remove_file(format!("{hold}{suffix}"));
+    }
+    c.set_recv_timeout(Duration::from_millis(500))?;
+
+    c.send(&CMSG_GROUP_INVITE { name: target.clone() })?;
+    match c.recv_for(Duration::from_secs(10), |m| match m {
+        Smsg::SMSG_PARTY_COMMAND_RESULT(r) => Some(r.result),
+        _ => None,
+    }) {
+        Some(PartyResult::Success) => {}
+        Some(r) => bail!("loot-leader STEP 1 FAIL: SMSG_PARTY_COMMAND_RESULT {r:?}"),
+        None => bail!("loot-leader STEP 1 FAIL: no SMSG_PARTY_COMMAND_RESULT"),
+    }
+    if c.recv_for(Duration::from_secs(60), |m| match m {
+        Smsg::SMSG_GROUP_LIST(l) => l.members.iter().any(|m| m.name.eq_ignore_ascii_case(&target)).then_some(()),
+        _ => None,
+    }).is_none() {
+        bail!("loot-leader STEP 2 FAIL: no SMSG_GROUP_LIST with {target:?} (accept missing?)");
+    }
+    std::fs::write(format!("{hold}.ingroup"), "1").ok();
+    println!("[loot] party formed; setting GROUP LOOT @ Uncommon");
+
+    // Clause 3: CMSG_LOOT_METHOD round-trips — the module stores it and every member's roster
+    // re-render (SMSG_GROUP_LIST) carries the new loot_setting.
+    c.send(&CMSG_LOOT_METHOD {
+        loot_setting: GroupLootSetting::GroupLoot,
+        loot_master: Guid::new(0),
+        loot_threshold: ItemQuality::Uncommon,
+    })?;
+    if c.recv_for(Duration::from_secs(10), |m| match m {
+        Smsg::SMSG_GROUP_LIST(l) => l
+            .group_not_empty
+            .as_ref()
+            .filter(|b| b.loot_setting == GroupLootSetting::GroupLoot)
+            .map(|_| ()),
+        _ => None,
+    }).is_none() {
+        bail!("loot-leader STEP 3 FAIL: no SMSG_GROUP_LIST echoing GroupLoot within 10s");
+    }
+    println!("[loot] STEP 3 OK — GROUP_LIST echoes GroupLoot/Uncommon");
+    std::fs::write(format!("{hold}.method"), "1").ok();
+
+    loot_roll_cycle(c, &vote, &hold, "loot-leader")?;
+    hold_then_disband(c, &hold, 240, "loot-leader")?;
+    println!("[wire] LOOT-LEADER PASS \u{2713}  method-echo + roll cycle + disband");
+    Ok(())
+}
+
+// ---- loot-voter <vote> <hold_file>: the joiner side — accept the invite, run one roll cycle,
+// then drain until the leader's disband (mirrors group-join's exit condition). ----
+fn loot_voter(c: &mut WireClient, args: &mut dyn Iterator<Item = String>) -> Result<()> {
+    let vote: String = args.next().expect("usage: loot-voter <vote> <hold_file>");
+    let hold = require_path_arg(args, "loot-voter <vote> <hold_file>", "hold_file")?;
+    let _ = std::fs::remove_file(&hold);
+    for suffix in [".ingroup", ".won"] {
+        let _ = std::fs::remove_file(format!("{hold}{suffix}"));
+    }
+    c.set_recv_timeout(Duration::from_millis(500))?;
+
+    if c.recv_for(Duration::from_secs(60), |m| matches!(m, Smsg::SMSG_GROUP_INVITE(_)).then_some(())).is_none() {
+        bail!("loot-voter STEP 1 FAIL: no SMSG_GROUP_INVITE within 60s");
+    }
+    c.send(&CMSG_GROUP_ACCEPT {})?;
+    if c.recv_for(Duration::from_secs(10), |m| matches!(m, Smsg::SMSG_GROUP_LIST(_)).then_some(())).is_none() {
+        bail!("loot-voter STEP 2 FAIL: no SMSG_GROUP_LIST after accept");
+    }
+    std::fs::write(format!("{hold}.ingroup"), "1").ok();
+    println!("[loot] joined the party; awaiting the roll");
+
+    loot_roll_cycle(c, &vote, &hold, "loot-voter")?;
+    // Drain toward the leader's disband (the roll files are the assertions; DESTROYED is the exit).
+    if c.recv_for(Duration::from_secs(240), |m| {
+        if std::path::Path::new(&hold).exists() {
+            let _ = std::fs::remove_file(&hold);
+        }
+        matches!(m, Smsg::SMSG_GROUP_DESTROYED).then_some(())
+    }).is_none() {
+        bail!("loot-voter STEP 4 FAIL: no SMSG_GROUP_DESTROYED after the leader disband");
+    }
+    println!("[wire] LOOT-VOTER PASS \u{2713}  accept + roll cycle + destroyed");
     Ok(())
 }
