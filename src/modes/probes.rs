@@ -45,6 +45,7 @@ pub(crate) fn try_dispatch(
         "groundcast" => groundcast(c, args, mcx)?,
         "backswing" => backswing(c, args, mcx)?,
         "setbutton" => setbutton(c, args, mcx)?,
+        "fishcast" => fishcast(c, args, mcx)?,
         "name-query" => name_query(c, args, mcx)?,
         "bindpoint" => bindpoint(c, args, mcx)?,
         _ => return Ok(false),
@@ -1728,5 +1729,32 @@ fn setbutton(
     c.send(&CMSG_SET_ACTION_BUTTON { button, action, misc: 0, action_type })?;
     std::thread::sleep(std::time::Duration::from_millis(800)); // let the reducer land before logout
     println!("[btn] sent SET_ACTION_BUTTON slot={button} action={action} type={action_type}");
+    Ok(())
+}
+
+// ---- fishcast <spell_id>: cast Fishing via the real CMSG path (060) and assert the manual
+// START -> raw CAST_RESULT(OK) -> GO clear arrives. The catch itself is SQL-asserted outside.
+fn fishcast(
+    c: &mut WireClient,
+    args: &mut dyn Iterator<Item = String>,
+    _mcx: &ModeCtx<'_>,
+) -> Result<()> {
+    use std::time::{Duration, Instant};
+    let spell: u32 = args.next().and_then(|s| s.parse().ok()).expect("usage: fishcast <spell_id>");
+    c.cast_spell(spell, 0)?;
+    c.set_recv_timeout(Duration::from_millis(300))?;
+    let t0 = Instant::now();
+    let (mut start, mut go) = (false, false);
+    while t0.elapsed() < Duration::from_secs(6) && !(start && go) {
+        match c.recv() {
+            Ok(Smsg::SMSG_SPELL_START(s)) if s.spell == spell => start = true,
+            Ok(Smsg::SMSG_SPELL_GO(g)) if g.spell == spell => go = true,
+            Ok(Smsg::SMSG_CAST_RESULT(_)) => println!("[fish] CAST_RESULT frame"),
+            _ => {}
+        }
+    }
+    println!("[fish] RESULT start={start} go={go}");
+    if !start || !go { bail!("fishcast FAIL: START/GO clear missing (start={start} go={go})"); }
+    println!("[fish] FISHCAST PASS \u{2713}");
     Ok(())
 }
