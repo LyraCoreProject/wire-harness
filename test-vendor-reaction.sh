@@ -55,6 +55,23 @@ else
   FAILED=1
 fi
 
+# STEP 3 (195 slice B): AT-WAR forces hostile regardless of standing — still Neutral from step 2,
+# check the box and the window must refuse; uncheck and it opens again.
+timeout 60 "$WC" TEST test123 Ginger atwar 60 1 >/dev/null 2>&1
+if timeout 30 "$WC" TEST test123 Ginger vendor-list "$VENDOR" $BLADE >/dev/null 2>&1; then
+  echo "[vendor-reaction] STEP-ASSERT FAIL: at-war vendor still opened the window (standing Neutral)" >&2
+  FAILED=1
+else
+  echo "[vendor-reaction] STEP-ASSERT OK: at-war refuses the window even at Neutral standing"
+fi
+timeout 60 "$WC" TEST test123 Ginger atwar 60 0 >/dev/null 2>&1
+if timeout 60 "$WC" TEST test123 Ginger vendor-list "$VENDOR" $BLADE >/dev/null 2>&1; then
+  echo "[vendor-reaction] STEP-ASSERT OK: unchecking at-war re-opens the window"
+else
+  echo "[vendor-reaction] STEP-ASSERT FAIL: window still refused after unchecking at-war" >&2
+  FAILED=1
+fi
+
 # Teardown: standing back to the pre-test residue, despawn the vendor (entity + spawn row).
 scall debug_grant_reputation "$GINGER" 50900 "$(( CUR - 0 ))" || true
 sqlq "DELETE FROM game_creature_spawn WHERE entry = $VENDOR_ENTRY" >/dev/null

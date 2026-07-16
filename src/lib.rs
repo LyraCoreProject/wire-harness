@@ -139,6 +139,8 @@ pub struct WireClient {
     /// `player_login` burst drain — index is the Faction.dbc reputation_index (0..63), value is
     /// the raw i32 standing (work-item #076: relog rep-restore verification).
     pub init_factions: Vec<i32>,
+    /// The login SMSG_INITIALIZE_FACTIONS flag byte per slot (195B: bit 0x02 = AT_WAR).
+    pub init_faction_flags: Vec<u8>,
 }
 
 impl WireClient {
@@ -196,6 +198,7 @@ impl WireClient {
             seen_guids: Vec::new(),
             initial_spells: Vec::new(),
             init_factions: Vec::new(),
+            init_faction_flags: Vec::new(),
         })
     }
 
@@ -427,6 +430,8 @@ impl WireClient {
                 }
                 WorldSmsg::SMSG_INITIALIZE_FACTIONS(f) => {
                     self.init_factions = f.factions.iter().map(|s| s.standing as i32).collect();
+                    self.init_faction_flags =
+                        f.factions.iter().map(|s| s.flag.as_int()).collect();
                 }
                 WorldSmsg::SMSG_UPDATE_OBJECT(u)
                     if u.objects.iter().any(|o| create_object_guid(o) == Some(guid)) =>

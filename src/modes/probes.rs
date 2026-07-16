@@ -47,6 +47,7 @@ pub(crate) fn try_dispatch(
         "setbutton" => setbutton(c, args, mcx)?,
         "fishcast" => fishcast(c, args, mcx)?,
         "petsummon" => petsummon(c, args, mcx)?,
+        "atwar" => atwar(c, args, mcx)?,
         "casttime" => casttime(c, args, mcx)?,
         "name-query" => name_query(c, args, mcx)?,
         "bindpoint" => bindpoint(c, args, mcx)?,
@@ -241,6 +242,8 @@ fn init_factions(
     let ModeCtx { account, password, char_name } = *mcx;
     let index: usize = args.next().and_then(|s| s.parse().ok()).expect("usage: init-factions <index> <want_standing>");
     let want: i32 = args.next().and_then(|s| s.parse().ok()).expect("usage: init-factions <index> <want_standing>");
+    // Optional (195B): also assert the slot's AT_WAR flag bit (0x02) — pass 1/0. Absent = don't check.
+    let want_atwar: Option<u8> = args.next().and_then(|s| s.parse().ok());
     eprintln!("[wire] init-factions: relogging {char_name} to capture a fresh SMSG_INITIALIZE_FACTIONS…");
     let (k2, world_addr2) = logon(account, password)?;
     let mut c2 = WireClient::connect_world(&world_addr2, account, k2)?;
@@ -251,7 +254,37 @@ fn init_factions(
     if got != want {
         bail!("init-factions: slot[{index}] = {got}, want {want}");
     }
+    if let Some(w) = want_atwar {
+        let flags = c2.init_faction_flags.get(index).copied().unwrap_or(0);
+        let got_atwar = (flags & 0x02 != 0) as u8;
+        if got_atwar != w {
+            bail!("init-factions: slot[{index}] AT_WAR = {got_atwar} (flags {flags:#x}), want {w}");
+        }
+        println!("[probe] slot[{index}] flags={flags:#x} AT_WAR={got_atwar} \u{2713}");
+    }
     println!("[wire] INIT-FACTIONS PASS \u{2713}  slot[{index}] == {want} on relog");
+    Ok(())
+}
+
+// ---- atwar <rep_index> <0|1>: send one CMSG_SET_FACTION_ATWAR (the rep pane checkbox) and exit —
+// the round-trip is asserted by a following `init-factions <index> <standing> <0|1>` relog probe
+// (195 slice B). The wire u16 is the client's 0..63 rep-array slot, NOT a faction id.
+fn atwar(
+    c: &mut WireClient,
+    args: &mut dyn Iterator<Item = String>,
+    _mcx: &ModeCtx<'_>,
+) -> Result<()> {
+    use wow_world_messages::vanilla::{CMSG_SET_FACTION_ATWAR, Faction, FactionFlag};
+    let index: u16 = args.next().and_then(|s| s.parse().ok()).expect("usage: atwar <rep_index> <0|1>");
+    let on: u8 = args.next().and_then(|s| s.parse().ok()).expect("usage: atwar <rep_index> <0|1>");
+    let flags = if on != 0 { FactionFlag::new_at_war() } else { FactionFlag::empty() };
+    // gtker types the wire u16 as the closed `Faction` enum (keyed on faction IDS, another face of
+    // the field-names-lie) — an index with no variant would silently serialize as 0, so fail LOUD.
+    let faction = Faction::try_from(index)
+        .map_err(|_| anyhow!("no gtker Faction variant carries wire value {index} — extend this probe with a raw send"))?;
+    c.send(&CMSG_SET_FACTION_ATWAR { faction, flags })?;
+    std::thread::sleep(std::time::Duration::from_millis(800)); // let the reducer land before logout
+    println!("[atwar] sent CMSG_SET_FACTION_ATWAR slot={index} at_war={on}");
     Ok(())
 }
 

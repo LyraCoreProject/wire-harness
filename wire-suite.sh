@@ -280,13 +280,18 @@ t_class_roles() {
 # packages/playerbots drop-in isn't installed/published. ----
 t_playerbots() { bash tools/wire-client/test-playerbots.sh; }
 
+# ---- 195: standing/at-war reaction gating on the interaction windows (fixture faction 50900). ----
+t_vendor_reaction() { bash tools/wire-client/test-vendor-reaction.sh; }
+# ---- 195B: the rep pane At-War checkbox round-trips CMSG -> row -> INITIALIZE_FACTIONS flag. ----
+t_atwar() { bash tools/wire-client/test-atwar.sh; }
+
 # ---------- the run ----------
 ALL_TESTS=(
   logout who roll text_emote played_time played_time_live initial_spells char_enum_gear
   char_create_gear
   query_item char_delete bindpoint inspect friend ignore_whisper say_range move_relay
   persist_health repop_delay respec ding combat_regen cast_flow cast_interrupt ghost_reveal
-  init_factions levelup_info
+  init_factions levelup_info vendor_reaction atwar
   scenario_quest scenario_vendor scenario_train scenario_weaponmaster scenario_death
   aoi_relay soak playerbots group party_brains bot_goals class_roles
 )
