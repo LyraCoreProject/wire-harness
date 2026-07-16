@@ -52,6 +52,15 @@ orchestrate() {
   spacetime call "$DB" debug_set_health $CGUID 100000 >/dev/null 2>&1   # re-top after the first swings
   echo "[orch] interrupt target mob=$MOB (melee range, swinging)" >&2
   echo "$MOB" > "$TGT"
+  # DETERMINISTIC pushback source (testing-hardening): the mob's swings are a per-window lottery
+  # (miss/dodge or between-window timing left ZERO landed hits across 3 windows ~half the runs).
+  # debug_apply_damage routes through the REAL damage path (break_auras_on_damage -> pushback), so
+  # two pokes inside the first 1.7s cast window guarantee the slide the probe asserts. The mob
+  # stays for the realistic swing traffic on top.
+  sleep 1
+  spacetime call "$DB" -- debug_apply_damage $CGUID 3 >/dev/null 2>&1
+  sleep 1
+  spacetime call "$DB" -- debug_apply_damage $CGUID 3 >/dev/null 2>&1
 }
 
 orchestrate &
