@@ -20,6 +20,9 @@ CORPSE=$(python3 -c "print((0xF101 << 48) | $GINGER)")
 # stage: level 10 (below the sickness gate), full health, a wolf waiting on the pad
 scall debug_set_level "$GINGER" 10
 sqlq "DELETE FROM game_aura WHERE target_guid = $GINGER AND spell_id = $SICKNESS" >/dev/null
+# Reset the corpse-reclaim ESCALATION ladder (226): other suite tests kill Ginger too, and a repeat
+# death inside the escalation window waits 60s where this test asserts the first-death 30s.
+sqlq "UPDATE game_character SET death_expire_micros = 0 WHERE guid = $GINGER" >/dev/null
 stay_start TEST test123 Ginger || exit 1
 scall debug_teleport "$GINGER" 0 $PAD_X $PAD_Y $PAD_Z 0
 scall debug_set_health "$GINGER" 100000

@@ -24,6 +24,9 @@ MOBGUID=""
 
 orchestrate() {
   local GX="" GY="" MOB=""
+  # Park on probed-clear ground first (debug_nav_leg has_los=true): in-suite Ginger inherits the
+  # previous test's position, which may be nav-obstructed (the 243 LoS gate silently eats swings).
+  spacetime call "$DB" -- debug_teleport $CGUID 0 -8960.0 -440.0 81.0 0 >/dev/null 2>&1
   for _ in $(seq 1 30); do
     GX=$(spacetime sql "$DB" "SELECT x FROM game_world_entity WHERE guid=$CGUID" 2>&1 | grep -oE '\-?[0-9]+(\.[0-9]+)?' | tail -1)
     [ -n "$GX" ] && break; sleep 1
