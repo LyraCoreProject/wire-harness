@@ -285,13 +285,18 @@ t_vendor_reaction() { bash tools/wire-client/test-vendor-reaction.sh; }
 # ---- 195B: the rep pane At-War checkbox round-trips CMSG -> row -> INITIALIZE_FACTIONS flag. ----
 t_atwar() { bash tools/wire-client/test-atwar.sh; }
 
+# ---- testing-hardening §3.3: walk_to closes real distance (walk 12yd into reach -> swing fires). ----
+t_walkmelee() { bash tools/wire-client/test-walkmelee.sh; }
+# ---- testing-hardening §3.2: zero packet-lint violations across a login + rep-relay flow. ----
+t_packet_lint() { bash tools/wire-client/test-packet-lint.sh; }
+
 # ---------- the run ----------
 ALL_TESTS=(
   logout who roll text_emote played_time played_time_live initial_spells char_enum_gear
   char_create_gear
   query_item char_delete bindpoint inspect friend ignore_whisper say_range move_relay
   persist_health repop_delay respec ding combat_regen cast_flow cast_interrupt ghost_reveal
-  init_factions levelup_info vendor_reaction atwar
+  init_factions levelup_info vendor_reaction atwar packet_lint walkmelee
   scenario_quest scenario_vendor scenario_train scenario_weaponmaster scenario_death
   aoi_relay soak playerbots group party_brains bot_goals class_roles
 )

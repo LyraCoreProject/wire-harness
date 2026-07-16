@@ -34,7 +34,11 @@ HEALTH0=""
 wait_for_file 30 "$TRAIN_READY"
 if [ -f "$TRAIN_READY" ]; then
   MAXHP=$(sql1 "SELECT max_health FROM game_world_entity WHERE guid = $GINGER")
-  HEALTH0=$(( ${MAXHP:-100} - 60 )) # leave a >heal-size hole so the +50 heal is unambiguous
+  # A 60-hole was regen-closable under suite load (in-suite the cast window stretches and
+  # out-of-combat regen shrank the deficit below the heal size -> overheal-capped +31, assert
+  # wants >= 50). 150 keeps a >heal hole through any realistic window; clamped to stay >= 1 HP.
+  HOLE=150; [ "${MAXHP:-100}" -le "$HOLE" ] && HOLE=$(( ${MAXHP:-100} - 1 ))
+  HEALTH0=$(( ${MAXHP:-100} - HOLE ))
   scall debug_set_health "$GINGER" "$HEALTH0"
   scall debug_set_power "$GINGER" 100 # no mana curve on a no-import sandbox -> stage the 30-mana cost
   rm -f "$TRAIN_READY" # signals the wire client to proceed

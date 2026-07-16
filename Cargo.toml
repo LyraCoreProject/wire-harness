@@ -10,6 +10,7 @@ publish = false
 # Reuses the SAME protocol crates the gateway depends on (gateway/Cargo.toml).
 
 [dependencies]
+game-shared.workspace = true
 wow_srp = "0.7"
 wow_login_messages = { version = "0.5", features = ["sync"] }
 wow_world_messages = { version = "0.3", features = ["vanilla", "sync"] }

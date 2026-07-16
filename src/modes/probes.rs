@@ -48,6 +48,8 @@ pub(crate) fn try_dispatch(
         "fishcast" => fishcast(c, args, mcx)?,
         "petsummon" => petsummon(c, args, mcx)?,
         "atwar" => atwar(c, args, mcx)?,
+        "values-watch" => values_watch(c, args, mcx)?,
+        "walkmelee" => walkmelee(c, args, mcx)?,
         "casttime" => casttime(c, args, mcx)?,
         "name-query" => name_query(c, args, mcx)?,
         "bindpoint" => bindpoint(c, args, mcx)?,
@@ -263,6 +265,75 @@ fn init_factions(
         println!("[probe] slot[{index}] flags={flags:#x} AT_WAR={got_atwar} \u{2713}");
     }
     println!("[wire] INIT-FACTIONS PASS \u{2713}  slot[{index}] == {want} on relog");
+    Ok(())
+}
+
+// ---- values-watch <guid> <field_index> [seconds]: drain raw frames and PASS as soon as an
+// SMSG_UPDATE_OBJECT VALUES block for <guid> carries <field_index> (testing-hardening §3.1 — the
+// generic live-field-change assert; prints every matching (index, value) seen on the way).
+fn values_watch(
+    c: &mut WireClient,
+    args: &mut dyn Iterator<Item = String>,
+    _mcx: &ModeCtx<'_>,
+) -> Result<()> {
+    use std::time::{Duration, Instant};
+    let guid: u64 = args.next().and_then(|s| s.parse().ok()).expect("usage: values-watch <guid> <field_index> [secs]");
+    let field: u16 = args.next().and_then(|s| s.parse().ok()).expect("field_index");
+    let secs: u64 = args.next().and_then(|s| s.parse().ok()).unwrap_or(15);
+    c.set_recv_timeout(Duration::from_millis(300))?;
+    let t0 = Instant::now();
+    while t0.elapsed() < Duration::from_secs(secs) {
+        if let Ok((0x00A9, body)) = c.recv_raw() {
+            for u in wire_client::values_mask::parse_values_updates(&body) {
+                if u.guid != guid {
+                    continue;
+                }
+                for &(idx, v) in &u.fields {
+                    println!("[values] guid={guid:#x} field {idx} = {v} ({v:#x})");
+                    if idx == field {
+                        println!("[wire] VALUES-WATCH PASS \u{2713} field {field} arrived");
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
+    bail!("values-watch: no VALUES update carried field {field} for {guid:#x} within {secs}s");
+}
+
+// ---- walkmelee <mob_guid> <mx> <my> <mz>: prove the walk_to helper closes real distance
+// (testing-hardening §3.3): start 12 yd west of the mob (OUTSIDE the 5 yd standstill reach —
+// the pre-walk swing would be silently range-gated forever), walk to 3 yd, toggle attack, and
+// assert OUR OWN ATTACKERSTATEUPDATE lands (a swing fired => the server tracked the walk).
+fn walkmelee(
+    c: &mut WireClient,
+    args: &mut dyn Iterator<Item = String>,
+    _mcx: &ModeCtx<'_>,
+) -> Result<()> {
+    use std::time::{Duration, Instant};
+    use wow_world_messages::vanilla::{CMSG_ATTACKSWING, CMSG_ATTACKSTOP};
+    let mob: u64 = args.next().and_then(|s| s.parse().ok()).expect("usage: walkmelee <mob> <x> <y> <z>");
+    let mx: f32 = args.next().and_then(|s| s.parse().ok()).expect("mob x");
+    let my: f32 = args.next().and_then(|s| s.parse().ok()).expect("mob y");
+    let mz: f32 = args.next().and_then(|s| s.parse().ok()).expect("mob z");
+    c.walk_to((mx - 12.0, my, mz), (mx - 3.0, my, mz), 7.0)?; // real vanilla run speed
+    c.set_selection(mob)?;
+    c.send(&CMSG_ATTACKSWING { guid: Guid::new(mob) })?;
+    c.set_recv_timeout(Duration::from_millis(300))?;
+    let t0 = Instant::now();
+    let mut own_swing = false;
+    while t0.elapsed() < Duration::from_secs(8) && !own_swing {
+        if let Ok(Smsg::SMSG_ATTACKERSTATEUPDATE(a)) = c.recv() {
+            if a.attacker.guid() == c.self_guid {
+                own_swing = true;
+            }
+        }
+    }
+    let _ = c.send(&CMSG_ATTACKSTOP {});
+    if !own_swing {
+        bail!("walkmelee FAIL: no own swing after walking into reach (walk_to position not tracked?)");
+    }
+    println!("[wire] WALKMELEE PASS \u{2713} walked 12yd -> 3yd and the swing fired");
     Ok(())
 }
 
@@ -1796,9 +1867,18 @@ fn fishcast(
                 }
             }
             Ok((0x00A9, body)) => {
-                // 234: the catch's skill-up pushes PLAYER_SKILL_INFO — scan for the Fishing line
-                // id (356 LE) in the values payload.
-                if body.windows(4).any(|w| w == [0x64, 0x01, 0x00, 0x00]) {
+                // 234: the catch's skill-up pushes PLAYER_SKILL_INFO — decode the VALUES mask and
+                // require the Fishing line id (356) at a real SKILL_INFO field index (base 718,
+                // 3 words/slot, 128 slots), not just the bytes appearing anywhere in the frame.
+                const SKILL_INFO_BASE: u16 = 718;
+                const SKILL_INFO_END: u16 = 718 + 128 * 3;
+                let hit = wire_client::values_mask::parse_values_updates(&body)
+                    .iter()
+                    .flat_map(|u| u.fields.iter())
+                    .any(|&(idx, v)| {
+                        (SKILL_INFO_BASE..SKILL_INFO_END).contains(&idx) && (v & 0xFFFF) == 356
+                    });
+                if hit {
                     skill_values = true;
                 }
             }

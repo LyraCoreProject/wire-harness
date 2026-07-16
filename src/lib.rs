@@ -6,6 +6,8 @@
 //! `gateway/src/logon/mod.rs` tests + `gateway/src/world/tests.rs::client_handshake`,
 //! lifted onto real `TcpStream`s. All blocking std I/O — no async.
 
+pub use game_shared::values_mask;
+
 use std::net::TcpStream;
 use std::time::Duration;
 
@@ -200,6 +202,50 @@ impl WireClient {
             init_factions: Vec::new(),
             init_faction_flags: Vec::new(),
         })
+    }
+
+    /// Walk the character server-side from `from` to `to` at `speed` yd/s (testing-hardening
+    /// §3.3): MSG_MOVE_START_FORWARD, a heartbeat stream every ~200ms along the straight line
+    /// (each carrying the interpolated position + facing toward `to`), then MSG_MOVE_STOP at the
+    /// destination. This is what the real client sends when the player holds W — it unlocks
+    /// walk-into-range / leash / AOI-crossing scenarios headlessly (fixtures no longer need to
+    /// spawn inside the 5 yd standstill melee reach). Vanilla run speed is 7.0 yd/s; the server's
+    /// NaN/teleport guards see a plausible stream, and its `last_move_ms`/moving flags behave as
+    /// for a real runner. Blocks for the walk duration.
+    pub fn walk_to(&mut self, from: (f32, f32, f32), to: (f32, f32, f32), speed: f32) -> Result<()> {
+        use wow_world_messages::vanilla::{
+            MovementInfo, MovementInfo_MovementFlags, Vector3d, MSG_MOVE_HEARTBEAT_Client,
+            MSG_MOVE_START_FORWARD_Client, MSG_MOVE_STOP_Client,
+        };
+        let (dx, dy, dz) = (to.0 - from.0, to.1 - from.1, to.2 - from.2);
+        let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+        let orientation = dy.atan2(dx);
+        let speed = speed.max(0.1);
+        let total_ms = ((dist / speed) * 1000.0) as u32;
+        let info = |x: f32, y: f32, z: f32, moving: bool, ts: u32| MovementInfo {
+            flags: if moving {
+                MovementInfo_MovementFlags::new_forward()
+            } else {
+                MovementInfo_MovementFlags::empty()
+            },
+            timestamp: ts,
+            position: Vector3d { x, y, z },
+            orientation,
+            fall_time: 0.0,
+        };
+        self.send(&MSG_MOVE_START_FORWARD_Client { info: info(from.0, from.1, from.2, true, 0) })?;
+        const STEP_MS: u32 = 200;
+        let mut t = STEP_MS;
+        while t < total_ms {
+            let f = t as f32 / total_ms.max(1) as f32;
+            self.send(&MSG_MOVE_HEARTBEAT_Client {
+                info: info(from.0 + dx * f, from.1 + dy * f, from.2 + dz * f, true, t),
+            })?;
+            std::thread::sleep(Duration::from_millis(STEP_MS as u64));
+            t += STEP_MS;
+        }
+        self.send(&MSG_MOVE_STOP_Client { info: info(to.0, to.1, to.2, false, total_ms) })?;
+        Ok(())
     }
 
     /// Send an encrypted CMSG.
