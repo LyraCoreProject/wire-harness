@@ -65,7 +65,9 @@ assert_ge "learn: spellbook row for $SPELL exists" "$(sql1 "SELECT COUNT(*) AS n
 # The heal is +50; out-of-combat regen can add a little more inside the window, so assert >= +50.
 HEALTH1=$(sql1 "SELECT health FROM game_world_entity WHERE guid = $GINGER")
 [ -z "$HEALTH1" ] && HEALTH1=$(sql1 "SELECT health FROM game_character WHERE guid = $GINGER") # logged out already
-assert_ge "cast effect: health rose by >= the 50 heal" "$(( ${HEALTH1:-0} - ${HEALTH0:-0} ))" 50
+# Lesser Heal 2050 is base 46 + d11 (rolls 47..57 at the floor) — the old ">= 50" assert failed a
+# legal 47-49 roll roughly 1 run in 4. Assert the ROLL FLOOR; regen only inflates the delta.
+assert_ge "cast effect: health rose by >= the heal roll floor (46+d11)" "$(( ${HEALTH1:-0} - ${HEALTH0:-0} ))" 46
 
 # ---- teardown (asserted): the pad trainer only (the seeded start-area trainer stays) ----
 sqlq "DELETE FROM game_creature_spawn WHERE entry = $TRAINER_ENTRY AND x > -8890" >/dev/null

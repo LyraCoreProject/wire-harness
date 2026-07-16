@@ -51,7 +51,15 @@ if [ -z "$H" ]; then
 fi
 echo "[078] baseline health=$H"
 
-echo "[078] Step 2: damage to 22 via debug_set_health..."
+echo "[078] Step 2: damage to 22 via debug_set_health (held IN COMBAT so regen can't close it)..."
+# Regen is spirit+level+1 per tick (~27 HP/tick for a low-level char) — a 46-HP wound closes in
+# ~2 ticks, so the old bare wound RACED the async disconnect persist and flaked under suite load
+# (relogged at FULL = regen won, not force-heal). In-combat blocks passive health regen: spawn the
+# passive fixture wolf OUT OF REACH (10 yd — no swings ever land) and arm an engagement; the wound
+# then survives any persist latency. The logout itself disengages, so nothing lingers.
+spacetime call "$DB" -- debug_spawn_at_feet "$CGUID" 51000 10 >/dev/null 2>&1
+PWOLF=$(spacetime sql "$DB" "SELECT guid FROM game_world_entity WHERE entry = 51000" 2>/dev/null | grep -oE '[0-9]{15,}' | sort -n | tail -1)
+[ -n "$PWOLF" ] && spacetime call "$DB" -- debug_engage "$CGUID" "$PWOLF" >/dev/null 2>&1
 spacetime call "$DB" debug_set_health "$CGUID" 22 -s local >/dev/null 2>&1
 sleep 1
 
@@ -67,6 +75,9 @@ if [ -z "$PERSISTED" ] || [ "$PERSISTED" -eq 0 ]; then
   FAIL=1
 fi
 
+# The fixture wolf's job ended with the persist — clean it (entity + spawn row) before the relog.
+[ -n "${PWOLF:-}" ] && spacetime sql "$DB" "DELETE FROM game_creature_spawn WHERE guid = $PWOLF" >/dev/null 2>&1
+[ -n "${PWOLF:-}" ] && spacetime sql "$DB" "DELETE FROM game_world_entity WHERE guid = $PWOLF" >/dev/null 2>&1
 echo "[078] Step 4: relog (stay) and check the rebuilt entity's health..."
 timeout 90 "$WC" TEST test123 "$CHAR" stay "$SENTINEL2" & # 90 > the stay mode's 60s inner deadline (same as step 1)
 WC2=$!
