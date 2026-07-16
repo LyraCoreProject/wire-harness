@@ -1744,19 +1744,37 @@ fn fishcast(
     let spell: u32 = args.next().and_then(|s| s.parse().ok()).expect("usage: fishcast <spell_id>");
     c.cast_spell(spell, 0)?;
     c.set_recv_timeout(Duration::from_millis(300))?;
+    // ALL-RAW drain: the 234 assert needs the TYPE-less PLAYER_SKILL_INFO partial, which gtker's
+    // typed reader consumes-and-rejects — one raw loop sees every frame exactly once.
     let t0 = Instant::now();
-    let (mut start, mut go) = (false, false);
-    while t0.elapsed() < Duration::from_secs(6) && !(start && go) {
-        match c.recv() {
-            Ok(Smsg::SMSG_SPELL_START(s)) if s.spell == spell => start = true,
-            Ok(Smsg::SMSG_SPELL_GO(g)) if g.spell == spell => go = true,
-            Ok(Smsg::SMSG_CAST_RESULT(_)) => println!("[fish] CAST_RESULT frame"),
+    let (mut start, mut go, mut skill_values) = (false, false, false);
+    while t0.elapsed() < Duration::from_secs(8) && !(start && go && skill_values) {
+        match c.recv_raw() {
+            Ok((0x0131, body)) if body.len() >= 4 => {
+                // SMSG_SPELL_START: packed guids lead; match the spell id anywhere (cheap raw pin).
+                if body.windows(4).any(|w| w == spell.to_le_bytes()) {
+                    start = true;
+                }
+            }
+            Ok((0x0132, body)) => {
+                if body.windows(4).any(|w| w == spell.to_le_bytes()) {
+                    go = true;
+                }
+            }
+            Ok((0x00A9, body)) => {
+                // 234: the catch's skill-up pushes PLAYER_SKILL_INFO — scan for the Fishing line
+                // id (356 LE) in the values payload.
+                if body.windows(4).any(|w| w == [0x64, 0x01, 0x00, 0x00]) {
+                    skill_values = true;
+                }
+            }
             _ => {}
         }
     }
-    println!("[fish] RESULT start={start} go={go}");
+    println!("[fish] RESULT start={start} go={go} live_skill_values={skill_values}");
     if !start || !go { bail!("fishcast FAIL: START/GO clear missing (start={start} go={go})"); }
-    println!("[fish] FISHCAST PASS \u{2713}");
+    if !skill_values { bail!("fishcast FAIL: no live PLAYER_SKILL_INFO values for Fishing (234)"); }
+    println!("[fish] FISHCAST PASS \u{2713} (incl. live skill-pane values)");
     Ok(())
 }
 
