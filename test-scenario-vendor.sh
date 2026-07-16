@@ -21,6 +21,7 @@ BOUGHT_FILE=/tmp/ws_vendor_bought_$$
 # repeatability: purge any stale blade instances + buyback rows from a prior run
 sqlq "DELETE FROM game_item_instance WHERE owner_guid = $GINGER AND entry = $BLADE" >/dev/null
 sqlq "DELETE FROM game_character_buyback WHERE player_guid = $GINGER" >/dev/null
+settle_char_money "$GINGER" # a prior test's late persist must not clobber the stake (267)
 scall debug_set_money "$GINGER" 2000
 
 stay_start TEST test123 Ginger || exit 1

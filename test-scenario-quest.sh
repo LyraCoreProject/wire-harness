@@ -45,7 +45,9 @@ MH_GUID=$(sql1 "SELECT guid FROM game_item_instance WHERE owner_guid = $GINGER A
 [ -n "$MH_GUID" ] && sqlq "UPDATE game_item_instance SET durability = 20 WHERE guid = $MH_GUID" >/dev/null
 echo "[orch] staged: giver=$GIVER wolf1=$WOLF1 wolf2=$WOLF2"
 
-# ---- baselines for the delta assertions ----
+# ---- baselines for the delta assertions (settled first — the staging session's async persist
+# and any straggler from the PREVIOUS suite test can land after a naive immediate read; 267) ----
+settle_char_money "$GINGER"
 MONEY0=$(sql1 "SELECT money FROM game_character WHERE guid = $GINGER")
 XP0=$(sql1 "SELECT xp FROM game_character WHERE guid = $GINGER")
 LEVEL0=$(sql1 "SELECT level FROM game_character WHERE guid = $GINGER")

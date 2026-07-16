@@ -13,6 +13,21 @@ char_guid() { sqlq "SELECT guid FROM game_character WHERE name = '$1'" | grep -o
 # first numeric column of the first data row
 sql1() { sqlq "$1" | sed -n 3p | awk -F'|' '{gsub(/ /,"",$1); print $1}'; }
 
+# Wait for the char row's money to go QUIET (two consecutive 1s-apart equal reads). The gateway's
+# logout persist is ASYNC (~1-3s; danger-zones §2): an offline write (debug_set_money) or a delta
+# BASELINE taken while a prior session's persist is still in flight gets silently clobbered/skewed —
+# the 265 trace caught a staged 1000 overwritten by the previous session's late 800 persist. Call
+# before any debug_set_money and before taking money/xp baselines. (267)
+settle_char_money() { # $1=char_guid
+  local prev="" cur=""
+  for _ in $(seq 1 10); do
+    cur=$(sql1 "SELECT money FROM game_character WHERE guid = $1")
+    [ -n "$cur" ] && [ "$cur" = "$prev" ] && return 0
+    prev="$cur"; sleep 1
+  done
+  return 0 # proceed either way — the caller's own asserts report the truth
+}
+
 FAILED=0
 step_ok()   { echo "[orch] STEP-ASSERT OK: $*"; }
 step_fail() { echo "[orch] STEP-ASSERT FAIL: $*" >&2; FAILED=1; }

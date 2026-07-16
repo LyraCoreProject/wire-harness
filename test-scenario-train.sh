@@ -16,6 +16,7 @@ TRAIN_READY=/tmp/ws_train_ready_$$
 
 # repeatability: forget the spell + normalize the purse before buying it again
 sqlq "DELETE FROM game_player_spell WHERE character_guid = $GINGER AND spell_id = $SPELL" >/dev/null
+settle_char_money "$GINGER" # the 265 trace caught this exact clobber (stale 800 over staged 1000)
 scall debug_set_money "$GINGER" 1000
 
 stay_start TEST test123 Ginger || exit 1
