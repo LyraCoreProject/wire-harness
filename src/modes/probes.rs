@@ -46,6 +46,7 @@ pub(crate) fn try_dispatch(
         "backswing" => backswing(c, args, mcx)?,
         "setbutton" => setbutton(c, args, mcx)?,
         "fishcast" => fishcast(c, args, mcx)?,
+        "casttime" => casttime(c, args, mcx)?,
         "name-query" => name_query(c, args, mcx)?,
         "bindpoint" => bindpoint(c, args, mcx)?,
         _ => return Ok(false),
@@ -1756,5 +1757,52 @@ fn fishcast(
     println!("[fish] RESULT start={start} go={go}");
     if !start || !go { bail!("fishcast FAIL: START/GO clear missing (start={start} go={go})"); }
     println!("[fish] FISHCAST PASS \u{2713}");
+    Ok(())
+}
+
+// ---- casttime <spell_id> <target_guid> <x> <y> <z>: begin a timed cast at a mob and report the
+// SMSG_SPELL_START timer (the server's FOLDED cast time — the 264 spell-modifier verify), then
+// cancel so nothing lands. Positions 20 yd west of the target, facing it.
+fn casttime(
+    c: &mut WireClient,
+    args: &mut dyn Iterator<Item = String>,
+    _mcx: &ModeCtx<'_>,
+) -> Result<()> {
+    use std::time::{Duration, Instant};
+    use wow_world_messages::vanilla::{
+        CMSG_CANCEL_CAST, MovementInfo, MovementInfo_MovementFlags, Vector3d, MSG_MOVE_HEARTBEAT_Client,
+    };
+    let spell: u32 = args.next().and_then(|s| s.parse().ok()).expect("usage: casttime <spell> <target> <x> <y> <z>");
+    let target: u64 = args.next().and_then(|s| s.parse().ok()).expect("target guid");
+    let mx: f32 = args.next().and_then(|s| s.parse().ok()).expect("x");
+    let my: f32 = args.next().and_then(|s| s.parse().ok()).expect("y");
+    let mz: f32 = args.next().and_then(|s| s.parse().ok()).expect("z");
+    for i in 0..3u32 {
+        c.send(&MSG_MOVE_HEARTBEAT_Client {
+            info: MovementInfo {
+                flags: MovementInfo_MovementFlags::empty(),
+                timestamp: i * 100,
+                position: Vector3d { x: mx - 20.0, y: my, z: mz },
+                orientation: 0.0,
+                fall_time: 0.0,
+            },
+        })?;
+        std::thread::sleep(Duration::from_millis(120));
+    }
+    c.set_selection(target)?;
+    c.cast_spell(spell, target)?;
+    c.set_recv_timeout(Duration::from_millis(300))?;
+    let t0 = Instant::now();
+    let mut timer: Option<u32> = None;
+    while t0.elapsed() < Duration::from_secs(5) && timer.is_none() {
+        if let Ok(Smsg::SMSG_SPELL_START(s)) = c.recv() {
+            if s.spell == spell {
+                timer = Some(s.timer);
+            }
+        }
+    }
+    let _ = c.send(&CMSG_CANCEL_CAST { id: spell });
+    let Some(t) = timer else { bail!("casttime FAIL: no SMSG_SPELL_START for {spell}") };
+    println!("[casttime] START timer = {t}ms");
     Ok(())
 }
