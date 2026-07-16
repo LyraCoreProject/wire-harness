@@ -58,9 +58,9 @@ orchestrate() {
   # two pokes inside the first 1.7s cast window guarantee the slide the probe asserts. The mob
   # stays for the realistic swing traffic on top.
   sleep 1
-  spacetime call "$DB" -- debug_apply_damage $CGUID 3 >/dev/null 2>&1
+  spacetime call "$DB" -- debug_apply_damage $CGUID 3 0 >/dev/null 2>&1
   sleep 1
-  spacetime call "$DB" -- debug_apply_damage $CGUID 3 >/dev/null 2>&1
+  spacetime call "$DB" -- debug_apply_damage $CGUID 3 0 >/dev/null 2>&1
 }
 
 orchestrate &

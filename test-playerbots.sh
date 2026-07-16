@@ -75,9 +75,16 @@ fi
 WOLF=$(spawn_at "$BOT" $WOLF_ENTRY 2)
 [ -z "$WOLF" ] && { step_fail "fight: wolf spawn failed"; }
 scall debug_engage "$WOLF" "$BOT"
+# Deterministic defend trigger (testing-hardening): the hook fires on DAMAGE TAKEN, and the wolf's
+# swings are a whiff/timing lottery under suite load (in-gate flake 2026-07-16). One attributed
+# poke through the real damage path guarantees the on_damage_taken payload the defend brain reads.
+sleep 2
+scall debug_apply_damage "$BOT" 3 "$WOLF"
 DEFENDED=0; WOLF_HP0=$(sql1 "SELECT health FROM game_world_entity WHERE guid = ${WOLF:-0}")
 for _ in $(seq 1 30); do
-  R=$(sql1 "SELECT COUNT(*) AS n FROM game_melee_attack WHERE attacker_guid = $BOT AND target_guid = ${WOLF:-0}")
+  # Single-column WHERE + client-side grep (danger-zones: compound-WHERE queries on this CLI can
+  # silently lie — the module log showed the defend row ARMED while this assert read 0).
+  R=$(sqlq "SELECT attacker_guid, target_guid FROM game_melee_attack WHERE attacker_guid = $BOT" | grep -c "${WOLF:-nomatch}")
   [ "${R:-0}" -ge 1 ] && { DEFENDED=1; break; }
   sleep 1
 done
