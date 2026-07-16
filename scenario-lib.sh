@@ -32,10 +32,17 @@ settle_char_money() { # $1=char_guid
 # flake class, work-item 267): delete-first (reaps a crashed prior run's leftover), create fresh
 # through the REAL wire char-create path, echo the guid. Pair with drop_char in teardown. WC must
 # be defined by the caller before use (every scenario script sets it).
-fresh_char() { # $1=name  $2=class (warrior|paladin|mage|rogue|priest|warlock; default warrior)
+fresh_char() { # $1=name  $2=class (warrior|...; default warrior)  $3=level (default 5)
   timeout 60 "$WC" TEST test123 "$1" char-delete >/dev/null 2>&1 || true
   timeout 60 "$WC" TEST test123 "$1" make-char "${2:-warrior}" >/dev/null 2>&1
-  char_guid "$1"
+  local guid; guid=$(char_guid "$1")
+  # Level 5 default (267 root-cause, 2026-07-16): the scenario pads sit near REAL imported
+  # low-level spawns — a level-1 fresh char is a valid aggro target and gets mauled mid-scenario
+  # (4 wolves killed Vendortester during the vendor fight; death disengage cleared every melee row
+  # and the durability assert starved). Level 5 is GREY to them (no proximity aggro) — the exact
+  # profile the shared Ginger accidentally provided all along.
+  [ -n "$guid" ] && scall debug_set_level "$guid" "${3:-5}"
+  echo "$guid"
 }
 drop_char() { # $1=name
   timeout 60 "$WC" TEST test123 "$1" char-delete >/dev/null 2>&1 || true

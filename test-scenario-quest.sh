@@ -9,6 +9,12 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 source tools/wire-client/scenario-lib.sh
 scenario_preflight scenario-quest
+# Disposable character (267 / testing-hardening §3.4): fresh char, level 5 (grey to the pad's
+# ambient imported spawns — see fresh_char's doc), zero residue in any baseline.
+QCHAR=Questtester
+GINGER=$(fresh_char "$QCHAR")
+[ -z "$GINGER" ] && { echo "[orch] fresh_char $QCHAR failed" >&2; exit 1; }
+echo "[orch] scenario-quest: disposable char $QCHAR=$GINGER"
 
 QUEST=50900; GIVER_ENTRY=51003; WOLF_ENTRY=51000
 # PAD MOVED 2026-07-16: the old (-8920,-180) pad sits INSIDE a nav-rasterized structure
@@ -21,7 +27,7 @@ PAD_X=-8960; PAD_Y=-460; PAD_Z=81
 sqlq "DELETE FROM game_character_quest WHERE character_guid = $GINGER AND quest_entry = $QUEST" >/dev/null
 
 # ---- stage: park Ginger on the pad, spawn the giver + two weakened wolves at her feet ----
-stay_start TEST test123 Ginger || exit 1
+stay_start TEST test123 "$QCHAR" || exit 1
 scall debug_teleport "$GINGER" 0 $PAD_X $PAD_Y $PAD_Z 0
 scall debug_set_health "$GINGER" 100000
 GIVER=$(spawn_at "$GINGER" $GIVER_ENTRY 4)
@@ -66,7 +72,7 @@ REP0=$(sql1 "SELECT standing FROM game_player_reputation WHERE character_guid = 
 WATCH=$!
 
 # ---- the wire scenario (SMSG assertions per step; nonzero exit = the failed step is named) ----
-timeout 240 "$WC" TEST test123 Ginger scenario-quest "$GIVER" $QUEST "$WOLF1" "$WOLF2"
+timeout 240 "$WC" TEST test123 "$QCHAR" scenario-quest "$GIVER" $QUEST "$WOLF1" "$WOLF2"
 RC=$?
 wait "$WATCH" 2>/dev/null || FAILED=1
 [ $RC -ne 0 ] && { echo "[orch] wire scenario failed (rc=$RC)"; FAILED=1; }
@@ -131,4 +137,5 @@ sqlq "DELETE FROM game_corpse_loot WHERE corpse_guid = $WOLF2" >/dev/null
 # NOTE deliberately kept: the repeatable quest's log row (rewarded=true) and the granted rewards —
 # the next run re-baselines its deltas, and accept resets a rewarded repeatable row in place.
 
+drop_char "$QCHAR"
 if [ "$FAILED" -eq 0 ]; then echo "[scenario-quest] PASS"; exit 0; else echo "[scenario-quest] FAIL"; exit 1; fi
