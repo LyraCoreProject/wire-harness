@@ -214,14 +214,14 @@ t_ghost_reveal() {
 }
 
 t_init_factions() {
-  # Uses the scenario-fixture faction 79 (reputation_index 5 — seeded by debug_seed_scenario_fixtures,
+  # Uses the scenario-fixture faction 50900 (reputation_index 60 — seeded by debug_seed_scenario_fixtures,
   # present even on a no-import sandbox). Standing accumulates across runs (quest rewards + this
   # grant), so read the expected value back instead of hardcoding it.
   spacetime call "$DB" -- debug_seed_scenario_fixtures >/dev/null 2>&1 || true
-  spacetime call "$DB" -- debug_grant_reputation "$GINGER" 79 100 >/dev/null 2>&1 || true
+  spacetime call "$DB" -- debug_grant_reputation "$GINGER" 50900 100 >/dev/null 2>&1 || true
   local want
-  want=$(sqlq "SELECT standing FROM game_player_reputation WHERE character_guid = $GINGER AND faction_id = 79" | grep -oE '\-?[0-9]+' | tail -1)
-  [ -z "$want" ] && skip "debug_grant_reputation left no game_player_reputation row for fixture faction 79"
+  want=$(sqlq "SELECT standing FROM game_player_reputation WHERE character_guid = $GINGER AND faction_id = 50900" | grep -oE '\-?[0-9]+' | tail -1)
+  [ -z "$want" ] && skip "debug_grant_reputation left no game_player_reputation row for fixture faction 50900"
   timeout 60 "$WC" TEST test123 Ginger init-factions 5 "$want"
 }
 

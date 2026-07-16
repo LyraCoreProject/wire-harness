@@ -104,14 +104,30 @@ purge_entry() { # $1=entry
 # Proximity-aggro hostility on a mock-seed sandbox: no faction data is imported and
 # compute_hostile refuses missing rows, so nothing can aggro without staging these two
 # game_faction_template rows (Monster 14 enemy-group vs Player group 1). ALWAYS pair with
-# clear_hostility in teardown — the rest of the suite expects the pre-import baseline.
+# clear_hostility in teardown.
+#
+# IMPORTED-NODE GUARD (live find 2026-07-16): on a node with the real FactionTemplate.dbc import,
+# rows 14 and 1 ALREADY EXIST with the real values — the old unconditional INSERT+DELETE replaced
+# the imported Monster/Player templates with these sandbox stubs and then deleted them outright,
+# corrupting live faction data until the next `importer --dbc` pass. The real rows already encode
+# exactly the hostility this stages (Monster 14 enemy_group=1 → hostile to players), so on an
+# imported node both helpers are no-ops; STAGED_HOSTILITY makes clear_hostility remove only what
+# stage_hostility actually inserted.
+STAGED_HOSTILITY=0
 stage_hostility() {
+  if [ -n "$(sql1 "SELECT COUNT(*) AS n FROM game_faction_template WHERE id = 14")" ] && \
+     [ "$(sql1 "SELECT COUNT(*) AS n FROM game_faction_template WHERE id = 14")" != "0" ]; then
+    return 0 # imported node: the real Monster template already provides the hostility
+  fi
+  STAGED_HOSTILITY=1
   sqlq "INSERT INTO game_faction_template (id, faction, faction_group, friend_group, enemy_group, enemy_0, enemy_1, enemy_2, enemy_3, friend_0, friend_1, friend_2, friend_3) VALUES (14, 14, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0)" >/dev/null
   sqlq "INSERT INTO game_faction_template (id, faction, faction_group, friend_group, enemy_group, enemy_0, enemy_1, enemy_2, enemy_3, friend_0, friend_1, friend_2, friend_3) VALUES (1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0)" >/dev/null
 }
 clear_hostility() {
+  [ "$STAGED_HOSTILITY" != "1" ] && return 0
   sqlq "DELETE FROM game_faction_template WHERE id = 14" >/dev/null
   sqlq "DELETE FROM game_faction_template WHERE id = 1" >/dev/null
+  STAGED_HOSTILITY=0
 }
 
 # Poll once per second for up to $1 seconds until file $2 exists. Echoes nothing; returns 0 when

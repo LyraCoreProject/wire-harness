@@ -24,6 +24,7 @@ purge_entry_rows $WOLF
 sqlq "DELETE FROM game_melee_attack" >/dev/null
 sqlq "DELETE FROM game_group_member WHERE character_guid = $GINGER" >/dev/null
 # Hostility on mock-seed needs staged faction rows (canonical helper; cleared in teardown).
+FACTION_ROWS_BEFORE=$(sql1 "SELECT COUNT(*) AS n FROM game_faction_template")
 stage_hostility
 sqlq "UPDATE game_character SET x = $PAD_X, y = $PAD_Y, z = $PAD_Z WHERE guid = $GINGER" >/dev/null
 
@@ -110,6 +111,8 @@ sqlq "DELETE FROM game_melee_attack" >/dev/null
 clear_hostility
 rm -f "$HOLD" "$HOLD.ingroup"
 assert_eq "teardown: zero bot rows" "$(sql1 "SELECT COUNT(*) AS n FROM pkg_playerbots_bot")" "0"
-assert_eq "teardown: zero faction rows" "$(sql1 "SELECT COUNT(*) AS n FROM game_faction_template")" "0"
+# Imported-node aware (2026-07-16): assert the faction table is RESTORED to its pre-test
+# count (0 on a sandbox, 314 on an imported node) — never that it is empty.
+assert_eq "teardown: faction rows restored" "$(sql1 "SELECT COUNT(*) AS n FROM game_faction_template")" "${FACTION_ROWS_BEFORE:-0}"
 
 if [ "$FAILED" -eq 0 ]; then echo "[class-roles] PASS"; exit 0; else echo "[class-roles] FAIL"; exit 1; fi

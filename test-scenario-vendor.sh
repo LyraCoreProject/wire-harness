@@ -10,7 +10,7 @@ source tools/wire-client/scenario-lib.sh
 scenario_preflight scenario-vendor
 
 VENDOR_ENTRY=51004; BAG_ENTRY=51001 # the 0-damage friendly trainer template doubles as a punching bag
-BLADE=50
+BLADE=5090050
 PAD_X=-8900; PAD_Y=-210; PAD_Z=82
 # Run-scoped handshake paths (work-item 161): defined ONCE here, passed as wire-client args.
 SOLD_FILE=/tmp/ws_vendor_sold_$$

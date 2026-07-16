@@ -25,11 +25,11 @@ MOBGUID=""
 orchestrate() {
   local GX="" GY="" MOB=""
   for _ in $(seq 1 30); do
-    GX=$(spacetime sql "$DB" "SELECT x FROM game_world_entity WHERE guid=$CGUID" 2>&1 | grep -oE '\-?[0-9]+\.[0-9]+' | tail -1)
+    GX=$(spacetime sql "$DB" "SELECT x FROM game_world_entity WHERE guid=$CGUID" 2>&1 | grep -oE '-?[0-9]+(\.[0-9]+)?' | tail -1)
     [ -n "$GX" ] && break; sleep 1
   done
   [ -z "$GX" ] && { echo "[orch] $CHAR never went live" >&2; return 1; }
-  GY=$(spacetime sql "$DB" "SELECT y FROM game_world_entity WHERE guid=$CGUID" 2>&1 | grep -oE '\-?[0-9]+\.[0-9]+' | tail -1)
+  GY=$(spacetime sql "$DB" "SELECT y FROM game_world_entity WHERE guid=$CGUID" 2>&1 | grep -oE '-?[0-9]+(\.[0-9]+)?' | tail -1)
   spacetime call "$DB" debug_spawn_at_feet $CGUID $ENTRY 1 >/dev/null 2>&1   # 1yd = immediate melee
   spacetime call "$DB" debug_set_health $CGUID 100000 >/dev/null 2>&1
   MOB=$(spacetime sql "$DB" "SELECT guid, x, y FROM game_world_entity WHERE entry=$ENTRY AND owner_guid=0" 2>&1 \

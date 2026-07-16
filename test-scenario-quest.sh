@@ -43,8 +43,8 @@ echo "[orch] staged: giver=$GIVER wolf1=$WOLF1 wolf2=$WOLF2"
 MONEY0=$(sql1 "SELECT money FROM game_character WHERE guid = $GINGER")
 XP0=$(sql1 "SELECT xp FROM game_character WHERE guid = $GINGER")
 LEVEL0=$(sql1 "SELECT level FROM game_character WHERE guid = $GINGER")
-JERKY0=$(sqlq "SELECT stack_count FROM game_item_instance WHERE owner_guid = $GINGER AND entry = 52" | grep -oE '[0-9]+' | awk '{s+=$1} END{print s+0}')
-REP0=$(sql1 "SELECT standing FROM game_player_reputation WHERE character_guid = $GINGER AND faction_id = 79"); REP0=${REP0:-0}
+JERKY0=$(sqlq "SELECT stack_count FROM game_item_instance WHERE owner_guid = $GINGER AND entry = 5090052" | grep -oE '[0-9]+' | awk '{s+=$1} END{print s+0}')
+REP0=$(sql1 "SELECT standing FROM game_player_reputation WHERE character_guid = $GINGER AND faction_id = 50900"); REP0=${REP0:-0}
 
 # ---- mid-flight watcher: the accept row must appear while the wire scenario runs ----
 (
@@ -66,8 +66,8 @@ wait "$WATCH" 2>/dev/null || FAILED=1
 # ---- post-flow server-state assertions ----
 MONEY1=$(sql1 "SELECT money FROM game_character WHERE guid = $GINGER")
 XP1=$(sql1 "SELECT xp FROM game_character WHERE guid = $GINGER")
-JERKY1=$(sqlq "SELECT stack_count FROM game_item_instance WHERE owner_guid = $GINGER AND entry = 52" | grep -oE '[0-9]+' | awk '{s+=$1} END{print s+0}')
-REP1=$(sql1 "SELECT standing FROM game_player_reputation WHERE character_guid = $GINGER AND faction_id = 79")
+JERKY1=$(sqlq "SELECT stack_count FROM game_item_instance WHERE owner_guid = $GINGER AND entry = 5090052" | grep -oE '[0-9]+' | awk '{s+=$1} END{print s+0}')
+REP1=$(sql1 "SELECT standing FROM game_player_reputation WHERE character_guid = $GINGER AND faction_id = 50900")
 REWARDED=$(sql1 "SELECT COUNT(*) AS n FROM game_character_quest WHERE character_guid = $GINGER AND quest_entry = $QUEST AND rewarded = true")
 
 # money: +150 quest reward +25..50 looted from ONE wolf corpse (kill-XP path also pays nothing else)
@@ -82,8 +82,8 @@ if [ "${LEVEL1:-0}" -gt "${LEVEL0:-0}" ]; then
 else
   assert_ge "xp delta >= 90 (quest reward)" $(( ${XP1:-0} - ${XP0:-0} )) 90
 fi
-assert_eq "reward item: +2 Tough Jerky (entry 52)" "$JERKY1" "$(( JERKY0 + 2 ))"
-assert_eq "reputation: +250 with fixture faction 79" "${REP1:-0}" "$(( REP0 + 250 ))"
+assert_eq "reward item: +2 Tough Jerky (entry 5090052)" "$JERKY1" "$(( JERKY0 + 2 ))"
+assert_eq "reputation: +250 with fixture faction 50900" "${REP1:-0}" "$(( REP0 + 250 ))"
 assert_ge "quest row marked rewarded" "${REWARDED:-0}" 1
 
 # 186: LOOTABLE follows the rule (loot rows remain OR money > 0) on the money-looted corpse.
