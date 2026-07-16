@@ -82,6 +82,15 @@ for _ in $(seq 1 60); do
 done
 sqlq "DELETE FROM game_melee_attack WHERE attacker_guid = $GINGER" >/dev/null
 sqlq "DELETE FROM game_melee_attack WHERE attacker_guid = ${BAG:-0}" >/dev/null
+if [ -z "$DUR" ] || [ "${DUR:-70}" -ge 70 ]; then
+  # Self-diagnosis (267): the fight stall has had THREE distinct causes so far (nav-obstructed pad,
+  # ambient-spawn mauling, stray-Padfoot targets) — dump the live combat state so the NEXT failure
+  # names its own cause instead of needing a freeze-frame session.
+  echo "[orch] FIGHT-DIAG melee rows:"; sqlq "SELECT attacker_guid, target_guid, last_swing_ms FROM game_melee_attack" | sed -n '3,8p'
+  echo "[orch] FIGHT-DIAG char:"; sqlq "SELECT guid, health, dead, x, y FROM game_world_entity WHERE guid = $GINGER" | sed -n 3p
+  echo "[orch] FIGHT-DIAG bag:"; sqlq "SELECT guid, health, x, y FROM game_world_entity WHERE guid = ${BAG:-0}" | sed -n 3p
+  echo "[orch] FIGHT-DIAG blade:"; sqlq "SELECT guid, slot, durability FROM game_item_instance WHERE owner_guid = $GINGER" | sed -n '3,6p'
+fi
 stay_stop
 assert_lt "fight: durability wore below 70" "${DUR:-70}" 70
 

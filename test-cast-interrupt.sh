@@ -24,9 +24,14 @@ MOBGUID=""
 
 orchestrate() {
   local GX="" GY="" MOB=""
-  # Self-heal: purge STALE Padfoots from prior crashed/pre-fix runs (spawn rows resurrect them).
+  # Self-heal: purge STALE Padfoots from prior crashed/pre-fix runs (spawn rows resurrect them),
+  # then ORPHAN entities whose spawn row is already gone (a spawn-keyed loop misses them).
   for SG in $(spacetime sql "$DB" "SELECT guid FROM game_creature_spawn WHERE entry = $ENTRY" 2>/dev/null | grep -oE '[0-9]{15,}'); do
     spacetime sql "$DB" "DELETE FROM game_creature_spawn WHERE guid = $SG" >/dev/null 2>&1
+    spacetime sql "$DB" "DELETE FROM game_world_entity WHERE guid = $SG" >/dev/null 2>&1
+  done
+  for SG in $(spacetime sql "$DB" "SELECT guid FROM game_world_entity WHERE entry = $ENTRY" 2>/dev/null | grep -oE '[0-9]{15,}'); do
+    spacetime sql "$DB" "DELETE FROM game_melee_attack WHERE attacker_guid = $SG" >/dev/null 2>&1
     spacetime sql "$DB" "DELETE FROM game_world_entity WHERE guid = $SG" >/dev/null 2>&1
   done
   # Park on probed-clear ground first (debug_nav_leg has_los=true): in-suite Ginger inherits the

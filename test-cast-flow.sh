@@ -34,6 +34,11 @@ for SG in $(spacetime sql "$DB" "SELECT guid FROM game_creature_spawn WHERE entr
   spacetime sql "$DB" "DELETE FROM game_creature_spawn WHERE guid = $SG" >/dev/null 2>&1
   spacetime sql "$DB" "DELETE FROM game_world_entity WHERE guid = $SG" >/dev/null 2>&1
 done
+# ORPHAN entities too (spawn row already gone — a spawn-row-keyed loop misses them; live find):
+for SG in $(spacetime sql "$DB" "SELECT guid FROM game_world_entity WHERE entry = $ENTRY" 2>/dev/null | grep -oE '[0-9]{15,}'); do
+  spacetime sql "$DB" "DELETE FROM game_melee_attack WHERE attacker_guid = $SG" >/dev/null 2>&1
+  spacetime sql "$DB" "DELETE FROM game_world_entity WHERE guid = $SG" >/dev/null 2>&1
+done
 
 # Orchestrator: wait for the caster to be in-world, spawn the target at her feet, keep her
 # alive, then hand the wire client the target's exact guid (decoded-precise, no mangling).
