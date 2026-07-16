@@ -28,6 +28,19 @@ settle_char_money() { # $1=char_guid
   return 0 # proceed either way — the caller's own asserts report the truth
 }
 
+# Disposable per-test character (testing-hardening §3.4 — kills the shared-Ginger ambient-state
+# flake class, work-item 267): delete-first (reaps a crashed prior run's leftover), create fresh
+# through the REAL wire char-create path, echo the guid. Pair with drop_char in teardown. WC must
+# be defined by the caller before use (every scenario script sets it).
+fresh_char() { # $1=name  $2=class (warrior|paladin|mage|rogue|priest|warlock; default warrior)
+  timeout 60 "$WC" TEST test123 "$1" char-delete >/dev/null 2>&1 || true
+  timeout 60 "$WC" TEST test123 "$1" make-char "${2:-warrior}" >/dev/null 2>&1
+  char_guid "$1"
+}
+drop_char() { # $1=name
+  timeout 60 "$WC" TEST test123 "$1" char-delete >/dev/null 2>&1 || true
+}
+
 FAILED=0
 step_ok()   { echo "[orch] STEP-ASSERT OK: $*"; }
 step_fail() { echo "[orch] STEP-ASSERT FAIL: $*" >&2; FAILED=1; }
