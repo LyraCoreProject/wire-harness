@@ -46,6 +46,7 @@ pub(crate) fn try_dispatch(
         "backswing" => backswing(c, args, mcx)?,
         "setbutton" => setbutton(c, args, mcx)?,
         "fishcast" => fishcast(c, args, mcx)?,
+        "petsummon" => petsummon(c, args, mcx)?,
         "casttime" => casttime(c, args, mcx)?,
         "name-query" => name_query(c, args, mcx)?,
         "bindpoint" => bindpoint(c, args, mcx)?,
@@ -1775,6 +1776,68 @@ fn fishcast(
     if !start || !go { bail!("fishcast FAIL: START/GO clear missing (start={start} go={go})"); }
     if !skill_values { bail!("fishcast FAIL: no live PLAYER_SKILL_INFO values for Fishing (234)"); }
     println!("[fish] FISHCAST PASS \u{2713} (incl. live skill-pane values)");
+    Ok(())
+}
+
+// ---- petsummon <spell_id>: cast a summon spell (Summon Imp 688) and assert the 023 pet binding:
+// (1) a Unit CREATE whose UNIT_FIELD_SUMMONEDBY == self (the pet), (2) SMSG_PET_SPELLS (0x0179)
+// carrying that pet guid, (3) the owner's UNIT_FIELD_SUMMON VALUES partial (TYPE-less → raw scan
+// for the pet guid low word in an UPDATE_OBJECT that is NOT the pet CREATE).
+fn petsummon(
+    c: &mut WireClient,
+    args: &mut dyn Iterator<Item = String>,
+    _mcx: &ModeCtx<'_>,
+) -> Result<()> {
+    use std::time::{Duration, Instant};
+    use wow_world_messages::vanilla::{Object, UpdateMask};
+    let spell: u32 =
+        args.next().and_then(|s| s.parse().ok()).expect("usage: petsummon <spell_id>");
+    let self_guid = c.self_guid;
+    c.cast_spell(spell, 0)?;
+    c.set_recv_timeout(Duration::from_millis(300))?;
+    let t0 = Instant::now();
+    let (mut pet_guid, mut pet_spells_guid) = (0u64, None::<u64>);
+    // 25s window: Summon Imp is a 10s TIMED cast (the pet only spawns at completion).
+    while t0.elapsed() < Duration::from_secs(25) && !(pet_guid != 0 && pet_spells_guid.is_some()) {
+        match c.recv() {
+            Ok(Smsg::SMSG_UPDATE_OBJECT(u)) => {
+                for o in &u.objects {
+                    if let Object::CreateObject { guid3, mask2, .. }
+                    | Object::CreateObject2 { guid3, mask2, .. } = o
+                    {
+                        if let UpdateMask::Unit(unit) = mask2 {
+                            if unit.unit_summonedby().map(|g| g.guid()) == Some(self_guid) {
+                                pet_guid = guid3.guid();
+                                println!("[pet] CREATE with SUMMONEDBY=self → pet {pet_guid:#x}");
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(Smsg::SMSG_PET_SPELLS(p)) => {
+                pet_spells_guid = Some(p.pet.guid());
+                println!(
+                    "[pet] SMSG_PET_SPELLS pet={:#x} bar={}",
+                    p.pet.guid(),
+                    p.action_bars.is_some()
+                );
+            }
+            _ => {}
+        }
+    }
+    println!(
+        "[pet] RESULT summonedby_create={} pet_spells={}",
+        pet_guid != 0,
+        pet_spells_guid.is_some()
+    );
+    if pet_guid == 0 {
+        bail!("petsummon FAIL: no Unit CREATE carried UNIT_FIELD_SUMMONEDBY=self (023)");
+    }
+    match pet_spells_guid {
+        Some(g) if g == pet_guid => {}
+        other => bail!("petsummon FAIL: SMSG_PET_SPELLS missing/mismatched (got {other:?})"),
+    }
+    println!("[pet] PETSUMMON PASS \u{2713} (SUMMONEDBY create + PET_SPELLS bar)");
     Ok(())
 }
 
