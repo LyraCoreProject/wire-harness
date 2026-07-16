@@ -11,7 +11,10 @@ source tools/wire-client/scenario-lib.sh
 scenario_preflight scenario-quest
 
 QUEST=50900; GIVER_ENTRY=51003; WOLF_ENTRY=51000
-PAD_X=-8920; PAD_Y=-180; PAD_Z=82
+# PAD MOVED 2026-07-16: the old (-8920,-180) pad sits INSIDE a nav-rasterized structure
+# (debug_nav_probe: obstruction_top 82..106 over ground 80.7) — since 243's LoS swing gate, no
+# melee could land there (STEP 3 hung 90s). This spot is probed LoS-clear (debug_nav_leg).
+PAD_X=-8960; PAD_Y=-460; PAD_Z=81
 
 # repeatability: drop any prior 50900 log row (failed-run residue or a rewarded repeatable row) so
 # every run exercises the identical first-accept path (hello -> QUEST_DETAILS).
@@ -22,8 +25,11 @@ stay_start TEST test123 Ginger || exit 1
 scall debug_teleport "$GINGER" 0 $PAD_X $PAD_Y $PAD_Z 0
 scall debug_set_health "$GINGER" 100000
 GIVER=$(spawn_at "$GINGER" $GIVER_ENTRY 4)
-WOLF1=$(spawn_at "$GINGER" $WOLF_ENTRY 6)
-WOLF2=$(spawn_at "$GINGER" $WOLF_ENTRY 8)
+# Offsets INSIDE the 5yd melee reach (2026-07-16): the headless client cannot walk, and since the
+# retaliation invariant (a passive wolf reacts only to a FIRED attack) a wolf spawned at 6yd never
+# charges into range on its own — the old 6/8yd offsets relied on that removed arm-time charge.
+WOLF1=$(spawn_at "$GINGER" $WOLF_ENTRY 3)
+WOLF2=$(spawn_at "$GINGER" $WOLF_ENTRY 4)
 if [ -z "$GIVER" ] || [ -z "$WOLF1" ] || [ -z "$WOLF2" ] || [ "$WOLF1" = "$WOLF2" ]; then
   echo "[orch] fixture spawn failed (giver=$GIVER wolves=$WOLF1/$WOLF2)" >&2; stay_stop; exit 1
 fi
@@ -64,7 +70,15 @@ wait "$WATCH" 2>/dev/null || FAILED=1
 [ $RC -ne 0 ] && { echo "[orch] wire scenario failed (rc=$RC)"; FAILED=1; }
 
 # ---- post-flow server-state assertions ----
-MONEY1=$(sql1 "SELECT money FROM game_character WHERE guid = $GINGER")
+# Persist-settle wait (2026-07-16, the 265 race): money/xp live on the ENTITY during the session and
+# reach game_character only via the gateway's ASYNC logout persist (~1-3s after the wire client
+# exits). Poll the money delta into place before reading any char-row delta.
+MONEY1=""
+for _ in $(seq 1 12); do
+  MONEY1=$(sql1 "SELECT money FROM game_character WHERE guid = $GINGER")
+  [ $(( ${MONEY1:-0} - ${MONEY0:-0} )) -ge 175 ] && break
+  sleep 1
+done
 XP1=$(sql1 "SELECT xp FROM game_character WHERE guid = $GINGER")
 JERKY1=$(sqlq "SELECT stack_count FROM game_item_instance WHERE owner_guid = $GINGER AND entry = 5090052" | grep -oE '[0-9]+' | awk '{s+=$1} END{print s+0}')
 REP1=$(sql1 "SELECT standing FROM game_player_reputation WHERE character_guid = $GINGER AND faction_id = 50900")

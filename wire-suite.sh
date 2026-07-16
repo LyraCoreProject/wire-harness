@@ -222,7 +222,7 @@ t_init_factions() {
   local want
   want=$(sqlq "SELECT standing FROM game_player_reputation WHERE character_guid = $GINGER AND faction_id = 50900" | grep -oE '\-?[0-9]+' | tail -1)
   [ -z "$want" ] && skip "debug_grant_reputation left no game_player_reputation row for fixture faction 50900"
-  timeout 60 "$WC" TEST test123 Ginger init-factions 5 "$want"
+  timeout 60 "$WC" TEST test123 Ginger init-factions 60 "$want"
 }
 
 t_levelup_info() {

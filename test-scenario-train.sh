@@ -44,7 +44,18 @@ wait "$WIRE"; RC=$?
 [ $RC -ne 0 ] && { echo "[orch] wire scenario failed (rc=$RC)"; FAILED=1; }
 
 # ---- server-state assertions ----
-assert_eq "buy: money 1000 -> 900 (cost $COST)" "$(sql1 "SELECT money FROM game_character WHERE guid = $GINGER")" "900"
+# 265 ROOT CAUSE (2026-07-16, instrumented persist trace): the buy is entity-charged and the 900
+# reaches game_character only via the gateway's ASYNC logout teardown persist, which lands ~1-3s
+# AFTER `wait $WIRE` returns — an immediate read races it and sees the pre-buy 1000. (The old
+# "settles at 0" observation was this script's OWN teardown `debug_set_money 0`, misread as
+# corruption.) Server-side persistence is correct — settle-poll instead of a single read.
+MONEY_SETTLED=""
+for _ in $(seq 1 12); do
+  MONEY_SETTLED=$(sql1 "SELECT money FROM game_character WHERE guid = $GINGER")
+  [ "$MONEY_SETTLED" = "900" ] && break
+  sleep 1
+done
+assert_eq "buy: money 1000 -> 900 (cost $COST, persist-settled)" "$MONEY_SETTLED" "900"
 assert_ge "learn: spellbook row for $SPELL exists" "$(sql1 "SELECT COUNT(*) AS n FROM game_player_spell WHERE character_guid = $GINGER AND spell_id = $SPELL")" 1
 # The heal is +50; out-of-combat regen can add a little more inside the window, so assert >= +50.
 HEALTH1=$(sql1 "SELECT health FROM game_world_entity WHERE guid = $GINGER")

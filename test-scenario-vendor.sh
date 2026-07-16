@@ -11,7 +11,9 @@ scenario_preflight scenario-vendor
 
 VENDOR_ENTRY=51004; BAG_ENTRY=51001 # the 0-damage friendly trainer template doubles as a punching bag
 BLADE=5090050
-PAD_X=-8900; PAD_Y=-210; PAD_Z=82
+# PAD MOVED 2026-07-16: the old (-8900,-210) pad is nav-obstructed (has_los=false at 3yd) — the
+# 243 LoS gate ate every durability swing. Probed clear.
+PAD_X=-8960; PAD_Y=-420; PAD_Z=81
 # Run-scoped handshake paths (work-item 161): defined ONCE here, passed as wire-client args.
 SOLD_FILE=/tmp/ws_vendor_sold_$$
 BOUGHT_FILE=/tmp/ws_vendor_bought_$$
@@ -25,7 +27,7 @@ stay_start TEST test123 Ginger || exit 1
 scall debug_teleport "$GINGER" 0 $PAD_X $PAD_Y $PAD_Z 0
 scall debug_set_health "$GINGER" 100000
 VENDOR=$(spawn_at "$GINGER" $VENDOR_ENTRY 4)
-BAG=$(spawn_at "$GINGER" $BAG_ENTRY 6)
+BAG=$(spawn_at "$GINGER" $BAG_ENTRY 3)
 if [ -z "$VENDOR" ] || [ -z "$BAG" ]; then echo "[orch] fixture spawn failed" >&2; stay_stop; exit 1; fi
 # baseline swing readout (pre-equip): unarmed/starter-weapon damage
 scall debug_compute_swing "$GINGER" "$BAG"
@@ -130,7 +132,7 @@ sqlq "DELETE FROM game_item_instance WHERE owner_guid = $GINGER AND entry = $BLA
 sqlq "DELETE FROM game_character_buyback WHERE player_guid = $GINGER" >/dev/null
 scall debug_set_money "$GINGER" 0
 purge_entry $VENDOR_ENTRY
-sqlq "DELETE FROM game_creature_spawn WHERE entry = $BAG_ENTRY AND x > -8910" >/dev/null
+sqlq "DELETE FROM game_creature_spawn WHERE entry = $BAG_ENTRY AND x > -9000" >/dev/null
 sqlq "DELETE FROM game_world_entity WHERE guid = ${BAG:-0}" >/dev/null
 assert_eq "teardown: no blade instances remain" "$(sql1 "SELECT COUNT(*) AS n FROM game_item_instance WHERE owner_guid = $GINGER AND entry = $BLADE")" "0"
 
