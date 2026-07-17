@@ -13,7 +13,7 @@ cd "$(dirname "$0")/../.."
 source tools/wire-client/scenario-lib.sh
 scenario_preflight class-roles
 
-WOLF=51000
+WOLF=51002 # Test Wolf Elder (266): level 8, non-grey to the leveled bots (the L1 wolf 51000 greyed out)
 PAD_X=-8890.0; PAD_Y=-460.0; PAD_Z=82.0
 casts_by() { sql1 "SELECT COUNT(*) AS n FROM game_spell_cast_event WHERE caster_guid = $1 AND spell_id = $2"; }
 
@@ -42,6 +42,9 @@ scall playerbots_spawn_class_role 1 $PAD_X -454.0 $PAD_Z 2 2 || step_fail "palad
 TANK=$(char_guid Tankbot1); HEAL=$(char_guid Healbot1); DPS=$(char_guid Dpsbot1)
 [ -z "$TANK" ] || [ -z "$HEAL" ] || [ -z "$DPS" ] && { echo "[orch] bot guids missing" >&2; exit 1; }
 echo "[orch] paladins: tank=$TANK heal=$HEAL dps=$DPS"
+# 266: level the bots so the cast level-gate lets their kit fire (Taunt 355 spell_level=10 is the
+# ceiling; Judgement 20271=4). debug_set_level recomputes+refills vitals, so read max_health AFTER.
+for B in "$TANK" "$HEAL" "$DPS"; do scall debug_set_level "$B" 10; done
 for B in "$TANK" "$HEAL" "$DPS"; do
   C=$(sql1 "SELECT class FROM game_character WHERE guid = $B")
   [ "$C" = "2" ] || step_fail "bot $B is class $C, want Paladin (2)"
@@ -65,10 +68,14 @@ scall debug_spawn_at_feet "$HEAL" $WOLF 2
 scall debug_spawn_at_feet "$DPS" $WOLF 2
 scall debug_spawn_at_feet "$DPS" $WOLF 3
 WOLVES=$(sqlq "SELECT guid FROM game_world_entity WHERE entry = $WOLF" | grep -oE '[0-9]{15,}')
+# 266: hold the dps at ~40% of its LEVELED max — over the dps flee_at_pct (15%, else the flee brain
+# stop_attacks + legs home every tick and kills the Judgement asserts), under the healer's 80% threshold.
+DPS_HOLD=$(( $(sql1 "SELECT max_health FROM game_world_entity WHERE guid = $DPS") * 40 / 100 ))
+[ "${DPS_HOLD:-0}" -lt 1 ] && DPS_HOLD=25
 TAUNTED=0; SEALED=0; HEALED=0; JUDGED=0
 for i in $(seq 1 30); do
   for M in "$TANK" "$HEAL" "$GINGER"; do scall debug_set_health "$M" 10000; done
-  scall debug_set_health "$DPS" 25   # kept under the heal threshold so the healer has real work
+  scall debug_set_health "$DPS" "$DPS_HOLD"   # ~40% of leveled max — over flee, under heal threshold
   for W in $WOLVES; do scall debug_set_health "$W" 10000; done
   sleep 1
   [ "$(casts_by "$TANK" 355)" -ge 1 ] 2>/dev/null && TAUNTED=1

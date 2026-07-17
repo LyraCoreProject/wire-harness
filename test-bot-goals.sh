@@ -15,7 +15,7 @@ cd "$(dirname "$0")/../.."
 source tools/wire-client/scenario-lib.sh
 scenario_preflight bot-goals
 
-WOLF=51000; GIVER=51003; QUEST=50900
+WOLF=51000; WOLF_ELDER=51002; GIVER=51003; QUEST=50900
 # ~64yd from the Northshire graveyard (-8935,-188): a spirit-res drops the bot back INSIDE the
 # 150yd goal fence, so a mid-grind death resumes instead of re-fencing.
 PAD_X=-8930.0; PAD_Y=-250.0; PAD_Z=80.0
@@ -23,12 +23,19 @@ PAD_X=-8930.0; PAD_Y=-250.0; PAD_Z=80.0
 # ---- staging (no faction rows: the bot INITIATES; wolves retaliate) ----
 scall debug_seed_scenario_fixtures || true
 scall playerbots_despawn_all || true
-purge_entry_rows $WOLF; purge_entry_rows $GIVER
+purge_entry_rows $WOLF; purge_entry_rows $WOLF_ELDER; purge_entry_rows $GIVER
 sqlq "DELETE FROM game_melee_attack" >/dev/null
 scall playerbots_spawn_role 1 $PAD_X $PAD_Y $PAD_Z 2 || { echo "[orch] bot spawn failed" >&2; exit 1; }
 BOT=$(char_guid Dpsbot1)
 [ -z "$BOT" ] && { echo "[orch] no bot guid" >&2; exit 1; }
 echo "[orch] bot-goals: bot=$BOT"
+# 266: level the bot to 10 BEFORE the baselines. This also cures the imported-node ambient-aggro
+# root cause (an L1 bot vs the L1 quest wolves proximity-aggroed at spawn and pre-empted the goal
+# walk — "accept: no quest row"); at L10 those L1 wolves are grey (radius 0) so the bot INITIATES
+# per its goal. The quest phase keeps the L1 51000 wolves (KILL objective is level-independent;
+# reward_xp=90 is granted flat). The GRIND phase below needs ELDERS (an L10 bot's ±3 grind band
+# excludes L1 wolves).
+scall debug_set_level "$BOT" 10
 scall debug_spawn_at_feet "$BOT" $GIVER 8
 scall debug_spawn_at_feet "$BOT" $WOLF 15
 scall debug_spawn_at_feet "$BOT" $WOLF 20
@@ -54,11 +61,15 @@ assert_gt "loot: money above the 150 quest reward (corpse purses looted)" "$(( $
 assert_ge "history: the finished QUEST goal row is kept (state done)" "$(sql1 "SELECT COUNT(*) AS n FROM pkg_playerbots_goal WHERE kind = 1 AND state = 1")" 1
 
 # ---- 2+3. grind + death recovery + resume ----
-scall debug_spawn_at_feet "$BOT" $WOLF 15
-scall debug_spawn_at_feet "$BOT" $WOLF 18
-scall debug_spawn_at_feet "$BOT" $WOLF 21
+# 266: ELDER wolves (51002, L8) for the grind — an L10 bot's GRIND ±3 band excludes the L1 51000,
+# and the offsets sit OUTSIDE the elder's 20yd aggro radius so the bot INITIATES (not proximity-
+# aggroed). Four (the 3 GRIND_KILLS + 1 slack for a pre-selection uncredited kill).
+scall debug_spawn_at_feet "$BOT" $WOLF_ELDER 25
+scall debug_spawn_at_feet "$BOT" $WOLF_ELDER 28
+scall debug_spawn_at_feet "$BOT" $WOLF_ELDER 31
+scall debug_spawn_at_feet "$BOT" $WOLF_ELDER 34
 wait_for_sql_ge 45 "SELECT COUNT(*) AS n FROM pkg_playerbots_goal WHERE kind = 0 AND state = 0" 1 \
-  && step_ok "selection: next goal is GRIND $WOLF" || step_fail "selection: no GRIND goal within 45s"
+  && step_ok "selection: next goal is GRIND $WOLF_ELDER" || step_fail "selection: no GRIND goal within 45s"
 wait_for_sql_ge 45 "SELECT progress FROM pkg_playerbots_goal WHERE kind = 0 AND state = 0" 1 \
   && step_ok "grind: a kill advanced progress (on_kill credit)" || step_fail "grind: no kill credit within 45s"
 
@@ -83,7 +94,7 @@ assert_ge "history: >= 2 finished goal rows kept (the sql-visible mind)" "$(sql1
 
 # ---- teardown (asserted) ----
 scall playerbots_despawn_all || true
-purge_entry_rows $WOLF; purge_entry_rows $GIVER
+purge_entry_rows $WOLF; purge_entry_rows $WOLF_ELDER; purge_entry_rows $GIVER
 sqlq "DELETE FROM game_melee_attack" >/dev/null
 assert_eq "teardown: zero goal rows (swept with the bot character)" "$(sql1 "SELECT COUNT(*) AS n FROM pkg_playerbots_goal")" "0"
 assert_eq "teardown: zero bot rows" "$(sql1 "SELECT COUNT(*) AS n FROM pkg_playerbots_bot")" "0"

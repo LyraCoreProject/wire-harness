@@ -17,7 +17,7 @@ cd "$(dirname "$0")/../.."
 source tools/wire-client/scenario-lib.sh
 scenario_preflight party-brains
 
-WOLF_ENTRY=51000
+WOLF_ENTRY=51002 # Test Wolf Elder (266): non-grey to the leveled role trio (L1 wolf 51000 greyed out)
 PAD_X=-8890.0; PAD_Y=-460.0; PAD_Z=82.0
 
 # ---- staging ----
@@ -39,6 +39,11 @@ scall playerbots_spawn_role 1 $PAD_X -454.0 $PAD_Z 2 || step_fail "dps spawn fai
 TANK=$(char_guid Tankbot1); HEAL=$(char_guid Healbot1); DPS=$(char_guid Dpsbot1)
 [ -z "$TANK" ] || [ -z "$HEAL" ] || [ -z "$DPS" ] && { echo "[orch] bot guids missing" >&2; exit 1; }
 echo "[orch] bots: tank=$TANK heal=$HEAL dps=$DPS"
+# 266: level the role trio so their kit clears the cast level-gate (Taunt 355=10, Renew 139=8).
+# debug_set_level refills vitals — read the leveled max for the healer-phase hold below.
+for B in "$TANK" "$HEAL" "$DPS"; do scall debug_set_level "$B" 10; done
+DPS_HOLD=$(( $(sql1 "SELECT max_health FROM game_world_entity WHERE guid = $DPS") * 40 / 100 ))
+[ "${DPS_HOLD:-0}" -lt 1 ] && DPS_HOLD=15
 assert_eq "spawn: three bot rows" "$(sql1 "SELECT COUNT(*) AS n FROM pkg_playerbots_bot")" "3"
 assert_eq "spawn: three personality rows" "$(sql1 "SELECT COUNT(*) AS n FROM pkg_playerbots_personality")" "3"
 assert_eq "kit: tank learned Taunt 355" "$(sql1 "SELECT COUNT(*) AS n FROM game_player_spell WHERE character_guid = $TANK AND spell_id = 355")" "1"
@@ -124,7 +129,7 @@ for i in $(seq 1 20); do
   scall debug_set_health "$TANK" 10000; scall debug_set_health "$HEAL" 10000
   sleep 1
 done
-scall debug_set_health "$DPS" 15
+scall debug_set_health "$DPS" "$DPS_HOLD" # 266: ~40% of leveled max — under the healer's 80% threshold, over the dps 15% flee
 CAST_BASE_139=$(sql1 "SELECT COUNT(*) AS n FROM game_spell_cast_event WHERE spell_id = 139")
 HEALED=0
 for i in $(seq 1 10); do
