@@ -56,6 +56,7 @@ WIRE=$!
 wait_for_file 30 "$DEATH_READY"
 if [ -f "$DEATH_READY" ]; then
   scall debug_set_health "$GINGER" 1
+  purge_creatures_near "$PAD_X" "$PAD_Y" 30 "$WOLF" # keep the fixture wolf; clear real strays
   scall debug_engage "$WOLF" "$GINGER" # the wolf lands the real killing blow
   DEAD=""
   for _ in $(seq 1 30); do

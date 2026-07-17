@@ -48,6 +48,27 @@ drop_char() { # $1=name
   timeout 60 "$WC" TEST test123 "$1" char-delete >/dev/null 2>&1 || true
 }
 
+# Clear the pad of REAL imported hostiles before a controlled fight (2026-07-18). The Elwynn scenario
+# pads sit in real-mob territory (e.g. Defias Thugs entry 38 patrol near -8960,-420) — a patrolling
+# mob wanders onto the pad and aggros the level-5 disposable char, stalling the controlled fight
+# (the char fights the stray, not the bag). Delete live CREATURE entities (guid is the 0xF130 high-guid,
+# always > 1e15; players are small guids) within `radius` yd of the point. Entity-only delete — real
+# spawns respawn from their game_creature_spawn rows after the test. SQL has no distance fn, so filter
+# in awk.
+purge_creatures_near() { # $1=x $2=y $3=radius [$4... = guids to KEEP (fixtures: the bag, vendor, ...)]
+  local px="$1" py="$2" r="$3"; shift 3
+  local keep=" $* " g
+  for g in $(sqlq "SELECT guid, x, y FROM game_world_entity" \
+      | awk -F'|' -v px="$px" -v py="$py" -v r="$r" 'NR>2 {
+          gsub(/ /,"",$1); gid=$1; ex=$2+0; ey=$3+0;
+          if (gid+0 > 1000000000000000 && (ex-px)*(ex-px)+(ey-py)*(ey-py) <= r*r) print gid
+        }'); do
+    case "$keep" in *" $g "*) continue;; esac   # never delete a named fixture
+    sqlq "DELETE FROM game_melee_attack WHERE attacker_guid = $g" >/dev/null 2>&1
+    sqlq "DELETE FROM game_world_entity WHERE guid = $g" >/dev/null 2>&1
+  done
+}
+
 FAILED=0
 step_ok()   { echo "[orch] STEP-ASSERT OK: $*"; }
 step_fail() { echo "[orch] STEP-ASSERT FAIL: $*" >&2; FAILED=1; }

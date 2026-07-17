@@ -71,6 +71,9 @@ REP0=$(sql1 "SELECT standing FROM game_player_reputation WHERE character_guid = 
 ) &
 WATCH=$!
 
+# Clear real patrolling Elwynn hostiles off the pad (Defias Thugs/wolves aggro the char and derail
+# the controlled kill flow — the intermittent stray-interference class). Keep the fixtures.
+purge_creatures_near "$PAD_X" "$PAD_Y" 30 "$GIVER" "$WOLF1" "$WOLF2"
 # ---- the wire scenario (SMSG assertions per step; nonzero exit = the failed step is named) ----
 timeout 240 "$WC" TEST test123 "$QCHAR" scenario-quest "$GIVER" $QUEST "$WOLF1" "$WOLF2"
 RC=$?

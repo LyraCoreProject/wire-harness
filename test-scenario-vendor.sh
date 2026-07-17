@@ -72,7 +72,11 @@ scall debug_compute_swing "$GINGER" "$BAG"
 SWING1=$(sql1 "SELECT final_max FROM game_debug_readout WHERE key = 'swing'")
 assert_gt "equip: compute-swing max rose with the blade (stat fold)" "${SWING1:-0}" "${SWING0:-0}"
 
-# STEP 4: fight until durability drops (real swings vs the 0-damage bag; 10%/swing wear)
+# STEP 4: fight until durability drops (real swings vs the 0-damage bag; 10%/swing wear).
+# Clear real patrolling Elwynn hostiles (Defias Thugs, wolves) off the pad first — one wandering in
+# aggros the char and the controlled fight fights the STRAY instead of the bag (intermittent stall).
+purge_creatures_near "$PAD_X" "$PAD_Y" 30 "$BAG" "$VENDOR"
+sqlq "DELETE FROM game_melee_attack WHERE target_guid = $GINGER" >/dev/null 2>&1
 scall debug_engage "$GINGER" "$BAG"
 DUR=""
 for _ in $(seq 1 60); do
