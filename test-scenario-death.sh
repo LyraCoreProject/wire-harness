@@ -90,7 +90,10 @@ if [ -f "$DEATH_RECLAIMED" ]; then
   DEADNOW=$(sqlq "SELECT dead FROM game_world_entity WHERE guid = $GINGER" | grep -c true)
   assert_eq "reclaim: no longer dead" "$DEADNOW" "0"
   # 50% res + up to a few out-of-combat regen ticks between the reclaim and this read
-  assert_ge "reclaim: resurrected at ~50% health (>= half)" "${HP:-0}" "$(( ${MAXHP:-200} / 2 ))"
+  # reclaim gives floor(max_health/2); the stat-derived max can shift ~2 between the reclaim and this
+  # read (66<->68), so assert a TOLERANT ~50% band (>= 45%) rather than an exact-half boundary that
+  # flakes by 1 at an odd max_health. The mechanic (res at half, not full, not tiny) is what matters.
+  assert_ge "reclaim: resurrected at ~50% health (>= 45%)" "${HP:-0}" "$(( ${MAXHP:-200} * 45 / 100 ))"
   assert_lt "reclaim: resurrected at ~50% health (< 3/4)" "${HP:-999}" "$(( ${MAXHP:-0} * 3 / 4 ))"
   assert_eq "reclaim: corpse reclaim gives NO rez sickness (any level)" \
     "$(sql1 "SELECT COUNT(*) AS n FROM game_aura WHERE target_guid = $GINGER AND spell_id = $SICKNESS")" "0"

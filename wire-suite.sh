@@ -285,6 +285,10 @@ t_vendor_reaction() { bash tools/wire-client/test-vendor-reaction.sh; }
 # ---- 195B: the rep pane At-War checkbox round-trips CMSG -> row -> INITIALIZE_FACTIONS flag. ----
 t_atwar() { bash tools/wire-client/test-atwar.sh; }
 
+# ---- 1-20 CONTENT regression gate (2026-07-17): class kits + quest chains stayed healthy. ----
+t_content_audit() { bash tools/wire-client/test-content-audit.sh; }
+# ---- real imported quest completes end-to-end (accept->kill-credit->turn-in->XP on real data). ----
+t_real_quest() { bash tools/wire-client/test-real-quest-loop.sh; }
 # ---- testing-hardening §3.3: walk_to closes real distance (walk 12yd into reach -> swing fires). ----
 t_walkmelee() { bash tools/wire-client/test-walkmelee.sh; }
 # ---- testing-hardening §3.2: zero packet-lint violations across a login + rep-relay flow. ----
@@ -296,7 +300,7 @@ ALL_TESTS=(
   char_create_gear
   query_item char_delete bindpoint inspect friend ignore_whisper say_range move_relay
   persist_health repop_delay respec ding combat_regen cast_flow cast_interrupt ghost_reveal
-  init_factions levelup_info vendor_reaction atwar packet_lint walkmelee
+  init_factions levelup_info vendor_reaction atwar packet_lint walkmelee content_audit real_quest
   scenario_quest scenario_vendor scenario_train scenario_weaponmaster scenario_death
   aoi_relay soak playerbots group party_brains bot_goals class_roles
 )
