@@ -249,6 +249,11 @@ wait_for_sql_ge() { # $1=secs $2=query $3=want
 scenario_preflight() { # $1=scenario name
   cargo build -q -p wire-client || { echo "[orch] wire-client build failed" >&2; exit 1; }
   scall debug_seed_scenario_fixtures || true
+  # Re-arm the creature tick per scenario (2026-07-18): across a full ~40-test suite run the shared
+  # node's combat processing degrades and combat-dependent tests intermittently see no mob swing /
+  # no projectile impact (each PASSES standalone). A fresh tick schedule before each scenario is a
+  # cheap robustness floor for the shared-state suite. See 270.
+  scall debug_rearm_creature_tick || true
   GINGER=$(char_guid Ginger)
   [ -z "$GINGER" ] && timeout 60 "$WC" TEST test123 Ginger logout >/dev/null 2>&1 && GINGER=$(char_guid Ginger)
   [ -z "$GINGER" ] && { echo "[orch] no Ginger character" >&2; exit 1; }
