@@ -86,6 +86,11 @@ for _ in $(seq 1 30); do
   # silently lie — the module log showed the defend row ARMED while this assert read 0).
   R=$(sqlq "SELECT attacker_guid, target_guid FROM game_melee_attack WHERE attacker_guid = $BOT" | grep -c "${WOLF:-nomatch}")
   [ "${R:-0}" -ge 1 ] && { DEFENDED=1; break; }
+  # 270: RE-POKE each iteration. Under full-suite commit-stream load a single fire-and-forget
+  # debug_apply_damage can silently drop (scall discards its result), so the one on_damage_taken the
+  # defend brain reads never fires → the row is never armed. Re-poking retries it (damage clamps to
+  # 1 HP, never lethal) so a quiet moment lands the trigger. (Flaked run 3, 2026-07-18.)
+  scall debug_apply_damage "$BOT" 3 "$WOLF"
   sleep 1
 done
 assert_eq "fight: defend hook armed the bot's melee row vs its attacker" "$DEFENDED" "1"

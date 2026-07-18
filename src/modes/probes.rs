@@ -322,7 +322,17 @@ fn walkmelee(
     c.set_recv_timeout(Duration::from_millis(300))?;
     let t0 = Instant::now();
     let mut own_swing = false;
-    while t0.elapsed() < Duration::from_secs(8) && !own_swing {
+    // 270: 20s (was 8s) + periodic re-send of CMSG_ATTACKSWING. Under full-suite commit-stream load the
+    // walk_to heartbeat stream + the starved tick_melee can leave the first ATTACKSWING arriving before
+    // the server has processed the walk (char still out of the 5yd reach → the swing never arms). A
+    // wider window lets the walk land, and re-sending ATTACKSWING every ~2s re-attempts the arm once the
+    // position catches up. This is the load-timing flake class (work-item 270), not a walk_to bug.
+    let mut last_swing_send = Instant::now();
+    while t0.elapsed() < Duration::from_secs(20) && !own_swing {
+        if last_swing_send.elapsed() >= Duration::from_secs(2) {
+            let _ = c.send(&CMSG_ATTACKSWING { guid: Guid::new(mob) });
+            last_swing_send = Instant::now();
+        }
         if let Ok(Smsg::SMSG_ATTACKERSTATEUPDATE(a)) = c.recv() {
             if a.attacker.guid() == c.self_guid {
                 own_swing = true;
