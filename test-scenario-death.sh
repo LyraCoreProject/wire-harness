@@ -59,7 +59,9 @@ if [ -f "$DEATH_READY" ]; then
   purge_creatures_near "$PAD_X" "$PAD_Y" 30 "$WOLF" # keep the fixture wolf; clear real strays
   scall debug_engage "$WOLF" "$GINGER" # the wolf lands the real killing blow
   DEAD=""
-  for _ in $(seq 1 30); do
+  # 270: 45s (was 30s) — absorbs a congestion-slowed melee tick + the OOC-regen amplifier (a delayed
+  # first swing lets Ginger regen off 1 HP before enter_combat stops it, needing more 1-3dmg swings).
+  for _ in $(seq 1 45); do
     DEAD=$(sqlq "SELECT dead FROM game_world_entity WHERE guid = $GINGER" | grep -c true)
     [ "$DEAD" = "1" ] && break
     sleep 1

@@ -103,7 +103,11 @@ fn main() -> Result<()> {
 
     // The completion fires ~cast_time later; read on a wall-clock deadline (the busy world
     // floods packets, so a fixed count can elapse before 1.7s).
-    let mut deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    // 270: 12s (was 5s). Shadow Bolt sends no COOLDOWN packet, so the loop drains the FULL deadline
+    // unless it breaks on the impact log (below); the projectile impact is a one-shot ScheduleAt::Time
+    // reducer firing ~2.1s in that can slip past 5s under full-suite commit-stream congestion. 12s
+    // absorbs the congestion; the success path still exits ~2.5s via the break on the damage log.
+    let mut deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
     while std::time::Instant::now() < deadline {
         let m = match c.recv() {
             Ok(m) => m,
@@ -127,6 +131,13 @@ fn main() -> Result<()> {
                 dmg = Some(d.damage);
                 if let Some(t0) = go_at {
                     dmg_delay_ms = Some(t0.elapsed().as_millis());
+                }
+                // 270: success-path early exit. Shadow Bolt sends no COOLDOWN (the break above never
+                // fires), so without this the loop drained the full 12s deadline every run. START/GO
+                // both precede the impact log and are already recorded; only interrupt-mode needs to
+                // keep draining for pushback/DELAYED, so break in non-interrupt mode.
+                if !expect_interrupt {
+                    break;
                 }
             }
             Smsg::SMSG_SPELL_FAILURE(f) => {
