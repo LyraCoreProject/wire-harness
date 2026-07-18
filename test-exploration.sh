@@ -50,6 +50,31 @@ else
   echo "  FAIL fog restore: field 1128=16 not relayed on login"; echo "$FOGOUT" | tail -3; FAILED=1
 fi
 
+# WIRE ("Discovered" popup): SMSG_EXPLORATION_EXPERIENCE (0x01F8 = 504) is the one-shot "Discovered: <area>"
+# text. Unlike the idempotent fog VALUES it must fire ONLY on a LIVE discovery, never replay on login (else
+# every already-explored area re-pops) — the gateway's initial-skip set (on_explored_insert). Body =
+# area_id u32 LE + experience u32 LE, so Goldshire = (87, 70) at L5.
+# NEGATIVE (row still present from the fog check): a fresh login must NOT replay the popup.
+if timeout 20 "$WC" TEST test123 Ginger opcode-watch 504 8 2>&1 | grep -q 'OPCODE-WATCH PASS'; then
+  echo "  FAIL Discovered popup replayed on login (initial-skip broken)"; FAILED=1
+else
+  echo "  OK   Discovered popup skipped on login (initial-skip holds)"
+fi
+# POSITIVE: clear the row, connect+watch, then fire a fresh discovery from outside → popup must arrive.
+sqlq "DELETE FROM game_character_explored WHERE character_guid = $GINGER" >/dev/null
+POPOUT=$(mktemp)
+timeout 30 "$WC" TEST test123 Ginger opcode-watch 504 20 >"$POPOUT" 2>&1 &
+POPID=$!
+sleep 5
+scall debug_explore_at "$GINGER" 0 "$GOLDSHIRE_X" "$GOLDSHIRE_Y"
+wait $POPID
+if grep -q 'OPCODE-WATCH PASS' "$POPOUT" && grep -q 'body\[0..8\] = (87, 70)' "$POPOUT"; then
+  echo "  OK   Discovered popup on live discovery (area 87, +70 XP)"
+else
+  echo "  FAIL Discovered popup not relayed on live discovery"; tail -3 "$POPOUT"; FAILED=1
+fi
+rm -f "$POPOUT"
+
 # teardown
 sqlq "DELETE FROM game_character_explored WHERE character_guid = $GINGER" >/dev/null
 scall debug_set_level "$GINGER" 2

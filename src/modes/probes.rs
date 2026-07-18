@@ -49,6 +49,7 @@ pub(crate) fn try_dispatch(
         "petsummon" => petsummon(c, args, mcx)?,
         "atwar" => atwar(c, args, mcx)?,
         "values-watch" => values_watch(c, args, mcx)?,
+        "opcode-watch" => opcode_watch(c, args, mcx)?,
         "walkmelee" => walkmelee(c, args, mcx)?,
         "casttime" => casttime(c, args, mcx)?,
         "name-query" => name_query(c, args, mcx)?,
@@ -269,6 +270,34 @@ fn init_factions(
 }
 
 // ---- values-watch <guid> <field_index> [seconds]: drain raw frames and PASS as soon as an
+// Generic raw-opcode watcher: pass when opcode <opcode> (decimal) arrives within [secs]. Prints the
+// first 8 body bytes as (u32, u32) — handy for SMSG_EXPLORATION_EXPERIENCE (0x01F8=504: area_id, xp).
+fn opcode_watch(
+    c: &mut WireClient,
+    args: &mut dyn Iterator<Item = String>,
+    _mcx: &ModeCtx<'_>,
+) -> Result<()> {
+    use std::time::{Duration, Instant};
+    let want: u16 = args.next().and_then(|s| s.parse().ok()).expect("usage: opcode-watch <opcode-decimal> [secs]");
+    let secs: u64 = args.next().and_then(|s| s.parse().ok()).unwrap_or(15);
+    c.set_recv_timeout(Duration::from_millis(300))?;
+    let t0 = Instant::now();
+    while t0.elapsed() < Duration::from_secs(secs) {
+        if let Ok((op, body)) = c.recv_raw() {
+            if op == want {
+                if body.len() >= 8 {
+                    let a = u32::from_le_bytes([body[0], body[1], body[2], body[3]]);
+                    let e = u32::from_le_bytes([body[4], body[5], body[6], body[7]]);
+                    println!("[opcode] opcode={want:#x} body[0..8] = ({a}, {e})");
+                }
+                println!("[wire] OPCODE-WATCH PASS \u{2713} opcode {want:#x} arrived");
+                return Ok(());
+            }
+        }
+    }
+    bail!("opcode-watch: opcode {want:#x} did not arrive within {secs}s");
+}
+
 // SMSG_UPDATE_OBJECT VALUES block for <guid> carries <field_index> (testing-hardening §3.1 — the
 // generic live-field-change assert; prints every matching (index, value) seen on the way).
 fn values_watch(
