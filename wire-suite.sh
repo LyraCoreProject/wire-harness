@@ -295,6 +295,8 @@ t_walkmelee() { bash tools/wire-client/test-walkmelee.sh; }
 t_packet_lint() { bash tools/wire-client/test-packet-lint.sh; }
 # ---- warlock pet command bar (CMSG_PET_ACTION): each bar action sets state + pass_pet honors it. ----
 t_pet_control() { bash tools/wire-client/test-pet-control.sh; }
+# ---- exploration/discovery XP (200): entering a fresh subzone awards discovery XP once (+ dedup). ----
+t_exploration() { bash tools/wire-client/test-exploration.sh; }
 
 # ---------- the run ----------
 ALL_TESTS=(
@@ -304,7 +306,7 @@ ALL_TESTS=(
   persist_health repop_delay respec ding combat_regen cast_flow cast_interrupt ghost_reveal
   init_factions levelup_info vendor_reaction atwar packet_lint walkmelee content_audit real_quest
   scenario_quest scenario_vendor scenario_train scenario_weaponmaster scenario_death
-  aoi_relay soak playerbots pet_control group party_brains bot_goals class_roles
+  aoi_relay soak playerbots pet_control exploration group party_brains bot_goals class_roles
 )
 START=$(date +%s)
 for t in "${ALL_TESTS[@]}"; do run_test "$t"; done
