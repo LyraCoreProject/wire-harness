@@ -38,8 +38,19 @@ XP2=$(sql1 "SELECT xp FROM game_world_entity WHERE guid = $GINGER")
 chk "dedup: no second store row" "$N2" "1"
 chk "dedup: no second XP award" "$((XP2-XP1))" "0"
 
-# teardown
 stay_stop
+
+# WIRE (fog restore): a fresh login relays the PLAYER_EXPLORED_ZONES word for the explored area, so the
+# client's map fog is correct on login. Goldshire area_bit 548 → word 17 → field 1111+17=1128, and
+# bit 548%32=4 → value 16. (This is also the live fog-clear path — the same on_insert relay.)
+FOGOUT=$(timeout 35 "$WC" TEST test123 Ginger values-watch "$GINGER" 1128 20 2>&1)
+if grep -q 'VALUES-WATCH PASS' <<<"$FOGOUT" && grep -q 'field 1128 = 16' <<<"$FOGOUT"; then
+  echo "  OK   fog restore: PLAYER_EXPLORED_ZONES field 1128 = 16 (Goldshire bit relayed on login)"
+else
+  echo "  FAIL fog restore: field 1128=16 not relayed on login"; echo "$FOGOUT" | tail -3; FAILED=1
+fi
+
+# teardown
 sqlq "DELETE FROM game_character_explored WHERE character_guid = $GINGER" >/dev/null
 scall debug_set_level "$GINGER" 2
 if [ "$FAILED" -eq 0 ]; then echo "[exploration] PASS"; exit 0; else echo "[exploration] FAIL"; exit 1; fi
