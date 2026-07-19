@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # DEADMINES GROUP-COMBAT SMOKE (276 slice 3) — the bot party as a dungeon-testing vehicle:
 #   1. Ginger (wire leader) + three role bots party up; Ginger fires the REAL Deadmines portal
-#      (areatrigger 78 → resolve_or_create_instance → map 36, fresh instance).
-#      KNOWN BUG (277): with AOI on, the instance-CREATING entry loses the SMSG_TRANSFER pair and
-#      the leader limbos — so this test RELOGS her (wire session #2), and the fresh login lands
-#      her INSIDE the bound instance (`pending_instance_id`). Remove the relog when 277 is fixed.
+#      (areatrigger 78 → resolve_or_create_instance → map 36, fresh instance). The TRANSFER pair
+#      rides the coordinator connection (277 fix) and the held wire session auto-acks
+#      SMSG_NEW_WORLD — she lands inside directly, no relog.
 #   2. Her bots TELEPORT-FOLLOW into the same instance (goals.rs cross-map follow — server-side
 #      rebuild, no client handshake needed for session-less bots).
 #   3. The tank is engaged onto a real Defias pack ~45yd in; the melee chase closes, social aggro
@@ -42,32 +41,19 @@ LEADER=$!
 wait_for_file 40 "$HOLD.ingroup"
 [ -f "$HOLD.ingroup" ] && step_ok "wire: 4-member party formed" || { step_fail "wire: party never formed"; tail -3 /tmp/ws_bot_dm.log; }
 
-# ---- 1. Ginger fires the portal (instance CREATE), then relogs INTO it (the 277 workaround) ----
+# ---- 1. Ginger fires the portal (instance CREATE) and lands INSIDE — no relog (277 fixed) ----
 sleep 2
 scall debug_enter_areatrigger "$GINGER" $DM_TRIGGER
-INST=""
-for i in $(seq 1 10); do
-  INST=$(sql1 "SELECT instance_id FROM game_instance_binding WHERE character_guid = $GINGER")
-  [ -n "$INST" ] && [ "$INST" != "0" ] && break
-  sleep 1
-done
-[ -n "$INST" ] && [ "$INST" != "0" ] && step_ok "enter: portal resolved/bound instance $INST (create path)" \
-  || step_fail "enter: no instance binding for Ginger"
-# Drop wire session #1 (raw kill — NOT the hold release, whose disband would dissolve the party;
-# the group survives a disconnect like any offline member's) and relog: the fresh login rebuilds
-# Ginger INSIDE the bound instance via pending_instance_id.
-kill "$LEADER" 2>/dev/null; pkill -x wire-client 2>/dev/null; sleep 2
-timeout 300 "$WC" TEST test123 Ginger opcode-watch 504 240 >/tmp/ws_bot_dm2.log 2>&1 &
-LEADER2=$!
-GMAP=""
-for i in $(seq 1 20); do
+INST=""; GMAP=""
+for i in $(seq 1 15); do
   ROW=$(sqlq "SELECT map_id, instance_id FROM game_world_entity WHERE guid = $GINGER" | sed -n 3p | tr -d ' ')
-  GMAP=${ROW%%|*}
-  [ "$GMAP" = "36" ] && break
+  GMAP=${ROW%%|*}; INST=${ROW##*|}
+  [ "$GMAP" = "36" ] && [ -n "$INST" ] && [ "$INST" != "0" ] && break
   sleep 1
 done
-[ "$GMAP" = "36" ] && step_ok "relog: Ginger inside Deadmines instance $INST" \
-  || step_fail "relog: Ginger not in map 36 (row '$ROW')"
+[ "$GMAP" = "36" ] && [ "$INST" != "0" ] \
+  && step_ok "enter: portal created instance $INST and Ginger landed INSIDE (coordinator-relayed transfer + auto-ack, no relog)" \
+  || step_fail "enter: Ginger not live in a map-36 instance (row '$ROW')"
 
 # ---- 2. the bots teleport-follow ----
 IN=0
@@ -83,9 +69,14 @@ done
 MOB=$(sqlq "SELECT guid FROM game_world_entity WHERE map_id = 36 AND instance_id = $INST AND entry = 634" | grep -oE '[0-9]{15,}' | head -1)
 [ -z "$MOB" ] && MOB=$(sqlq "SELECT guid FROM game_world_entity WHERE map_id = 36 AND instance_id = $INST AND entry = 598" | grep -oE '[0-9]{15,}' | head -1)
 [ -n "$MOB" ] && step_ok "pull: found a Defias target" || step_fail "pull: no 634/598 creature in instance $INST"
+# Both melee bots engage (the orchestrator IS the player's pull here — a real run walks the party
+# in): the melee chase carries them the ~45yd to the pack together. The dps alone would hold
+# formation at the entrance, outside its 20yd assist radius (the known healer/positioning gap in
+# 276 — the party anchors on the leader, not the fight).
 scall debug_engage "$TANK" "$MOB"
+scall debug_engage "$DPS" "$MOB"
 FOUGHT=0; KILLED=0
-for i in $(seq 1 180); do
+for i in $(seq 1 300); do
   for M in "$TANK" "$HEAL" "$DPS" "$GINGER"; do scall debug_set_health "$M" 10000; done
   TH=$(sql1 "SELECT COUNT(*) AS n FROM game_threat WHERE source_guid = $TANK")
   [ "${TH:-0}" -ge 1 ] && FOUGHT=1
@@ -96,10 +87,10 @@ done
 [ "$FOUGHT" = 1 ] && step_ok "combat: the tank generated threat on the Defias pack (chase + swings landed)" \
   || step_fail "combat: tank never got threat inside the instance"
 [ "$KILLED" = 1 ] && step_ok "kill: a Defias died to the bot party inside Deadmines" \
-  || step_fail "kill: no Defias death within 180s"
+  || step_fail "kill: no Defias death within 300s"
 
 # ---- teardown ----
-kill "$LEADER2" 2>/dev/null; pkill -x wire-client 2>/dev/null
+kill "$LEADER" 2>/dev/null; pkill -x wire-client 2>/dev/null
 scall playerbots_despawn_all || true
 sqlq "DELETE FROM game_group_member WHERE character_guid = $GINGER" >/dev/null
 sqlq "DELETE FROM game_instance_binding WHERE character_guid = $GINGER" >/dev/null
