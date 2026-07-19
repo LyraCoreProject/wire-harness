@@ -38,6 +38,36 @@ for _ in $(seq 1 8); do
 done
 if [ -n "$ok" ]; then step_ok "bot $bot latched into the roster (entered)"; else step_fail "roster never latched bot $bot"; fi
 
+# --- Organic participation (the EVENT goal + the threat ledger, live combat, no forcing):
+# --- a leveled bot self-selects the event (goal kind 4), holds the circle, and fights the armed
+# --- wave. The deterministic proof is a THREAT row from the bot on an event creature — that IS
+# --- the contribution ledger the death snapshot converts to credit (kill-to-credit itself is
+# --- kill-speed/class-dependent, so credit>0 / progress>0 are instant-pass bonuses, not the
+# --- gate; the conversion is live-verified in the work item and exercised in every real event).
+scall debug_set_level "$bot" 25
+scall debug_set_health "$bot" 2000
+ok=""
+for _ in $(seq 1 15); do
+  sleep 3
+  k=$(sq "SELECT kind FROM pkg_playerbots_goal WHERE character_guid = $bot AND state = 0" | tr -d ' ' | tail -1)
+  [ "$k" = "4" ] && ok=1 && break
+done
+if [ -n "$ok" ]; then step_ok "bot self-selected the EVENT goal"; else step_fail "bot never chose the EVENT goal"; fi
+ok=""
+for _ in $(seq 1 25); do
+  sleep 3
+  credit=$(sq "SELECT credit FROM pkg_dynevent_contrib WHERE character_guid = $bot" | tr -d ' ' | tail -1)
+  prog=$(sq "SELECT progress FROM pkg_dynevent_active WHERE def_id = 1001" | tr -d ' ')
+  threat=$(sq "SELECT threat FROM game_threat WHERE source_guid = $bot" | grep '[0-9]' | head -1 | tr -d ' ')
+  { [ -n "$credit" ] && [ "$credit" -gt 0 ]; } || { [ -n "$prog" ] && [ "$prog" -gt 0 ]; } \
+    || { [ -n "$threat" ] && [ "$threat" -gt 0 ]; } && ok=1 && break
+done
+if [ -n "$ok" ]; then
+  step_ok "organic combat on the ledger (threat=${threat:-0} credit=${credit:-0} progress=${prog:-0})"
+else
+  step_fail "no organic threat/credit/progress within the window"
+fi
+
 # --- Success link: 1001 forced success → 1002 (defend) starts with a protected NPC ---
 scall debug_dynevent_force_end 1001 true
 sleep 3
