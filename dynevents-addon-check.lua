@@ -43,6 +43,9 @@ WorldMapDetailFrame = mkframe()
 WorldMapFrame = mkframe()
 WorldMapFrame:Show() -- so the OnUpdate pin-refresh branch is exercised
 GameTooltip = mkframe()
+Minimap = mkframe()
+GetPlayerMapPosition = function() return 0.42, 0.66 end -- ~Goldshire on the Elwynn map
+SetMapToCurrentZone = function() end
 SlashCmdList = {}
 UIErrorsFrame = { AddMessage = function(self, msg) table.insert(toasts, msg) end }
 DEFAULT_CHAT_FRAME = { AddMessage = function(self, msg) table.insert(chats, msg) end }
