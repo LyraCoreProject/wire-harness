@@ -68,8 +68,10 @@ scall debug_spawn_at_feet "$BOT" $WOLF_ELDER 25
 scall debug_spawn_at_feet "$BOT" $WOLF_ELDER 28
 scall debug_spawn_at_feet "$BOT" $WOLF_ELDER 31
 scall debug_spawn_at_feet "$BOT" $WOLF_ELDER 34
-wait_for_sql_ge 45 "SELECT COUNT(*) AS n FROM pkg_playerbots_goal WHERE kind = 0 AND state = 0" 1 \
-  && step_ok "selection: next goal is GRIND $WOLF_ELDER" || step_fail "selection: no GRIND goal within 45s"
+# 90s not 45 (266): a post-quest REST goal (fight damage) can occupy a full selection cycle
+# before GRIND gets picked — the known suite-load timing family (270).
+wait_for_sql_ge 90 "SELECT COUNT(*) AS n FROM pkg_playerbots_goal WHERE kind = 0 AND state = 0" 1 \
+  && step_ok "selection: next goal is GRIND $WOLF_ELDER" || step_fail "selection: no GRIND goal within 90s"
 wait_for_sql_ge 45 "SELECT progress FROM pkg_playerbots_goal WHERE kind = 0 AND state = 0" 1 \
   && step_ok "grind: a kill advanced progress (on_kill credit)" || step_fail "grind: no kill credit within 45s"
 

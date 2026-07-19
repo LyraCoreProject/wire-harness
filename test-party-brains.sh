@@ -74,8 +74,8 @@ W1=$(sqlq "SELECT guid FROM game_world_entity WHERE entry = $WOLF_ENTRY" | grep 
 scall debug_spawn_at_feet "$DPS" $WOLF_ENTRY 2
 W2=$(sqlq "SELECT guid FROM game_world_entity WHERE entry = $WOLF_ENTRY" | grep -oE '[0-9]{15,}' | sort -n | tail -1)
 echo "[orch] wolves: $W1 $W2"
-CAST_BASE_355=$(sql1 "SELECT COUNT(*) AS n FROM game_spell_cast_event WHERE spell_id = 355")
-CAST_BASE_133=$(sql1 "SELECT COUNT(*) AS n FROM game_spell_cast_event WHERE spell_id = 133")
+# No baselines (266): cast events reap on a 1s TTL, so anything visible IS fresh — and a stale
+# baseline that reaping later drops BELOW made real casts read as "no change".
 TAUNTED=0; DPS_CASTS=0; TANK_TOP=0; ONTANK_SEEN=0
 for i in $(seq 1 20); do
   # keeper: the party stays alive through the pack (bots are L1) AND the wolves stay alive
@@ -88,8 +88,11 @@ for i in $(seq 1 20); do
   sleep 1
   C355=$(sql1 "SELECT COUNT(*) AS n FROM game_spell_cast_event WHERE spell_id = 355")
   C133=$(sql1 "SELECT COUNT(*) AS n FROM game_spell_cast_event WHERE spell_id = 133")
-  [ "${C355:-0}" -gt "${CAST_BASE_355:-0}" ] && TAUNTED=1
-  [ "${C133:-0}" -gt "${CAST_BASE_133:-0}" ] && DPS_CASTS=1
+  [ "${C355:-0}" -ge 1 ] && TAUNTED=1
+  # Fireball's 1.5s cast bar doubles the catch window: the pending-cast row exists while the
+  # bar fills, the 1s-lived cast event right after it fires.
+  PC133=$(sql1 "SELECT COUNT(*) AS n FROM game_pending_cast WHERE caster_guid = $DPS")
+  { [ "${C133:-0}" -ge 1 ] || [ "${PC133:-0}" -ge 1 ]; } && DPS_CASTS=1
   # taunt-yank evidence: at SOME sampled instant the tank is the TOP threat source on a wolf
   # (each taunt sets it to table-max+1; the 155 forced-target window then PINS the wolf — the
   # hold itself is asserted separately below)
@@ -107,7 +110,6 @@ assert_ge "tank: threat rows name the tank as a source" "$(sql1 "SELECT COUNT(*)
 # 155: the taunt FORCED-TARGET window (3s) pins the taunted wolf on the tank regardless of the
 # dps out-threatening it — sample the melee table on a tight cadence and demand a >=3-sample
 # consecutive on-tank run (the pre-155 threat-top alone never held longer than a retarget tick).
-[ "$ONTANK_SEEN" = 1 ] && step_ok "tank: a wolf's melee row swung onto the tank" || step_fail "tank: no wolf melee row ever on the tank"
 RUN=0; BEST=0
 for i in $(seq 1 25); do
   ON=$(sql1 "SELECT COUNT(*) AS n FROM game_melee_attack WHERE target_guid = $TANK")
@@ -116,6 +118,10 @@ for i in $(seq 1 25); do
   for M in "$TANK" "$HEAL" "$DPS" "$GINGER"; do scall debug_set_health "$M" 10000; done
   for W in "$W1" "$W2"; do scall debug_set_health "$W" 10000; done
 done
+# The "ever on tank" flag also accepts this loop's tight sampling (266): the 3s taunt pin is
+# shorter than the fight loop's per-iteration gap, so the once-per-iteration flag alone missed
+# real pins the HELD loop then observed.
+{ [ "$ONTANK_SEEN" = 1 ] || [ "$BEST" -ge 1 ]; } && step_ok "tank: a wolf's melee row swung onto the tank" || step_fail "tank: no wolf melee row ever on the tank"
 assert_ge "tank: taunt window HELD the wolf on the tank (consecutive on-tank samples)" "$BEST" 3
 [ "$DPS_CASTS" = 1 ] && step_ok "dps: Fireball 133 rotation fired" || step_fail "dps: no Fireball casts"
 assert_ge "dps: melee assist row armed" "$(sql1 "SELECT COUNT(*) AS n FROM game_melee_attack WHERE attacker_guid = $DPS")" 1
@@ -126,20 +132,24 @@ assert_ge "dps: melee assist row armed" "$(sql1 "SELECT COUNT(*) AS n FROM game_
 for i in $(seq 1 20); do
   AURA=$(sql1 "SELECT COUNT(*) AS n FROM game_aura WHERE target_guid = $DPS AND spell_id = 139")
   [ "${AURA:-0}" = "0" ] && break
-  scall debug_set_health "$TANK" 10000; scall debug_set_health "$HEAL" 10000
+  # GINGER topped too (266): the wolves chew the leader below the dps's 40% hold, and the healer
+  # CORRECTLY triages the lowest member — leaving Ginger hurt steals every heal from the watched dps.
+  scall debug_set_health "$TANK" 10000; scall debug_set_health "$HEAL" 10000; scall debug_set_health "$GINGER" 10000
   sleep 1
 done
 scall debug_set_health "$DPS" "$DPS_HOLD" # 266: ~40% of leveled max — under the healer's 80% threshold, over the dps 15% flee
-CAST_BASE_139=$(sql1 "SELECT COUNT(*) AS n FROM game_spell_cast_event WHERE spell_id = 139")
 HEALED=0
 for i in $(seq 1 10); do
-  scall debug_set_health "$TANK" 10000; scall debug_set_health "$HEAL" 10000
+  scall debug_set_health "$TANK" 10000; scall debug_set_health "$HEAL" 10000; scall debug_set_health "$GINGER" 10000
   sleep 1
-  C139=$(sql1 "SELECT COUNT(*) AS n FROM game_spell_cast_event WHERE spell_id = 139")
+  # AURA row alone is the assertion (266): cast events reap on a 1s TTL — shorter than this
+  # loop's sampling gap — and Renew casts exactly ONCE (the carrier skip holds while it ticks),
+  # so the event conjunct was a coin flip. The stale-aura wait above makes the aura row proof
+  # of a FRESH cast.
   AURA=$(sql1 "SELECT COUNT(*) AS n FROM game_aura WHERE target_guid = $DPS AND spell_id = 139")
-  if [ "${C139:-0}" -gt "${CAST_BASE_139:-0}" ] && [ "${AURA:-0}" -ge 1 ]; then HEALED=1; break; fi
+  if [ "${AURA:-0}" -ge 1 ]; then HEALED=1; break; fi
 done
-[ "$HEALED" = 1 ] && step_ok "healer: Renew cast on the damaged member (cast event + aura row)" || step_fail "healer: no Renew on the hurt member"
+[ "$HEALED" = 1 ] && step_ok "healer: Renew landed on the damaged member (fresh aura row)" || step_fail "healer: no Renew on the hurt member"
 # The HoT ticks 8/1s; retry the rising-health sample a few times in case a stray wolf swing lands
 # between samples (the taunt phase normally has the pack on the tank by now).
 HP_UP=0

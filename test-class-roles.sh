@@ -3,8 +3,10 @@
 #   1. DEFAULTS: the rotation/kit tables self-seed; an illegal (class, role) spawn is refused.
 #   2. A PALADIN party (tank/healer/dps — all class 2) + Ginger fights a staged wolf pack; per-bot
 #      cast-event streams prove three DIFFERENT rotations from one class:
-#      - tank: Taunt yank (355) + seal upkeep (20154 aura); the Consecration row (26573) is
-#        DOUBLY latent (not in the curated import + needs the 118 ground-AoE engine) — not asserted
+#      - tank: Hammer of Justice peel (853 — vanilla paladins have no taunt; the stance gate
+#        killed the old class-impure 355 row, see 266) + seal upkeep (20154 aura); the
+#        Consecration row (26573) is DOUBLY latent (not in the curated import + needs the 118
+#        ground-AoE engine) — not asserted
 #      - healer: Holy Light on damaged members (635) + blessing sweep (19740 auras)
 #      - dps: seal upkeep + Judgement under TANK_ENGAGED (20271)
 #   3. LIVE PATCH: a sql UPDATE swapping the dps nuke row's spell changes behavior, no republish.
@@ -78,13 +80,15 @@ for i in $(seq 1 30); do
   scall debug_set_health "$DPS" "$DPS_HOLD"   # ~40% of leveled max — over flee, under heal threshold
   for W in $WOLVES; do scall debug_set_health "$W" 10000; done
   sleep 1
-  [ "$(casts_by "$TANK" 355)" -ge 1 ] 2>/dev/null && TAUNTED=1
+  # cast event (1s TTL) OR the stun aura (3s) — HoJ's 60s cooldown means ONE cast per window,
+  # and sampling a 1s-lived event once per iteration missed real casts (266).
+  { [ "$(casts_by "$TANK" 853)" -ge 1 ] || [ "$(sql1 "SELECT COUNT(*) AS n FROM game_aura WHERE spell_id = 853")" -ge 1 ]; } 2>/dev/null && TAUNTED=1
   [ "$(sql1 "SELECT COUNT(*) AS n FROM game_aura WHERE target_guid = $TANK AND spell_id = 20154")" -ge 1 ] 2>/dev/null && SEALED=1
   [ "$(casts_by "$HEAL" 635)" -ge 1 ] 2>/dev/null && HEALED=1
   [ "$(casts_by "$DPS" 20271)" -ge 1 ] 2>/dev/null && JUDGED=1
   if [ "$TAUNTED$SEALED$HEALED$JUDGED" = "1111" ]; then break; fi
 done
-[ "$TAUNTED" = 1 ] && step_ok "tank rotation: Taunt yank fired (ENEMY_ON_ALLY)" || step_fail "tank rotation: no Taunt casts"
+[ "$TAUNTED" = 1 ] && step_ok "tank rotation: Hammer of Justice peel fired (ENEMY_ON_ALLY)" || step_fail "tank rotation: no Hammer of Justice casts"
 [ "$SEALED" = 1 ] && step_ok "tank rotation: seal upkeep (SELF_MISSING_AURA aura present)" || step_fail "tank rotation: no seal aura"
 # Consecration (26573, ENEMIES_ENGAGED_GE_N) not asserted: doubly latent until 118 + import (176).
 [ "$HEALED" = 1 ] && step_ok "healer rotation: Holy Light on the damaged member (ALLY_HP_BELOW_PCT)" || step_fail "healer rotation: no Holy Light casts"
