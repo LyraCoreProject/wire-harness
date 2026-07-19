@@ -40,6 +40,9 @@ CreateFrame = function() return mkframe() end
 UIParent = mkframe()
 WorldMapButton = mkframe()
 WorldMapDetailFrame = mkframe()
+WorldMapFrame = mkframe()
+WorldMapFrame:Show() -- so the OnUpdate pin-refresh branch is exercised
+SlashCmdList = {}
 UIErrorsFrame = { AddMessage = function(self, msg) table.insert(toasts, msg) end }
 DEFAULT_CHAT_FRAME = { AddMessage = function(self, msg) table.insert(chats, msg) end }
 GetTime = function() return 100 end
@@ -82,6 +85,21 @@ expect(chat_has("Clear Fargodeep Mine") and chat_has("has begun"), "event.start 
 -- 2. event.state update parses (progress moves; name with spaces survives the pipe split)
 fire("CHAT_MSG_ADDON", "STC", "v1|event.state|1|1/1|1001|Clear Fargodeep Mine|0|3|10|180|2|-9758.0|191.7|75.0|1")
 expect(true, "event.state update handled without error")
+
+-- 2b. every OnUpdate/OnEvent script runs with live state (catches forward-reference nils —
+-- the map-open pin refresh called update_pins before its local existed, a real crash).
+arg1 = 1.5
+local upd_ok = true
+for _, f in ipairs(frames) do
+  if f.scripts.OnUpdate then
+    local ok = pcall(f.scripts.OnUpdate)
+    upd_ok = upd_ok and ok
+  end
+end
+expect(upd_ok, "OnUpdate handlers run clean with events tracked")
+
+-- 2c. the /de diagnosis command runs clean
+expect(pcall(SlashCmdList["DYNEVENTS"]), "/de debug command runs clean")
 
 -- 3. event.you medal preview
 fire("CHAT_MSG_ADDON", "STC", "v1|event.you|2|1/1|1001|612|2")
