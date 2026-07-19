@@ -39,7 +39,7 @@ use wow_world_messages::vanilla::{
     CMSG_AUTH_SESSION, CMSG_CAST_SPELL, CMSG_CHAR_CREATE, CMSG_CHAR_DELETE, CMSG_CHAR_ENUM, CMSG_GOSSIP_HELLO,
     CMSG_ITEM_QUERY_SINGLE, CMSG_LOGOUT_REQUEST, CMSG_MESSAGECHAT, CMSG_MESSAGECHAT_ChatType,
     CMSG_NPC_TEXT_QUERY, CMSG_PLAYED_TIME, CMSG_PLAYER_LOGIN, CMSG_REPOP_REQUEST, CMSG_SET_SELECTION, CMSG_WHO,
-    SMSG_AUTH_RESPONSE,
+    MSG_MOVE_WORLDPORT_ACK, SMSG_AUTH_RESPONSE,
 };
 use wow_world_messages::vanilla::ClientMessage;
 use wow_world_messages::Guid;
@@ -291,6 +291,14 @@ impl WireClient {
             match WorldSmsg::read_encrypted(&mut self.stream, &mut self.dec) {
                 Ok(m) => {
                     self.note_guids(&m);
+                    // The real 5875 client answers a cross-map transfer (SMSG_NEW_WORLD after
+                    // TRANSFER_PENDING) with MSG_MOVE_WORLDPORT_ACK once its load screen ends —
+                    // without the ack the server never rebuilds the entity and the character is
+                    // limbo'd. Reflex lives HERE in the one decode point so EVERY mode survives
+                    // being ported (a held party leader entering an instance, 276).
+                    if matches!(m, WorldSmsg::SMSG_NEW_WORLD(_)) {
+                        let _ = self.send(&MSG_MOVE_WORLDPORT_ACK {});
+                    }
                     return Ok(m);
                 }
                 Err(e) => {
