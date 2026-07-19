@@ -50,6 +50,7 @@ pub(crate) fn try_dispatch(
         "atwar" => atwar(c, args, mcx)?,
         "values-watch" => values_watch(c, args, mcx)?,
         "opcode-watch" => opcode_watch(c, args, mcx)?,
+        "addon-ping" => addon_ping(c, args, mcx)?,
         "walkmelee" => walkmelee(c, args, mcx)?,
         "casttime" => casttime(c, args, mcx)?,
         "name-query" => name_query(c, args, mcx)?,
@@ -272,6 +273,51 @@ fn init_factions(
 // ---- values-watch <guid> <field_index> [seconds]: drain raw frames and PASS as soon as an
 // Generic raw-opcode watcher: pass when opcode <opcode> (decimal) arrives within [secs]. Prints the
 // first 8 body bytes as (u32, u32) — handy for SMSG_EXPLORATION_EXPERIENCE (0x01F8=504: area_id, xp).
+/// addon-ping [payload] — the 184 bridge round-trip: fake `SendAddonMessage("STC",
+/// "v1|ping|0|1/1|<payload>", "WHISPER", self)` byte-for-byte via `send_raw` (gtker can't encode
+/// LANG_ADDON), then raw-watch for the addon-language `SMSG_MESSAGECHAT` whose text carries the
+/// pong envelope echoing the payload. PASSes only on a full envelope match.
+fn addon_ping(
+    c: &mut WireClient,
+    args: &mut dyn Iterator<Item = String>,
+    _mcx: &ModeCtx<'_>,
+) -> Result<()> {
+    use std::time::Duration;
+    let payload = args.next().unwrap_or_else(|| "hello".to_string());
+    let text = format!("STC\tv1|ping|0|1/1|{payload}");
+    // CMSG_MESSAGECHAT (0x095) body: chat_type u32 (6 = Whisper), language u32 (LANG_ADDON),
+    // target CString, message CString — the shape the real client emits for SendAddonMessage.
+    let mut body = Vec::new();
+    body.extend_from_slice(&6u32.to_le_bytes());
+    body.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+    body.extend_from_slice(b"Self\0");
+    body.extend_from_slice(text.as_bytes());
+    body.push(0);
+    c.send_raw(0x0095, &body)?;
+    println!("[addon] sent STC ping ({payload:?})");
+
+    let want = format!("STC\tv1|pong|0|1/1|{payload}");
+    c.set_recv_timeout(Duration::from_millis(300))?;
+    let got = c.recv_raw_for(Duration::from_secs(20), |op, b| {
+        if op != 0x0096 || b.len() < 13 {
+            return None;
+        }
+        // SMSG_MESSAGECHAT: chat_type u8, language u32 — ours iff language == LANG_ADDON.
+        let lang = u32::from_le_bytes([b[1], b[2], b[3], b[4]]);
+        if lang != 0xFFFF_FFFF {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&b[17..]);
+        text.contains(want.as_str()).then(|| ())
+    });
+    if got.is_some() {
+        println!("[wire] ADDON-PING PASS \u{2713} pong envelope round-tripped");
+        Ok(())
+    } else {
+        bail!("addon-ping: no addon-language pong within 20s");
+    }
+}
+
 fn opcode_watch(
     c: &mut WireClient,
     args: &mut dyn Iterator<Item = String>,

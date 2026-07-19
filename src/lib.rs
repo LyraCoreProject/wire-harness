@@ -255,6 +255,21 @@ impl WireClient {
         Ok(())
     }
 
+    /// Send a raw client frame: `opcode` + `body`, header encrypted like any CMSG. The escape
+    /// hatch for opcodes gtker cannot ENCODE — the addon bridge's LANG_ADDON chat (184) is the
+    /// canonical user (`SendAddonMessage` on the real client; this fakes it byte-for-byte).
+    pub fn send_raw(&mut self, opcode: u32, body: &[u8]) -> Result<()> {
+        use std::io::Write;
+        let size = (body.len() + 4) as u16; // size counts the u32 opcode, not itself
+        self.enc
+            .write_encrypted_client_header(&mut self.stream, size, opcode)
+            .map_err(|e| anyhow!("send_raw header: {e}"))?;
+        self.stream
+            .write_all(body)
+            .map_err(|e| anyhow!("send_raw body: {e}"))?;
+        Ok(())
+    }
+
     /// Read the next raw encrypted frame without gtker-decoding the payload.
     /// Returns `(opcode, payload_bytes)`. Advances the cipher state exactly like `recv()`,
     /// so `recv()` and `recv_raw()` can be interleaved freely — one packet at a time.
