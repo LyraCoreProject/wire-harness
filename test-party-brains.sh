@@ -111,11 +111,17 @@ assert_ge "tank: threat rows name the tank as a source" "$(sql1 "SELECT COUNT(*)
 # dps out-threatening it — sample the melee table on a tight cadence and demand a >=3-sample
 # consecutive on-tank run (the pre-155 threat-top alone never held longer than a retarget tick).
 RUN=0; BEST=0
-for i in $(seq 1 25); do
+# TIGHT sampling (266/276): the taunt pin is 3s, so 3 consecutive samples must FIT INSIDE it —
+# the old loop's six keeper roundtrips made each iteration ~2.5s and the full-kit dps (kit
+# relearn) re-out-threats the tank right after the pin, so the window was structurally missable.
+# Only the wolves get topped (they must survive the full-kit party); the L10 party is in no
+# danger from the elder's 2-4 damage swings. 45 iterations (~45s) span FOUR 10s-cooldown taunt
+# cycles: live telemetry shows the hold CONVERGES by cycle three (tank tops via Sunder threat,
+# both wolves settle on it and stay) — a shorter window sampled the pre-convergence churn.
+for i in $(seq 1 45); do
   ON=$(sql1 "SELECT COUNT(*) AS n FROM game_melee_attack WHERE target_guid = $TANK")
   if [ "${ON:-0}" -ge 1 ]; then RUN=$((RUN+1)); [ $RUN -gt $BEST ] && BEST=$RUN; else RUN=0; fi
   [ $BEST -ge 3 ] && break
-  for M in "$TANK" "$HEAL" "$DPS" "$GINGER"; do scall debug_set_health "$M" 10000; done
   for W in "$W1" "$W2"; do scall debug_set_health "$W" 10000; done
 done
 # The "ever on tank" flag also accepts this loop's tight sampling (266): the 3s taunt pin is
