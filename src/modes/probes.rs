@@ -51,6 +51,7 @@ pub(crate) fn try_dispatch(
         "values-watch" => values_watch(c, args, mcx)?,
         "opcode-watch" => opcode_watch(c, args, mcx)?,
         "addon-ping" => addon_ping(c, args, mcx)?,
+        "event-stream" => event_stream(c, args, mcx)?,
         "walkmelee" => walkmelee(c, args, mcx)?,
         "casttime" => casttime(c, args, mcx)?,
         "name-query" => name_query(c, args, mcx)?,
@@ -315,6 +316,53 @@ fn addon_ping(
         Ok(())
     } else {
         bail!("addon-ping: no addon-language pong within 20s");
+    }
+}
+
+/// event-stream [def_id] [secs] — the 280 addon UI feed, as the Lua addon receives it: watch the
+/// raw addon-language SMSG_MESSAGECHAT stream for TWO DISTINCT `event.state`/`event.start`
+/// envelopes for `def_id` (heartbeats differ — the countdown alone moves), proving the UI stream
+/// is live and UPDATING on the real wire. The character must stand within the event's addon
+/// range (the driver script teleports it in).
+fn event_stream(
+    c: &mut WireClient,
+    args: &mut dyn Iterator<Item = String>,
+    _mcx: &ModeCtx<'_>,
+) -> Result<()> {
+    use std::time::{Duration, Instant};
+    let def: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(1001);
+    let secs: u64 = args.next().and_then(|s| s.parse().ok()).unwrap_or(45);
+    let want_prefix = format!("{def}|");
+    c.set_recv_timeout(Duration::from_millis(300))?;
+    let mut seen: Vec<String> = Vec::new();
+    let t0 = Instant::now();
+    while t0.elapsed() < Duration::from_secs(secs) && seen.len() < 2 {
+        let Ok((op, b)) = c.recv_raw() else { continue };
+        if op != 0x0096 || b.len() < 18 {
+            continue;
+        }
+        let lang = u32::from_le_bytes([b[1], b[2], b[3], b[4]]);
+        if lang != 0xFFFF_FFFF {
+            continue;
+        }
+        let text = String::from_utf8_lossy(&b[17..]).trim_matches('\0').to_string();
+        let Some(pos) = text.find("STC\tv1|") else { continue };
+        let mut it = text[pos + 4..].splitn(5, '|');
+        let (_v, cmd) = (it.next(), it.next().unwrap_or(""));
+        let (_seq, _part) = (it.next(), it.next());
+        let payload = it.next().unwrap_or("");
+        if (cmd == "event.state" || cmd == "event.start") && payload.starts_with(&want_prefix) {
+            println!("[event-stream] {cmd}: {payload}");
+            if seen.last().map(String::as_str) != Some(payload) {
+                seen.push(payload.to_string());
+            }
+        }
+    }
+    if seen.len() >= 2 {
+        println!("[wire] EVENT-STREAM PASS \u{2713} two distinct live state frames for def {def}");
+        Ok(())
+    } else {
+        bail!("event-stream: {} distinct state frame(s) for def {def} within {secs}s", seen.len());
     }
 }
 

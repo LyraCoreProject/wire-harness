@@ -68,6 +68,21 @@ else
   step_fail "no organic threat/credit/progress within the window"
 fi
 
+# --- The addon UI stream on the real wire: a logged-in client inside addon range receives
+# --- DISTINCT live event.state frames (the exact whispers the DynamicEvents addon renders).
+es_log=$(mktemp)
+timeout 75 "$WC" TEST test123 Ginger event-stream 1001 55 >"$es_log" 2>&1 &
+ws_pid=$!
+sleep 4 # logged in; now stand Ginger on the event
+scall debug_teleport "$GINGER" 0 -9740.0 180.0 52.0 0
+wait "$ws_pid"
+if grep -q "EVENT-STREAM PASS" "$es_log"; then
+  step_ok "addon UI stream live on the wire (two distinct state frames)"
+else
+  step_fail "no live addon state stream ($(tail -1 "$es_log" 2>/dev/null))"
+fi
+rm -f "$es_log"
+
 # --- Success link: 1001 forced success → 1002 (defend) starts with a protected NPC ---
 scall debug_dynevent_force_end 1001 true
 sleep 3
@@ -129,6 +144,15 @@ if [ "$chain_state" = "0" ] && [ "$rearm" -gt "$now_us" ]; then
   step_ok "head re-armed on a future cooldown"
 else
   step_fail "chain state=$chain_state rearm=$rearm (expected COOLDOWN in the future)"
+fi
+
+# --- The addon's own logic (parse/state/chat, both delivery routes) under the stubbed WoW API.
+if command -v lua5.1 >/dev/null 2>&1; then
+  if lua5.1 tools/wire-client/dynevents-addon-check.lua | grep -q "addon-check] PASS"; then
+    step_ok "DynamicEvents addon logic (stubbed-API smoke)"
+  else
+    step_fail "addon logic smoke failed (run tools/wire-client/dynevents-addon-check.lua)"
+  fi
 fi
 
 # --- Cleanup: despawn bots, re-seed (wipes forced state; the chain keeps cycling live — the
