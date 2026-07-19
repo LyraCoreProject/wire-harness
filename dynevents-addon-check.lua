@@ -42,6 +42,7 @@ WorldMapButton = mkframe()
 WorldMapDetailFrame = mkframe()
 WorldMapFrame = mkframe()
 WorldMapFrame:Show() -- so the OnUpdate pin-refresh branch is exercised
+GameTooltip = mkframe()
 SlashCmdList = {}
 UIErrorsFrame = { AddMessage = function(self, msg) table.insert(toasts, msg) end }
 DEFAULT_CHAT_FRAME = { AddMessage = function(self, msg) table.insert(chats, msg) end }
