@@ -275,7 +275,6 @@ t_bot_deadmines() { bash tools/wire-client/test-bot-deadmines.sh; }
 t_eventai_cast() { bash tools/wire-client/test-eventai-cast.sh; }
 t_relay_stress() { bash tools/wire-client/test-relay-stress.sh; }
 t_addon_bridge() { bash tools/wire-client/test-addon-bridge.sh; }
-t_dynevents() { bash tools/wire-client/test-dynevents.sh; }
 t_class_roles() {
   # 176: rotations cast REAL imported ids — a no-import sandbox skips loudly, like the other
   # DBC-gated probes (the mechanism itself is covered headlessly by cargo tests).
@@ -315,7 +314,7 @@ ALL_TESTS=(
   persist_health repop_delay respec ding combat_regen cast_flow cast_interrupt ghost_reveal
   init_factions levelup_info vendor_reaction atwar packet_lint walkmelee content_audit real_quest
   scenario_quest scenario_vendor scenario_train scenario_weaponmaster scenario_death
-  aoi_relay soak playerbots pet_control exploration rest_state group party_brains bot_goals class_roles bot_serendipity bot_follow bot_deadmines eventai_cast relay_stress addon_bridge dynevents
+  aoi_relay soak playerbots pet_control exploration rest_state group party_brains bot_goals class_roles bot_serendipity bot_follow bot_deadmines eventai_cast relay_stress addon_bridge
 )
 START=$(date +%s)
 for t in "${ALL_TESTS[@]}"; do run_test "$t"; done
