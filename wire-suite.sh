@@ -305,6 +305,11 @@ t_pet_control() { bash tools/wire-client/test-pet-control.sh; }
 t_exploration() { bash tools/wire-client/test-exploration.sh; }
 # ---- rest state (196): inn fixture flips the PLAYER_BYTES_2 rest byte + resting flag, relays live. ----
 t_rest_state() { bash tools/wire-client/test-rest-state.sh; }
+# ---- #19 AC#3: deterministic crash at each of the seven cross-database transfer steps. Self-SKIPs
+# (77) on a single-database node. Deliberately LAST in ALL_TESTS: it OWNS the gateway process for
+# its duration (seven kill/restart cycles) and leaves it running with GW_SHARD_MAP set, so anything
+# scheduled after it would be running against a differently-configured gateway. ----
+t_transfer_crash_matrix() { bash tools/wire-client/test-transfer-crash-matrix.sh; }
 
 # ---------- the run ----------
 ALL_TESTS=(
@@ -315,6 +320,7 @@ ALL_TESTS=(
   init_factions levelup_info vendor_reaction atwar packet_lint walkmelee content_audit real_quest
   scenario_quest scenario_vendor scenario_train scenario_weaponmaster scenario_death
   aoi_relay soak playerbots pet_control exploration rest_state group party_brains bot_goals class_roles bot_serendipity bot_follow bot_deadmines eventai_cast relay_stress addon_bridge
+  transfer_crash_matrix
 )
 START=$(date +%s)
 for t in "${ALL_TESTS[@]}"; do run_test "$t"; done
