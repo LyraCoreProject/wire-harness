@@ -17,7 +17,7 @@ cd "$(dirname "$0")/../.."
 source tools/wire-client/scenario-lib.sh
 scenario_preflight party-brains
 
-WOLF_ENTRY=51000
+WOLF_ENTRY=51002 # Test Wolf Elder (266): non-grey to the leveled role trio (L1 wolf 51000 greyed out)
 PAD_X=-8890.0; PAD_Y=-460.0; PAD_Z=82.0
 
 # ---- staging ----
@@ -28,6 +28,7 @@ sqlq "DELETE FROM game_melee_attack" >/dev/null
 sqlq "DELETE FROM game_group_member WHERE character_guid = $GINGER" >/dev/null
 sqlq "DELETE FROM game_group_invite WHERE target_guid = $GINGER" >/dev/null
 # Hostility on mock-seed needs staged faction rows (canonical helper; cleared in teardown).
+FACTION_ROWS_BEFORE=$(sql1 "SELECT COUNT(*) AS n FROM game_faction_template")
 stage_hostility
 sqlq "UPDATE game_character SET x = $PAD_X, y = $PAD_Y, z = $PAD_Z WHERE guid = $GINGER" >/dev/null
 
@@ -38,6 +39,11 @@ scall playerbots_spawn_role 1 $PAD_X -454.0 $PAD_Z 2 || step_fail "dps spawn fai
 TANK=$(char_guid Tankbot1); HEAL=$(char_guid Healbot1); DPS=$(char_guid Dpsbot1)
 [ -z "$TANK" ] || [ -z "$HEAL" ] || [ -z "$DPS" ] && { echo "[orch] bot guids missing" >&2; exit 1; }
 echo "[orch] bots: tank=$TANK heal=$HEAL dps=$DPS"
+# 266: level the role trio so their kit clears the cast level-gate (Taunt 355=10, Renew 139=8).
+# debug_set_level refills vitals — read the leveled max for the healer-phase hold below.
+for B in "$TANK" "$HEAL" "$DPS"; do scall debug_set_level "$B" 10; done
+DPS_HOLD=$(( $(sql1 "SELECT max_health FROM game_world_entity WHERE guid = $DPS") * 40 / 100 ))
+[ "${DPS_HOLD:-0}" -lt 1 ] && DPS_HOLD=15
 assert_eq "spawn: three bot rows" "$(sql1 "SELECT COUNT(*) AS n FROM pkg_playerbots_bot")" "3"
 assert_eq "spawn: three personality rows" "$(sql1 "SELECT COUNT(*) AS n FROM pkg_playerbots_personality")" "3"
 assert_eq "kit: tank learned Taunt 355" "$(sql1 "SELECT COUNT(*) AS n FROM game_player_spell WHERE character_guid = $TANK AND spell_id = 355")" "1"
@@ -68,8 +74,8 @@ W1=$(sqlq "SELECT guid FROM game_world_entity WHERE entry = $WOLF_ENTRY" | grep 
 scall debug_spawn_at_feet "$DPS" $WOLF_ENTRY 2
 W2=$(sqlq "SELECT guid FROM game_world_entity WHERE entry = $WOLF_ENTRY" | grep -oE '[0-9]{15,}' | sort -n | tail -1)
 echo "[orch] wolves: $W1 $W2"
-CAST_BASE_355=$(sql1 "SELECT COUNT(*) AS n FROM game_spell_cast_event WHERE spell_id = 355")
-CAST_BASE_133=$(sql1 "SELECT COUNT(*) AS n FROM game_spell_cast_event WHERE spell_id = 133")
+# No baselines (266): cast events reap on a 1s TTL, so anything visible IS fresh — and a stale
+# baseline that reaping later drops BELOW made real casts read as "no change".
 TAUNTED=0; DPS_CASTS=0; TANK_TOP=0; ONTANK_SEEN=0
 for i in $(seq 1 20); do
   # keeper: the party stays alive through the pack (bots are L1) AND the wolves stay alive
@@ -82,8 +88,11 @@ for i in $(seq 1 20); do
   sleep 1
   C355=$(sql1 "SELECT COUNT(*) AS n FROM game_spell_cast_event WHERE spell_id = 355")
   C133=$(sql1 "SELECT COUNT(*) AS n FROM game_spell_cast_event WHERE spell_id = 133")
-  [ "${C355:-0}" -gt "${CAST_BASE_355:-0}" ] && TAUNTED=1
-  [ "${C133:-0}" -gt "${CAST_BASE_133:-0}" ] && DPS_CASTS=1
+  [ "${C355:-0}" -ge 1 ] && TAUNTED=1
+  # Fireball's 1.5s cast bar doubles the catch window: the pending-cast row exists while the
+  # bar fills, the 1s-lived cast event right after it fires.
+  PC133=$(sql1 "SELECT COUNT(*) AS n FROM game_pending_cast WHERE caster_guid = $DPS")
+  { [ "${C133:-0}" -ge 1 ] || [ "${PC133:-0}" -ge 1 ]; } && DPS_CASTS=1
   # taunt-yank evidence: at SOME sampled instant the tank is the TOP threat source on a wolf
   # (each taunt sets it to table-max+1; the 155 forced-target window then PINS the wolf — the
   # hold itself is asserted separately below)
@@ -101,15 +110,24 @@ assert_ge "tank: threat rows name the tank as a source" "$(sql1 "SELECT COUNT(*)
 # 155: the taunt FORCED-TARGET window (3s) pins the taunted wolf on the tank regardless of the
 # dps out-threatening it — sample the melee table on a tight cadence and demand a >=3-sample
 # consecutive on-tank run (the pre-155 threat-top alone never held longer than a retarget tick).
-[ "$ONTANK_SEEN" = 1 ] && step_ok "tank: a wolf's melee row swung onto the tank" || step_fail "tank: no wolf melee row ever on the tank"
 RUN=0; BEST=0
-for i in $(seq 1 25); do
+# TIGHT sampling (266/276): the taunt pin is 3s, so 3 consecutive samples must FIT INSIDE it —
+# the old loop's six keeper roundtrips made each iteration ~2.5s and the full-kit dps (kit
+# relearn) re-out-threats the tank right after the pin, so the window was structurally missable.
+# Only the wolves get topped (they must survive the full-kit party); the L10 party is in no
+# danger from the elder's 2-4 damage swings. 45 iterations (~45s) span FOUR 10s-cooldown taunt
+# cycles: live telemetry shows the hold CONVERGES by cycle three (tank tops via Sunder threat,
+# both wolves settle on it and stay) — a shorter window sampled the pre-convergence churn.
+for i in $(seq 1 45); do
   ON=$(sql1 "SELECT COUNT(*) AS n FROM game_melee_attack WHERE target_guid = $TANK")
   if [ "${ON:-0}" -ge 1 ]; then RUN=$((RUN+1)); [ $RUN -gt $BEST ] && BEST=$RUN; else RUN=0; fi
   [ $BEST -ge 3 ] && break
-  for M in "$TANK" "$HEAL" "$DPS" "$GINGER"; do scall debug_set_health "$M" 10000; done
   for W in "$W1" "$W2"; do scall debug_set_health "$W" 10000; done
 done
+# The "ever on tank" flag also accepts this loop's tight sampling (266): the 3s taunt pin is
+# shorter than the fight loop's per-iteration gap, so the once-per-iteration flag alone missed
+# real pins the HELD loop then observed.
+{ [ "$ONTANK_SEEN" = 1 ] || [ "$BEST" -ge 1 ]; } && step_ok "tank: a wolf's melee row swung onto the tank" || step_fail "tank: no wolf melee row ever on the tank"
 assert_ge "tank: taunt window HELD the wolf on the tank (consecutive on-tank samples)" "$BEST" 3
 [ "$DPS_CASTS" = 1 ] && step_ok "dps: Fireball 133 rotation fired" || step_fail "dps: no Fireball casts"
 assert_ge "dps: melee assist row armed" "$(sql1 "SELECT COUNT(*) AS n FROM game_melee_attack WHERE attacker_guid = $DPS")" 1
@@ -120,20 +138,24 @@ assert_ge "dps: melee assist row armed" "$(sql1 "SELECT COUNT(*) AS n FROM game_
 for i in $(seq 1 20); do
   AURA=$(sql1 "SELECT COUNT(*) AS n FROM game_aura WHERE target_guid = $DPS AND spell_id = 139")
   [ "${AURA:-0}" = "0" ] && break
-  scall debug_set_health "$TANK" 10000; scall debug_set_health "$HEAL" 10000
+  # GINGER topped too (266): the wolves chew the leader below the dps's 40% hold, and the healer
+  # CORRECTLY triages the lowest member — leaving Ginger hurt steals every heal from the watched dps.
+  scall debug_set_health "$TANK" 10000; scall debug_set_health "$HEAL" 10000; scall debug_set_health "$GINGER" 10000
   sleep 1
 done
-scall debug_set_health "$DPS" 15
-CAST_BASE_139=$(sql1 "SELECT COUNT(*) AS n FROM game_spell_cast_event WHERE spell_id = 139")
+scall debug_set_health "$DPS" "$DPS_HOLD" # 266: ~40% of leveled max — under the healer's 80% threshold, over the dps 15% flee
 HEALED=0
 for i in $(seq 1 10); do
-  scall debug_set_health "$TANK" 10000; scall debug_set_health "$HEAL" 10000
+  scall debug_set_health "$TANK" 10000; scall debug_set_health "$HEAL" 10000; scall debug_set_health "$GINGER" 10000
   sleep 1
-  C139=$(sql1 "SELECT COUNT(*) AS n FROM game_spell_cast_event WHERE spell_id = 139")
+  # AURA row alone is the assertion (266): cast events reap on a 1s TTL — shorter than this
+  # loop's sampling gap — and Renew casts exactly ONCE (the carrier skip holds while it ticks),
+  # so the event conjunct was a coin flip. The stale-aura wait above makes the aura row proof
+  # of a FRESH cast.
   AURA=$(sql1 "SELECT COUNT(*) AS n FROM game_aura WHERE target_guid = $DPS AND spell_id = 139")
-  if [ "${C139:-0}" -gt "${CAST_BASE_139:-0}" ] && [ "${AURA:-0}" -ge 1 ]; then HEALED=1; break; fi
+  if [ "${AURA:-0}" -ge 1 ]; then HEALED=1; break; fi
 done
-[ "$HEALED" = 1 ] && step_ok "healer: Renew cast on the damaged member (cast event + aura row)" || step_fail "healer: no Renew on the hurt member"
+[ "$HEALED" = 1 ] && step_ok "healer: Renew landed on the damaged member (fresh aura row)" || step_fail "healer: no Renew on the hurt member"
 # The HoT ticks 8/1s; retry the rising-health sample a few times in case a stray wolf swing lands
 # between samples (the taunt phase normally has the pack on the tank by now).
 HP_UP=0
@@ -185,6 +207,8 @@ clear_hostility
 rm -f "$HOLD" "$HOLD.ingroup"
 assert_eq "teardown: zero bot rows" "$(sql1 "SELECT COUNT(*) AS n FROM pkg_playerbots_bot")" "0"
 assert_eq "teardown: zero personality rows" "$(sql1 "SELECT COUNT(*) AS n FROM pkg_playerbots_personality")" "0"
-assert_eq "teardown: zero faction rows" "$(sql1 "SELECT COUNT(*) AS n FROM game_faction_template")" "0"
+# Imported-node aware (2026-07-16): assert the faction table is RESTORED to its pre-test
+# count (0 on a sandbox, 314 on an imported node) — never that it is empty.
+assert_eq "teardown: faction rows restored" "$(sql1 "SELECT COUNT(*) AS n FROM game_faction_template")" "${FACTION_ROWS_BEFORE:-0}"
 
 if [ "$FAILED" -eq 0 ]; then echo "[party-brains] PASS"; exit 0; else echo "[party-brains] FAIL"; exit 1; fi

@@ -6,6 +6,8 @@
 //! `gateway/src/logon/mod.rs` tests + `gateway/src/world/tests.rs::client_handshake`,
 //! lifted onto real `TcpStream`s. All blocking std I/O — no async.
 
+pub use game_shared::values_mask;
+
 use std::net::TcpStream;
 use std::time::Duration;
 
@@ -32,11 +34,12 @@ use wow_srp::PublicKey;
 use wow_world_messages::vanilla::opcodes::ServerOpcodeMessage as WorldSmsg;
 use wow_world_messages::vanilla::{
     Class, Gender, Language, LogoutResult, Race, SpellCastTargets,
-    SpellCastTargets_SpellCastTargetFlags, SpellCastTargets_SpellCastTargetFlags_Unit, WorldResult,
+    SpellCastTargets_SpellCastTargetFlags, SpellCastTargets_SpellCastTargetFlags_DestLocation,
+    SpellCastTargets_SpellCastTargetFlags_Unit, Vector3d as CastVector3d, WorldResult,
     CMSG_AUTH_SESSION, CMSG_CAST_SPELL, CMSG_CHAR_CREATE, CMSG_CHAR_DELETE, CMSG_CHAR_ENUM, CMSG_GOSSIP_HELLO,
     CMSG_ITEM_QUERY_SINGLE, CMSG_LOGOUT_REQUEST, CMSG_MESSAGECHAT, CMSG_MESSAGECHAT_ChatType,
     CMSG_NPC_TEXT_QUERY, CMSG_PLAYED_TIME, CMSG_PLAYER_LOGIN, CMSG_REPOP_REQUEST, CMSG_SET_SELECTION, CMSG_WHO,
-    SMSG_AUTH_RESPONSE,
+    MSG_MOVE_WORLDPORT_ACK, SMSG_AUTH_RESPONSE,
 };
 use wow_world_messages::vanilla::ClientMessage;
 use wow_world_messages::Guid;
@@ -151,6 +154,8 @@ pub struct WireClient {
     /// `player_login` burst drain — index is the Faction.dbc reputation_index (0..63), value is
     /// the raw i32 standing (work-item #076: relog rep-restore verification).
     pub init_factions: Vec<i32>,
+    /// The login SMSG_INITIALIZE_FACTIONS flag byte per slot (195B: bit 0x02 = AT_WAR).
+    pub init_faction_flags: Vec<u8>,
 }
 
 impl WireClient {
@@ -208,13 +213,73 @@ impl WireClient {
             seen_guids: Vec::new(),
             initial_spells: Vec::new(),
             init_factions: Vec::new(),
+            init_faction_flags: Vec::new(),
         })
+    }
+
+    /// Walk the character server-side from `from` to `to` at `speed` yd/s (testing-hardening
+    /// §3.3): MSG_MOVE_START_FORWARD, a heartbeat stream every ~200ms along the straight line
+    /// (each carrying the interpolated position + facing toward `to`), then MSG_MOVE_STOP at the
+    /// destination. This is what the real client sends when the player holds W — it unlocks
+    /// walk-into-range / leash / AOI-crossing scenarios headlessly (fixtures no longer need to
+    /// spawn inside the 5 yd standstill melee reach). Vanilla run speed is 7.0 yd/s; the server's
+    /// NaN/teleport guards see a plausible stream, and its `last_move_ms`/moving flags behave as
+    /// for a real runner. Blocks for the walk duration.
+    pub fn walk_to(&mut self, from: (f32, f32, f32), to: (f32, f32, f32), speed: f32) -> Result<()> {
+        use wow_world_messages::vanilla::{
+            MovementInfo, MovementInfo_MovementFlags, Vector3d, MSG_MOVE_HEARTBEAT_Client,
+            MSG_MOVE_START_FORWARD_Client, MSG_MOVE_STOP_Client,
+        };
+        let (dx, dy, dz) = (to.0 - from.0, to.1 - from.1, to.2 - from.2);
+        let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+        let orientation = dy.atan2(dx);
+        let speed = speed.max(0.1);
+        let total_ms = ((dist / speed) * 1000.0) as u32;
+        let info = |x: f32, y: f32, z: f32, moving: bool, ts: u32| MovementInfo {
+            flags: if moving {
+                MovementInfo_MovementFlags::new_forward()
+            } else {
+                MovementInfo_MovementFlags::empty()
+            },
+            timestamp: ts,
+            position: Vector3d { x, y, z },
+            orientation,
+            fall_time: 0.0,
+        };
+        self.send(&MSG_MOVE_START_FORWARD_Client { info: info(from.0, from.1, from.2, true, 0) })?;
+        const STEP_MS: u32 = 200;
+        let mut t = STEP_MS;
+        while t < total_ms {
+            let f = t as f32 / total_ms.max(1) as f32;
+            self.send(&MSG_MOVE_HEARTBEAT_Client {
+                info: info(from.0 + dx * f, from.1 + dy * f, from.2 + dz * f, true, t),
+            })?;
+            std::thread::sleep(Duration::from_millis(STEP_MS as u64));
+            t += STEP_MS;
+        }
+        self.send(&MSG_MOVE_STOP_Client { info: info(to.0, to.1, to.2, false, total_ms) })?;
+        Ok(())
     }
 
     /// Send an encrypted CMSG.
     pub fn send<M: ClientMessage>(&mut self, m: &M) -> Result<()> {
         m.write_encrypted_client(&mut self.stream, &mut self.enc)
             .map_err(|e| anyhow!("send: {e}"))?;
+        Ok(())
+    }
+
+    /// Send a raw client frame: `opcode` + `body`, header encrypted like any CMSG. The escape
+    /// hatch for opcodes gtker cannot ENCODE — the addon bridge's LANG_ADDON chat (184) is the
+    /// canonical user (`SendAddonMessage` on the real client; this fakes it byte-for-byte).
+    pub fn send_raw(&mut self, opcode: u32, body: &[u8]) -> Result<()> {
+        use std::io::Write;
+        let size = (body.len() + 4) as u16; // size counts the u32 opcode, not itself
+        self.enc
+            .write_encrypted_client_header(&mut self.stream, size, opcode)
+            .map_err(|e| anyhow!("send_raw header: {e}"))?;
+        self.stream
+            .write_all(body)
+            .map_err(|e| anyhow!("send_raw body: {e}"))?;
         Ok(())
     }
 
@@ -254,6 +319,14 @@ impl WireClient {
             match WorldSmsg::read_encrypted(&mut self.stream, &mut self.dec) {
                 Ok(m) => {
                     self.note_guids(&m);
+                    // The real 5875 client answers a cross-map transfer (SMSG_NEW_WORLD after
+                    // TRANSFER_PENDING) with MSG_MOVE_WORLDPORT_ACK once its load screen ends —
+                    // without the ack the server never rebuilds the entity and the character is
+                    // limbo'd. Reflex lives HERE in the one decode point so EVERY mode survives
+                    // being ported (a held party leader entering an instance, 276).
+                    if matches!(m, WorldSmsg::SMSG_NEW_WORLD(_)) {
+                        let _ = self.send(&MSG_MOVE_WORLDPORT_ACK {});
+                    }
                     return Ok(m);
                 }
                 Err(e) => {
@@ -439,6 +512,8 @@ impl WireClient {
                 }
                 WorldSmsg::SMSG_INITIALIZE_FACTIONS(f) => {
                     self.init_factions = f.factions.iter().map(|s| s.standing as i32).collect();
+                    self.init_faction_flags =
+                        f.factions.iter().map(|s| s.flag.as_int()).collect();
                 }
                 WorldSmsg::SMSG_UPDATE_OBJECT(u)
                     if u.objects.iter().any(|o| create_object_guid(o) == Some(guid)) =>
@@ -602,6 +677,22 @@ impl WireClient {
             targets: SpellCastTargets {
                 target_flags: SpellCastTargets_SpellCastTargetFlags::new_unit(
                     SpellCastTargets_SpellCastTargetFlags_Unit { unit_target: Guid::new(target) },
+                ),
+            },
+        })
+    }
+
+    /// Cast `spell_id` at a clicked GROUND point (CMSG_CAST_SPELL with TARGET_FLAG_DEST_LOCATION) —
+    /// the ground-targeted AoE shape (Flamestrike/Blizzard). The gateway routes the dest block to
+    /// `cast_spell_at`, which anchors the area/nuke at these coords (118 phase 2 / 262).
+    pub fn cast_spell_at_dest(&mut self, spell_id: u32, x: f32, y: f32, z: f32) -> Result<()> {
+        self.send(&CMSG_CAST_SPELL {
+            spell: spell_id,
+            targets: SpellCastTargets {
+                target_flags: SpellCastTargets_SpellCastTargetFlags::new_dest_location(
+                    SpellCastTargets_SpellCastTargetFlags_DestLocation {
+                        destination: CastVector3d { x, y, z },
+                    },
                 ),
             },
         })

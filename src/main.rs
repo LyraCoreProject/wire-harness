@@ -86,6 +86,7 @@ fn main() -> Result<()> {
     let mut dmg: Option<u32> = None;
     let mut cooldown = false;
     let mut failure: Option<u32> = None;
+    let mut delayed_count: u32 = 0;
     // #084 timing probe: elapsed wall-clock between SMSG_SPELL_GO and SMSG_SPELLNONMELEEDAMAGELOG —
     // a projectile spell should show a measurable gap (~distance/missile_speed), not 0ms.
     let mut go_at: Option<std::time::Instant> = None;
@@ -94,9 +95,19 @@ fn main() -> Result<()> {
     // (the cast-interrupt relay), instead of the normal START->GO->COOLDOWN completion.
     let expect_interrupt = std::env::var("WIRE_EXPECT_INTERRUPT").is_ok();
 
+    // Pushback-mode flake guard (2026-07-16): one 1.7s cast window vs a ~2s swing cadence catches
+    // a swing MOST runs, but a whiffed swing (miss/dodge — no damage, no pushback) makes a single
+    // window flaky. Re-cast up to 2 more windows until a DELAYED slide lands; each extra cast is a
+    // fresh full window (the prior cast completed — GO seen — so the recast is clean).
+    let mut pushback_attempts: u32 = 0;
+
     // The completion fires ~cast_time later; read on a wall-clock deadline (the busy world
     // floods packets, so a fixed count can elapse before 1.7s).
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    // 270: 12s (was 5s). Shadow Bolt sends no COOLDOWN packet, so the loop drains the FULL deadline
+    // unless it breaks on the impact log (below); the projectile impact is a one-shot ScheduleAt::Time
+    // reducer firing ~2.1s in that can slip past 5s under full-suite commit-stream congestion. 12s
+    // absorbs the congestion; the success path still exits ~2.5s via the break on the damage log.
+    let mut deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
     while std::time::Instant::now() < deadline {
         let m = match c.recv() {
             Ok(m) => m,
@@ -121,12 +132,24 @@ fn main() -> Result<()> {
                 if let Some(t0) = go_at {
                     dmg_delay_ms = Some(t0.elapsed().as_millis());
                 }
+                // 270: success-path early exit. Shadow Bolt sends no COOLDOWN (the break above never
+                // fires), so without this the loop drained the full 12s deadline every run. START/GO
+                // both precede the impact log and are already recorded; only interrupt-mode needs to
+                // keep draining for pushback/DELAYED, so break in non-interrupt mode.
+                if !expect_interrupt {
+                    break;
+                }
             }
             Smsg::SMSG_SPELL_FAILURE(f) => {
                 failure = Some(f.spell);
                 if expect_interrupt {
                     break;
                 }
+            }
+            // 039: damage during a timed cast PUSHES BACK the bar (vanilla) — the caster-visible
+            // slide packet. Counted for the interrupt-mode asserts.
+            Smsg::SMSG_SPELL_DELAYED(_) => {
+                delayed_count += 1;
             }
             Smsg::SMSG_SPELL_COOLDOWN(_) => {
                 cooldown = true;
@@ -141,31 +164,47 @@ fn main() -> Result<()> {
             Smsg::SMSG_CAST_RESULT(r) => bail!("cast REJECTED by server (bad target/gate): {r:?}"),
             _ => {}
         }
+        // Pushback-mode retry: the cast completed (GO) with no DELAYED slide — the mob whiffed the
+        // window. Open a fresh window (up to 3 total) instead of failing on swing-timing luck.
+        if expect_interrupt && delayed_count == 0 && go_spell == Some(spell_id) && pushback_attempts < 2 {
+            pushback_attempts += 1;
+            go_spell = None;
+            println!("[wire] pushback window {pushback_attempts} saw no DELAYED — re-casting…");
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            c.cast_spell(spell_id, mob)?;
+            deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        }
     }
 
     if expect_interrupt {
+        // SEMANTICS UPDATE (2026-07-16, stale-assert fix): work-item 039 made plain damage PUSH
+        // BACK a timed cast (vanilla — SMSG_SPELL_DELAYED slides the bar; only a real interrupt
+        // effect/school-lock BREAKS it), so a melee swing mid-cast no longer produces
+        // SMSG_SPELL_FAILURE. This mode now asserts the PUSHBACK contract: the bar opened, at
+        // least one DELAYED slide arrived, and the cast still completed with GO.
         let mut fails: Vec<String> = vec![];
         if begin_timer != Some(1700) {
             fails.push(format!("begin SMSG_SPELL_START.timer = {begin_timer:?}, want Some(1700)"));
         }
-        if failure != Some(spell_id) {
-            fails.push(format!(
-                "NO SMSG_SPELL_FAILURE(spell={spell_id}) — the cast was NOT interrupted (failure={failure:?})"
-            ));
+        if delayed_count == 0 {
+            fails.push("NO SMSG_SPELL_DELAYED — the mob's mid-cast damage produced no pushback slide (039)".into());
         }
-        if go_spell == Some(spell_id) {
-            fails.push("got SMSG_SPELL_GO — the cast COMPLETED instead of being interrupted".into());
+        if failure == Some(spell_id) {
+            fails.push("got SMSG_SPELL_FAILURE — plain damage must PUSH BACK, not cancel (only E_INTERRUPT breaks a cast)".into());
+        }
+        if go_spell != Some(spell_id) {
+            fails.push(format!("SMSG_SPELL_GO.spell = {go_spell:?}, want Some({spell_id}) — the pushed-back cast must still complete"));
         }
         if fails.is_empty() {
             println!(
-                "[wire] INTERRUPT PASS \u{2713}  START(1700) -> SMSG_SPELL_FAILURE(spell={spell_id}) with NO GO — damage cancelled the cast"
+                "[wire] PUSHBACK PASS \u{2713}  START(1700) -> {delayed_count}x SMSG_SPELL_DELAYED -> GO — damage slid the bar, cast completed"
             );
             return Ok(());
         }
         for f in &fails {
             eprintln!("[wire] FAIL: {f}");
         }
-        bail!("interrupt: {} assertion(s) failed", fails.len());
+        bail!("interrupt/pushback: {} assertion(s) failed", fails.len());
     }
 
     let mut fails: Vec<String> = vec![];
@@ -186,8 +225,13 @@ fn main() -> Result<()> {
     if go_hits != vec![mob] {
         fails.push(format!("SMSG_SPELL_GO.hits = {go_hits:x?}, want [{mob:#x}]"));
     }
-    if !cooldown {
-        fails.push("missing SMSG_SPELL_COOLDOWN (lock release)".into());
+    // STALE-ASSERT FIX (2026-07-16): the relay sends SMSG_SPELL_COOLDOWN ONLY for a spell with a
+    // REAL cooldown (mangos parity — a per-cast cooldown=0 packet STUCK the client's action button:
+    // "Another action is in progress"). Shadow Bolt 686 has cooldown_ms=0 (GCD only), so NO packet
+    // is the correct contract and SMSG_SPELL_GO is the lock release. Assert the INVERSE: a cooldown
+    // packet arriving for this cooldown-less cast is the stuck-button regression.
+    if cooldown {
+        fails.push("UNEXPECTED SMSG_SPELL_COOLDOWN for a cooldown-less spell (cooldown=0 must send NOTHING — the per-cast packet sticks the action button)".into());
     }
     // #084 regression guard: this mode always casts a projectile spell (default Shadow Bolt) at a
     // DISTINCT target several yards away (test-cast-flow.sh spawns the mob 8yd out), so the

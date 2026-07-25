@@ -27,21 +27,30 @@ CGUID=$(char_guid "$CHAR")
 cargo build -q -p wire-client || exit 1
 TGT="$(mktemp -u /tmp/wc_target_XXXXXX)"; rm -f "$TGT"
 
-# Purge any stale spawned mobs of this entry near the Northshire start (keeps the Goldshire
-# quest spawn at x < -9100 untouched).
-spacetime sql "$DB" "DELETE FROM game_world_entity WHERE entry=$ENTRY AND owner_guid=0 AND x>-9100 AND x<-8800 AND y>-300 AND y<50" >/dev/null 2>&1 || true
+# Purge stale spawned mobs of this entry — PER GUID, spawn row + entity (the old compound-WHERE
+# DELETE was the documented silently-no-op CLI class, so this test LEAKED its Padfoot every run:
+# the spawn row resurrected it via the respawn pass and the strays mauled later tests' characters).
+for SG in $(spacetime sql "$DB" "SELECT guid FROM game_creature_spawn WHERE entry = $ENTRY" 2>/dev/null | grep -oE '[0-9]{15,}'); do
+  spacetime sql "$DB" "DELETE FROM game_creature_spawn WHERE guid = $SG" >/dev/null 2>&1
+  spacetime sql "$DB" "DELETE FROM game_world_entity WHERE guid = $SG" >/dev/null 2>&1
+done
+# ORPHAN entities too (spawn row already gone — a spawn-row-keyed loop misses them; live find):
+for SG in $(spacetime sql "$DB" "SELECT guid FROM game_world_entity WHERE entry = $ENTRY" 2>/dev/null | grep -oE '[0-9]{15,}'); do
+  spacetime sql "$DB" "DELETE FROM game_melee_attack WHERE attacker_guid = $SG" >/dev/null 2>&1
+  spacetime sql "$DB" "DELETE FROM game_world_entity WHERE guid = $SG" >/dev/null 2>&1
+done
 
 # Orchestrator: wait for the caster to be in-world, spawn the target at her feet, keep her
 # alive, then hand the wire client the target's exact guid (decoded-precise, no mangling).
 orchestrate() {
   local GX="" GY="" MOB=""
   for _ in $(seq 1 30); do
-    GX=$(spacetime sql "$DB" "SELECT x FROM game_world_entity WHERE guid=$CGUID" 2>&1 | grep -oE '\-?[0-9]+\.[0-9]+' | tail -1)
+    GX=$(spacetime sql "$DB" "SELECT x FROM game_world_entity WHERE guid=$CGUID" 2>&1 | grep -oE '\-?[0-9]+(\.[0-9]+)?' | tail -1)
     [ -n "$GX" ] && break
     sleep 1
   done
   [ -z "$GX" ] && { echo "[orch] $CHAR never went live" >&2; return 1; }
-  GY=$(spacetime sql "$DB" "SELECT y FROM game_world_entity WHERE guid=$CGUID" 2>&1 | grep -oE '\-?[0-9]+\.[0-9]+' | tail -1)
+  GY=$(spacetime sql "$DB" "SELECT y FROM game_world_entity WHERE guid=$CGUID" 2>&1 | grep -oE '\-?[0-9]+(\.[0-9]+)?' | tail -1)
   spacetime call "$DB" debug_spawn_at_feet $CGUID $ENTRY 8 >/dev/null 2>&1
   sleep 1
   spacetime call "$DB" debug_set_health $CGUID 100000 >/dev/null 2>&1   # survive the cast
@@ -56,5 +65,11 @@ ORCH=$!
 WIRE_TARGET_FILE="$TGT" timeout 120 cargo run -q -p wire-client -- TEST test123 "$CHAR" "$SPELL"
 RC=$?
 wait "$ORCH" 2>/dev/null || true
+# Cleanup the spawned mob: ENTITY AND SPAWN ROW (else the respawn pass resurrects it).
+MOBGUID=$(cat "$TGT" 2>/dev/null || echo "")
+if [ -n "$MOBGUID" ]; then
+  spacetime sql "$DB" "DELETE FROM game_creature_spawn WHERE guid = $MOBGUID" >/dev/null 2>&1 || true
+  spacetime sql "$DB" "DELETE FROM game_world_entity WHERE guid = $MOBGUID" >/dev/null 2>&1 || true
+fi
 rm -f "$TGT"
 exit $RC

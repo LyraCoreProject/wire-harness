@@ -214,15 +214,15 @@ t_ghost_reveal() {
 }
 
 t_init_factions() {
-  # Uses the scenario-fixture faction 79 (reputation_index 5 — seeded by debug_seed_scenario_fixtures,
+  # Uses the scenario-fixture faction 50900 (reputation_index 60 — seeded by debug_seed_scenario_fixtures,
   # present even on a no-import sandbox). Standing accumulates across runs (quest rewards + this
   # grant), so read the expected value back instead of hardcoding it.
   spacetime call "$DB" -- debug_seed_scenario_fixtures >/dev/null 2>&1 || true
-  spacetime call "$DB" -- debug_grant_reputation "$GINGER" 79 100 >/dev/null 2>&1 || true
+  spacetime call "$DB" -- debug_grant_reputation "$GINGER" 50900 100 >/dev/null 2>&1 || true
   local want
-  want=$(sqlq "SELECT standing FROM game_player_reputation WHERE character_guid = $GINGER AND faction_id = 79" | grep -oE '\-?[0-9]+' | tail -1)
-  [ -z "$want" ] && skip "debug_grant_reputation left no game_player_reputation row for fixture faction 79"
-  timeout 60 "$WC" TEST test123 Ginger init-factions 5 "$want"
+  want=$(sqlq "SELECT standing FROM game_player_reputation WHERE character_guid = $GINGER AND faction_id = 50900" | grep -oE '\-?[0-9]+' | tail -1)
+  [ -z "$want" ] && skip "debug_grant_reputation left no game_player_reputation row for fixture faction 50900"
+  timeout 60 "$WC" TEST test123 Ginger init-factions 60 "$want"
 }
 
 t_levelup_info() {
@@ -269,6 +269,12 @@ t_scenario_death()  { bash tools/wire-client/test-scenario-death.sh; }
 t_group() { bash tools/wire-client/test-group.sh; }
 t_party_brains() { bash tools/wire-client/test-party-brains.sh; }
 t_bot_goals() { bash tools/wire-client/test-bot-goals.sh; }
+t_bot_serendipity() { bash tools/wire-client/test-bot-serendipity.sh; }
+t_bot_follow() { bash tools/wire-client/test-bot-follow.sh; }
+t_bot_deadmines() { bash tools/wire-client/test-bot-deadmines.sh; }
+t_eventai_cast() { bash tools/wire-client/test-eventai-cast.sh; }
+t_relay_stress() { bash tools/wire-client/test-relay-stress.sh; }
+t_addon_bridge() { bash tools/wire-client/test-addon-bridge.sh; }
 t_class_roles() {
   # 176: rotations cast REAL imported ids — a no-import sandbox skips loudly, like the other
   # DBC-gated probes (the mechanism itself is covered headlessly by cargo tests).
@@ -280,15 +286,35 @@ t_class_roles() {
 # packages/playerbots drop-in isn't installed/published. ----
 t_playerbots() { bash tools/wire-client/test-playerbots.sh; }
 
+# ---- 195: standing/at-war reaction gating on the interaction windows (fixture faction 50900). ----
+t_vendor_reaction() { bash tools/wire-client/test-vendor-reaction.sh; }
+# ---- 195B: the rep pane At-War checkbox round-trips CMSG -> row -> INITIALIZE_FACTIONS flag. ----
+t_atwar() { bash tools/wire-client/test-atwar.sh; }
+
+# ---- 1-20 CONTENT regression gate (2026-07-17): class kits + quest chains stayed healthy. ----
+t_content_audit() { bash tools/wire-client/test-content-audit.sh; }
+# ---- real imported quest completes end-to-end (accept->kill-credit->turn-in->XP on real data). ----
+t_real_quest() { bash tools/wire-client/test-real-quest-loop.sh; }
+# ---- testing-hardening §3.3: walk_to closes real distance (walk 12yd into reach -> swing fires). ----
+t_walkmelee() { bash tools/wire-client/test-walkmelee.sh; }
+# ---- testing-hardening §3.2: zero packet-lint violations across a login + rep-relay flow. ----
+t_packet_lint() { bash tools/wire-client/test-packet-lint.sh; }
+# ---- warlock pet command bar (CMSG_PET_ACTION): each bar action sets state + pass_pet honors it. ----
+t_pet_control() { bash tools/wire-client/test-pet-control.sh; }
+# ---- exploration/discovery XP (200): entering a fresh subzone awards discovery XP once (+ dedup). ----
+t_exploration() { bash tools/wire-client/test-exploration.sh; }
+# ---- rest state (196): inn fixture flips the PLAYER_BYTES_2 rest byte + resting flag, relays live. ----
+t_rest_state() { bash tools/wire-client/test-rest-state.sh; }
+
 # ---------- the run ----------
 ALL_TESTS=(
   logout who roll text_emote played_time played_time_live initial_spells char_enum_gear
   char_create_gear
   query_item char_delete bindpoint inspect friend ignore_whisper say_range move_relay
   persist_health repop_delay respec ding combat_regen cast_flow cast_interrupt ghost_reveal
-  init_factions levelup_info
+  init_factions levelup_info vendor_reaction atwar packet_lint walkmelee content_audit real_quest
   scenario_quest scenario_vendor scenario_train scenario_weaponmaster scenario_death
-  aoi_relay soak playerbots group party_brains bot_goals class_roles
+  aoi_relay soak playerbots pet_control exploration rest_state group party_brains bot_goals class_roles bot_serendipity bot_follow bot_deadmines eventai_cast relay_stress addon_bridge
 )
 START=$(date +%s)
 for t in "${ALL_TESTS[@]}"; do run_test "$t"; done

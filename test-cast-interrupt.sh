@@ -24,22 +24,48 @@ MOBGUID=""
 
 orchestrate() {
   local GX="" GY="" MOB=""
+  # Self-heal: purge STALE Padfoots from prior crashed/pre-fix runs (spawn rows resurrect them),
+  # then ORPHAN entities whose spawn row is already gone (a spawn-keyed loop misses them).
+  for SG in $(spacetime sql "$DB" "SELECT guid FROM game_creature_spawn WHERE entry = $ENTRY" 2>/dev/null | grep -oE '[0-9]{15,}'); do
+    spacetime sql "$DB" "DELETE FROM game_creature_spawn WHERE guid = $SG" >/dev/null 2>&1
+    spacetime sql "$DB" "DELETE FROM game_world_entity WHERE guid = $SG" >/dev/null 2>&1
+  done
+  for SG in $(spacetime sql "$DB" "SELECT guid FROM game_world_entity WHERE entry = $ENTRY" 2>/dev/null | grep -oE '[0-9]{15,}'); do
+    spacetime sql "$DB" "DELETE FROM game_melee_attack WHERE attacker_guid = $SG" >/dev/null 2>&1
+    spacetime sql "$DB" "DELETE FROM game_world_entity WHERE guid = $SG" >/dev/null 2>&1
+  done
+  # Park on probed-clear ground first (debug_nav_leg has_los=true): in-suite Ginger inherits the
+  # previous test's position, which may be nav-obstructed (the 243 LoS gate silently eats swings).
+  spacetime call "$DB" -- debug_teleport $CGUID 0 -8960.0 -440.0 81.0 0 >/dev/null 2>&1
   for _ in $(seq 1 30); do
-    GX=$(spacetime sql "$DB" "SELECT x FROM game_world_entity WHERE guid=$CGUID" 2>&1 | grep -oE '\-?[0-9]+\.[0-9]+' | tail -1)
+    GX=$(spacetime sql "$DB" "SELECT x FROM game_world_entity WHERE guid=$CGUID" 2>&1 | grep -oE '\-?[0-9]+(\.[0-9]+)?' | tail -1)
     [ -n "$GX" ] && break; sleep 1
   done
   [ -z "$GX" ] && { echo "[orch] $CHAR never went live" >&2; return 1; }
-  GY=$(spacetime sql "$DB" "SELECT y FROM game_world_entity WHERE guid=$CGUID" 2>&1 | grep -oE '\-?[0-9]+\.[0-9]+' | tail -1)
+  GY=$(spacetime sql "$DB" "SELECT y FROM game_world_entity WHERE guid=$CGUID" 2>&1 | grep -oE '\-?[0-9]+(\.[0-9]+)?' | tail -1)
   spacetime call "$DB" debug_spawn_at_feet $CGUID $ENTRY 1 >/dev/null 2>&1   # 1yd = immediate melee
   spacetime call "$DB" debug_set_health $CGUID 100000 >/dev/null 2>&1
   MOB=$(spacetime sql "$DB" "SELECT guid, x, y FROM game_world_entity WHERE entry=$ENTRY AND owner_guid=0" 2>&1 \
         | awk -F'|' -v gx="$GX" -v gy="$GY" '$1 ~ /[0-9]/ {g=$1;x=$2+0;y=$3+0;dx=x-gx;dy=y-gy;d=dx*dx+dy*dy; if(best==""||d<best){best=d;bg=g}} END{gsub(/ /,"",bg);print bg}')
   echo "$MOB" > "$MOB_FILE"
-  # let the mob aggro + get onto its melee swing timer so a swing lands inside the 1.7s cast window
-  sleep 4
+  # DETERMINISTIC swing source (2026-07-16 flake fix): arm the mob's engagement directly instead of
+  # waiting on the aggro sense tick (up to 4s of jitter that sometimes left ZERO swings inside the
+  # 1.7s cast window even across the probe's 3 retry windows). debug_engage's fresh row swings on
+  # the next melee tick and every ~2s after — every cast window sees a swing attempt.
+  [ -n "$MOB" ] && spacetime call "$DB" -- debug_engage "$MOB" "$CGUID" >/dev/null 2>&1
+  sleep 2
   spacetime call "$DB" debug_set_health $CGUID 100000 >/dev/null 2>&1   # re-top after the first swings
   echo "[orch] interrupt target mob=$MOB (melee range, swinging)" >&2
   echo "$MOB" > "$TGT"
+  # DETERMINISTIC pushback source (testing-hardening): the mob's swings are a per-window lottery
+  # (miss/dodge or between-window timing left ZERO landed hits across 3 windows ~half the runs).
+  # debug_apply_damage routes through the REAL damage path (break_auras_on_damage -> pushback), so
+  # two pokes inside the first 1.7s cast window guarantee the slide the probe asserts. The mob
+  # stays for the realistic swing traffic on top.
+  sleep 1
+  spacetime call "$DB" -- debug_apply_damage $CGUID 3 0 >/dev/null 2>&1
+  sleep 1
+  spacetime call "$DB" -- debug_apply_damage $CGUID 3 0 >/dev/null 2>&1
 }
 
 orchestrate &
@@ -48,8 +74,13 @@ WIRE_EXPECT_INTERRUPT=1 WIRE_TARGET_FILE="$TGT" timeout 120 cargo run -q -p wire
 RC=$?
 wait "$ORCH" 2>/dev/null || true
 rm -f "$TGT"
-# cleanup the debug-spawned mob
+# cleanup the debug-spawned mob — ENTITY AND SPAWN ROW (danger-zones: debug_spawn_at_feet writes a
+# game_creature_spawn row; deleting only the entity lets the respawn pass RESURRECT the mob, and the
+# strays accumulated across runs — two camped the train pad and beat Ginger's casts to death).
 MOBGUID=$(cat "$MOB_FILE" 2>/dev/null || echo "")
-[ -n "$MOBGUID" ] && spacetime sql "$DB" "DELETE FROM game_world_entity WHERE guid = $MOBGUID" >/dev/null 2>&1 || true
+if [ -n "$MOBGUID" ]; then
+  spacetime sql "$DB" "DELETE FROM game_creature_spawn WHERE guid = $MOBGUID" >/dev/null 2>&1 || true
+  spacetime sql "$DB" "DELETE FROM game_world_entity WHERE guid = $MOBGUID" >/dev/null 2>&1 || true
+fi
 rm -f "$MOB_FILE"
 exit $RC

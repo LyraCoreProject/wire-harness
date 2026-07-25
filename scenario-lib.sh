@@ -13,6 +13,62 @@ char_guid() { sqlq "SELECT guid FROM game_character WHERE name = '$1'" | grep -o
 # first numeric column of the first data row
 sql1() { sqlq "$1" | sed -n 3p | awk -F'|' '{gsub(/ /,"",$1); print $1}'; }
 
+# Wait for the char row's money to go QUIET (two consecutive 1s-apart equal reads). The gateway's
+# logout persist is ASYNC (~1-3s; danger-zones §2): an offline write (debug_set_money) or a delta
+# BASELINE taken while a prior session's persist is still in flight gets silently clobbered/skewed —
+# the 265 trace caught a staged 1000 overwritten by the previous session's late 800 persist. Call
+# before any debug_set_money and before taking money/xp baselines. (267)
+settle_char_money() { # $1=char_guid
+  local prev="" cur=""
+  for _ in $(seq 1 10); do
+    cur=$(sql1 "SELECT money FROM game_character WHERE guid = $1")
+    [ -n "$cur" ] && [ "$cur" = "$prev" ] && return 0
+    prev="$cur"; sleep 1
+  done
+  return 0 # proceed either way — the caller's own asserts report the truth
+}
+
+# Disposable per-test character (testing-hardening §3.4 — kills the shared-Ginger ambient-state
+# flake class, work-item 267): delete-first (reaps a crashed prior run's leftover), create fresh
+# through the REAL wire char-create path, echo the guid. Pair with drop_char in teardown. WC must
+# be defined by the caller before use (every scenario script sets it).
+fresh_char() { # $1=name  $2=class (warrior|...; default warrior)  $3=level (default 5)
+  timeout 60 "$WC" TEST test123 "$1" char-delete >/dev/null 2>&1 || true
+  timeout 60 "$WC" TEST test123 "$1" make-char "${2:-warrior}" >/dev/null 2>&1
+  local guid; guid=$(char_guid "$1")
+  # Level 5 default (267 root-cause, 2026-07-16): the scenario pads sit near REAL imported
+  # low-level spawns — a level-1 fresh char is a valid aggro target and gets mauled mid-scenario
+  # (4 wolves killed Vendortester during the vendor fight; death disengage cleared every melee row
+  # and the durability assert starved). Level 5 is GREY to them (no proximity aggro) — the exact
+  # profile the shared Ginger accidentally provided all along.
+  [ -n "$guid" ] && scall debug_set_level "$guid" "${3:-5}"
+  echo "$guid"
+}
+drop_char() { # $1=name
+  timeout 60 "$WC" TEST test123 "$1" char-delete >/dev/null 2>&1 || true
+}
+
+# Clear the pad of REAL imported hostiles before a controlled fight (2026-07-18). The Elwynn scenario
+# pads sit in real-mob territory (e.g. Defias Thugs entry 38 patrol near -8960,-420) — a patrolling
+# mob wanders onto the pad and aggros the level-5 disposable char, stalling the controlled fight
+# (the char fights the stray, not the bag). Delete live CREATURE entities (guid is the 0xF130 high-guid,
+# always > 1e15; players are small guids) within `radius` yd of the point. Entity-only delete — real
+# spawns respawn from their game_creature_spawn rows after the test. SQL has no distance fn, so filter
+# in awk.
+purge_creatures_near() { # $1=x $2=y $3=radius [$4... = guids to KEEP (fixtures: the bag, vendor, ...)]
+  local px="$1" py="$2" r="$3"; shift 3
+  local keep=" $* " g
+  for g in $(sqlq "SELECT guid, x, y FROM game_world_entity" \
+      | awk -F'|' -v px="$px" -v py="$py" -v r="$r" 'NR>2 {
+          gsub(/ /,"",$1); gid=$1; ex=$2+0; ey=$3+0;
+          if (gid+0 > 1000000000000000 && (ex-px)*(ex-px)+(ey-py)*(ey-py) <= r*r) print gid
+        }'); do
+    case "$keep" in *" $g "*) continue;; esac   # never delete a named fixture
+    sqlq "DELETE FROM game_melee_attack WHERE attacker_guid = $g" >/dev/null 2>&1
+    sqlq "DELETE FROM game_world_entity WHERE guid = $g" >/dev/null 2>&1
+  done
+}
+
 FAILED=0
 step_ok()   { echo "[orch] STEP-ASSERT OK: $*"; }
 step_fail() { echo "[orch] STEP-ASSERT FAIL: $*" >&2; FAILED=1; }
@@ -104,14 +160,30 @@ purge_entry() { # $1=entry
 # Proximity-aggro hostility on a mock-seed sandbox: no faction data is imported and
 # compute_hostile refuses missing rows, so nothing can aggro without staging these two
 # game_faction_template rows (Monster 14 enemy-group vs Player group 1). ALWAYS pair with
-# clear_hostility in teardown — the rest of the suite expects the pre-import baseline.
+# clear_hostility in teardown.
+#
+# IMPORTED-NODE GUARD (live find 2026-07-16): on a node with the real FactionTemplate.dbc import,
+# rows 14 and 1 ALREADY EXIST with the real values — the old unconditional INSERT+DELETE replaced
+# the imported Monster/Player templates with these sandbox stubs and then deleted them outright,
+# corrupting live faction data until the next `importer --dbc` pass. The real rows already encode
+# exactly the hostility this stages (Monster 14 enemy_group=1 → hostile to players), so on an
+# imported node both helpers are no-ops; STAGED_HOSTILITY makes clear_hostility remove only what
+# stage_hostility actually inserted.
+STAGED_HOSTILITY=0
 stage_hostility() {
+  if [ -n "$(sql1 "SELECT COUNT(*) AS n FROM game_faction_template WHERE id = 14")" ] && \
+     [ "$(sql1 "SELECT COUNT(*) AS n FROM game_faction_template WHERE id = 14")" != "0" ]; then
+    return 0 # imported node: the real Monster template already provides the hostility
+  fi
+  STAGED_HOSTILITY=1
   sqlq "INSERT INTO game_faction_template (id, faction, faction_group, friend_group, enemy_group, enemy_0, enemy_1, enemy_2, enemy_3, friend_0, friend_1, friend_2, friend_3) VALUES (14, 14, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0)" >/dev/null
   sqlq "INSERT INTO game_faction_template (id, faction, faction_group, friend_group, enemy_group, enemy_0, enemy_1, enemy_2, enemy_3, friend_0, friend_1, friend_2, friend_3) VALUES (1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0)" >/dev/null
 }
 clear_hostility() {
+  [ "$STAGED_HOSTILITY" != "1" ] && return 0
   sqlq "DELETE FROM game_faction_template WHERE id = 14" >/dev/null
   sqlq "DELETE FROM game_faction_template WHERE id = 1" >/dev/null
+  STAGED_HOSTILITY=0
 }
 
 # Poll once per second for up to $1 seconds until file $2 exists. Echoes nothing; returns 0 when
@@ -177,6 +249,11 @@ wait_for_sql_ge() { # $1=secs $2=query $3=want
 scenario_preflight() { # $1=scenario name
   cargo build -q -p wire-client || { echo "[orch] wire-client build failed" >&2; exit 1; }
   scall debug_seed_scenario_fixtures || true
+  # Re-arm the creature tick per scenario (2026-07-18): across a full ~40-test suite run the shared
+  # node's combat processing degrades and combat-dependent tests intermittently see no mob swing /
+  # no projectile impact (each PASSES standalone). A fresh tick schedule before each scenario is a
+  # cheap robustness floor for the shared-state suite. See 270.
+  scall debug_rearm_creature_tick || true
   GINGER=$(char_guid Ginger)
   [ -z "$GINGER" ] && timeout 60 "$WC" TEST test123 Ginger logout >/dev/null 2>&1 && GINGER=$(char_guid Ginger)
   [ -z "$GINGER" ] && { echo "[orch] no Ginger character" >&2; exit 1; }

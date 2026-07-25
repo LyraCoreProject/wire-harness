@@ -325,12 +325,15 @@ fn scenario_death(
     println!("[scenario] STEP 1 OK — orchestrator confirmed death (server-side)");
 
     // STEP 2: release -> the 30s reclaim-delay packet.
+    // 270: 12s (was 5s) — the repop reducer + the SMSG_CORPSE_RECLAIM_DELAY relay share the single
+    // serialized commit stream, so under full-suite congestion the packet can slide past 5s (same
+    // class as the cast_flow impact deadline). 12s absorbs it; the packet arrives near-instant idle.
     c.repop_request()?;
-    let delay = c.recv_for(std::time::Duration::from_secs(5), |m| match m {
+    let delay = c.recv_for(std::time::Duration::from_secs(12), |m| match m {
         Smsg::SMSG_CORPSE_RECLAIM_DELAY(d) => Some(d.delay),
         _ => None,
     });
-    let Some(delay) = delay else { bail!("STEP 2 FAIL: no SMSG_CORPSE_RECLAIM_DELAY within 5s of CMSG_REPOP_REQUEST") };
+    let Some(delay) = delay else { bail!("STEP 2 FAIL: no SMSG_CORPSE_RECLAIM_DELAY within 12s of CMSG_REPOP_REQUEST") };
     if delay != std::time::Duration::from_secs(30) { bail!("STEP 2 FAIL: reclaim delay {delay:?}, want 30s"); }
     println!("[scenario] STEP 2 OK — SMSG_CORPSE_RECLAIM_DELAY(30s)");
 

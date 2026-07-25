@@ -99,8 +99,12 @@ pub(crate) fn signal_and_wait_consumed(
 pub(crate) fn drain_until_file(c: &mut WireClient, path: &str, secs: u64) -> bool {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
     while std::time::Instant::now() < deadline && !std::path::Path::new(path).exists() {
-        // recv_RAW for the same reason as signal_and_wait_consumed: a drain wants no decode.
-        let _ = c.recv_raw(); // Err here = just a poll-interval read timeout on a quiet stretch
+        // DECODING recv, not recv_raw (276): the held client must run the client reflexes —
+        // above all the MSG_MOVE_WORLDPORT_ACK answer to SMSG_NEW_WORLD (recv()'s transfer
+        // auto-ack). A raw drain ate the transfer packets silently, so a held party leader
+        // ported into an instance stayed despawned forever. recv() skips undecodable frames
+        // itself; Err here = just a poll-interval read timeout on a quiet stretch.
+        let _ = c.recv();
     }
     std::path::Path::new(path).exists()
 }

@@ -45,6 +45,15 @@ pub(crate) fn try_dispatch(
         "groundcast" => groundcast(c, args, mcx)?,
         "backswing" => backswing(c, args, mcx)?,
         "setbutton" => setbutton(c, args, mcx)?,
+        "fishcast" => fishcast(c, args, mcx)?,
+        "petsummon" => petsummon(c, args, mcx)?,
+        "atwar" => atwar(c, args, mcx)?,
+        "values-watch" => values_watch(c, args, mcx)?,
+        "opcode-watch" => opcode_watch(c, args, mcx)?,
+        "addon-ping" => addon_ping(c, args, mcx)?,
+        "event-stream" => event_stream(c, args, mcx)?,
+        "walkmelee" => walkmelee(c, args, mcx)?,
+        "casttime" => casttime(c, args, mcx)?,
         "name-query" => name_query(c, args, mcx)?,
         "bindpoint" => bindpoint(c, args, mcx)?,
         _ => return Ok(false),
@@ -238,6 +247,8 @@ fn init_factions(
     let ModeCtx { account, password, char_name } = *mcx;
     let index: usize = args.next().and_then(|s| s.parse().ok()).expect("usage: init-factions <index> <want_standing>");
     let want: i32 = args.next().and_then(|s| s.parse().ok()).expect("usage: init-factions <index> <want_standing>");
+    // Optional (195B): also assert the slot's AT_WAR flag bit (0x02) — pass 1/0. Absent = don't check.
+    let want_atwar: Option<u8> = args.next().and_then(|s| s.parse().ok());
     eprintln!("[wire] init-factions: relogging {char_name} to capture a fresh SMSG_INITIALIZE_FACTIONS…");
     let (k2, world_addr2) = logon(account, password)?;
     let mut c2 = WireClient::connect_world(&world_addr2, account, k2)?;
@@ -248,7 +259,236 @@ fn init_factions(
     if got != want {
         bail!("init-factions: slot[{index}] = {got}, want {want}");
     }
+    if let Some(w) = want_atwar {
+        let flags = c2.init_faction_flags.get(index).copied().unwrap_or(0);
+        let got_atwar = (flags & 0x02 != 0) as u8;
+        if got_atwar != w {
+            bail!("init-factions: slot[{index}] AT_WAR = {got_atwar} (flags {flags:#x}), want {w}");
+        }
+        println!("[probe] slot[{index}] flags={flags:#x} AT_WAR={got_atwar} \u{2713}");
+    }
     println!("[wire] INIT-FACTIONS PASS \u{2713}  slot[{index}] == {want} on relog");
+    Ok(())
+}
+
+// ---- values-watch <guid> <field_index> [seconds]: drain raw frames and PASS as soon as an
+// Generic raw-opcode watcher: pass when opcode <opcode> (decimal) arrives within [secs]. Prints the
+// first 8 body bytes as (u32, u32) — handy for SMSG_EXPLORATION_EXPERIENCE (0x01F8=504: area_id, xp).
+/// addon-ping [payload] — the 184 bridge round-trip: fake `SendAddonMessage("STC",
+/// "v1|ping|0|1/1|<payload>", "WHISPER", self)` byte-for-byte via `send_raw` (gtker can't encode
+/// LANG_ADDON), then raw-watch for the addon-language `SMSG_MESSAGECHAT` whose text carries the
+/// pong envelope echoing the payload. PASSes only on a full envelope match.
+fn addon_ping(
+    c: &mut WireClient,
+    args: &mut dyn Iterator<Item = String>,
+    _mcx: &ModeCtx<'_>,
+) -> Result<()> {
+    use std::time::Duration;
+    let payload = args.next().unwrap_or_else(|| "hello".to_string());
+    let text = format!("STC\tv1|ping|0|1/1|{payload}");
+    // CMSG_MESSAGECHAT (0x095) body: chat_type u32 (6 = Whisper), language u32 (LANG_ADDON),
+    // target CString, message CString — the shape the real client emits for SendAddonMessage.
+    let mut body = Vec::new();
+    body.extend_from_slice(&6u32.to_le_bytes());
+    body.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+    body.extend_from_slice(b"Self\0");
+    body.extend_from_slice(text.as_bytes());
+    body.push(0);
+    c.send_raw(0x0095, &body)?;
+    println!("[addon] sent STC ping ({payload:?})");
+
+    let want = format!("STC\tv1|pong|0|1/1|{payload}");
+    c.set_recv_timeout(Duration::from_millis(300))?;
+    let got = c.recv_raw_for(Duration::from_secs(20), |op, b| {
+        if op != 0x0096 || b.len() < 13 {
+            return None;
+        }
+        // SMSG_MESSAGECHAT: chat_type u8, language u32 — ours iff language == LANG_ADDON.
+        let lang = u32::from_le_bytes([b[1], b[2], b[3], b[4]]);
+        if lang != 0xFFFF_FFFF {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&b[17..]);
+        text.contains(want.as_str()).then(|| ())
+    });
+    if got.is_some() {
+        println!("[wire] ADDON-PING PASS \u{2713} pong envelope round-tripped");
+        Ok(())
+    } else {
+        bail!("addon-ping: no addon-language pong within 20s");
+    }
+}
+
+/// event-stream [def_id] [secs] — the 280 addon UI feed, as the Lua addon receives it: watch the
+/// raw addon-language SMSG_MESSAGECHAT stream for TWO DISTINCT `event.state`/`event.start`
+/// envelopes for `def_id` (heartbeats differ — the countdown alone moves), proving the UI stream
+/// is live and UPDATING on the real wire. The character must stand within the event's addon
+/// range (the driver script teleports it in).
+fn event_stream(
+    c: &mut WireClient,
+    args: &mut dyn Iterator<Item = String>,
+    _mcx: &ModeCtx<'_>,
+) -> Result<()> {
+    use std::time::{Duration, Instant};
+    let def: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(1001);
+    let secs: u64 = args.next().and_then(|s| s.parse().ok()).unwrap_or(45);
+    let want_prefix = format!("{def}|");
+    c.set_recv_timeout(Duration::from_millis(300))?;
+    let mut seen: Vec<String> = Vec::new();
+    let t0 = Instant::now();
+    while t0.elapsed() < Duration::from_secs(secs) && seen.len() < 2 {
+        let Ok((op, b)) = c.recv_raw() else { continue };
+        if op != 0x0096 || b.len() < 18 {
+            continue;
+        }
+        let lang = u32::from_le_bytes([b[1], b[2], b[3], b[4]]);
+        if lang != 0xFFFF_FFFF {
+            continue;
+        }
+        let text = String::from_utf8_lossy(&b[17..]).trim_matches('\0').to_string();
+        let Some(pos) = text.find("STC\tv1|") else { continue };
+        let mut it = text[pos + 4..].splitn(5, '|');
+        let (_v, cmd) = (it.next(), it.next().unwrap_or(""));
+        let (_seq, _part) = (it.next(), it.next());
+        let payload = it.next().unwrap_or("");
+        if (cmd == "event.state" || cmd == "event.start") && payload.starts_with(&want_prefix) {
+            println!("[event-stream] {cmd}: {payload}");
+            if seen.last().map(String::as_str) != Some(payload) {
+                seen.push(payload.to_string());
+            }
+        }
+    }
+    if seen.len() >= 2 {
+        println!("[wire] EVENT-STREAM PASS \u{2713} two distinct live state frames for def {def}");
+        Ok(())
+    } else {
+        bail!("event-stream: {} distinct state frame(s) for def {def} within {secs}s", seen.len());
+    }
+}
+
+fn opcode_watch(
+    c: &mut WireClient,
+    args: &mut dyn Iterator<Item = String>,
+    _mcx: &ModeCtx<'_>,
+) -> Result<()> {
+    use std::time::{Duration, Instant};
+    let want: u16 = args.next().and_then(|s| s.parse().ok()).expect("usage: opcode-watch <opcode-decimal> [secs]");
+    let secs: u64 = args.next().and_then(|s| s.parse().ok()).unwrap_or(15);
+    c.set_recv_timeout(Duration::from_millis(300))?;
+    let t0 = Instant::now();
+    while t0.elapsed() < Duration::from_secs(secs) {
+        if let Ok((op, body)) = c.recv_raw() {
+            if op == want {
+                if body.len() >= 8 {
+                    let a = u32::from_le_bytes([body[0], body[1], body[2], body[3]]);
+                    let e = u32::from_le_bytes([body[4], body[5], body[6], body[7]]);
+                    println!("[opcode] opcode={want:#x} body[0..8] = ({a}, {e})");
+                }
+                println!("[wire] OPCODE-WATCH PASS \u{2713} opcode {want:#x} arrived");
+                return Ok(());
+            }
+        }
+    }
+    bail!("opcode-watch: opcode {want:#x} did not arrive within {secs}s");
+}
+
+// SMSG_UPDATE_OBJECT VALUES block for <guid> carries <field_index> (testing-hardening §3.1 — the
+// generic live-field-change assert; prints every matching (index, value) seen on the way).
+fn values_watch(
+    c: &mut WireClient,
+    args: &mut dyn Iterator<Item = String>,
+    _mcx: &ModeCtx<'_>,
+) -> Result<()> {
+    use std::time::{Duration, Instant};
+    let guid: u64 = args.next().and_then(|s| s.parse().ok()).expect("usage: values-watch <guid> <field_index> [secs]");
+    let field: u16 = args.next().and_then(|s| s.parse().ok()).expect("field_index");
+    let secs: u64 = args.next().and_then(|s| s.parse().ok()).unwrap_or(15);
+    c.set_recv_timeout(Duration::from_millis(300))?;
+    let t0 = Instant::now();
+    while t0.elapsed() < Duration::from_secs(secs) {
+        if let Ok((0x00A9, body)) = c.recv_raw() {
+            for u in wire_client::values_mask::parse_values_updates(&body) {
+                if u.guid != guid {
+                    continue;
+                }
+                for &(idx, v) in &u.fields {
+                    println!("[values] guid={guid:#x} field {idx} = {v} ({v:#x})");
+                    if idx == field {
+                        println!("[wire] VALUES-WATCH PASS \u{2713} field {field} arrived");
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
+    bail!("values-watch: no VALUES update carried field {field} for {guid:#x} within {secs}s");
+}
+
+// ---- walkmelee <mob_guid> <mx> <my> <mz>: prove the walk_to helper closes real distance
+// (testing-hardening §3.3): start 12 yd west of the mob (OUTSIDE the 5 yd standstill reach —
+// the pre-walk swing would be silently range-gated forever), walk to 3 yd, toggle attack, and
+// assert OUR OWN ATTACKERSTATEUPDATE lands (a swing fired => the server tracked the walk).
+fn walkmelee(
+    c: &mut WireClient,
+    args: &mut dyn Iterator<Item = String>,
+    _mcx: &ModeCtx<'_>,
+) -> Result<()> {
+    use std::time::{Duration, Instant};
+    use wow_world_messages::vanilla::{CMSG_ATTACKSWING, CMSG_ATTACKSTOP};
+    let mob: u64 = args.next().and_then(|s| s.parse().ok()).expect("usage: walkmelee <mob> <x> <y> <z>");
+    let mx: f32 = args.next().and_then(|s| s.parse().ok()).expect("mob x");
+    let my: f32 = args.next().and_then(|s| s.parse().ok()).expect("mob y");
+    let mz: f32 = args.next().and_then(|s| s.parse().ok()).expect("mob z");
+    c.walk_to((mx - 12.0, my, mz), (mx - 3.0, my, mz), 7.0)?; // real vanilla run speed
+    c.set_selection(mob)?;
+    c.send(&CMSG_ATTACKSWING { guid: Guid::new(mob) })?;
+    c.set_recv_timeout(Duration::from_millis(300))?;
+    let t0 = Instant::now();
+    let mut own_swing = false;
+    // 270: 20s (was 8s) + periodic re-send of CMSG_ATTACKSWING. Under full-suite commit-stream load the
+    // walk_to heartbeat stream + the starved tick_melee can leave the first ATTACKSWING arriving before
+    // the server has processed the walk (char still out of the 5yd reach → the swing never arms). A
+    // wider window lets the walk land, and re-sending ATTACKSWING every ~2s re-attempts the arm once the
+    // position catches up. This is the load-timing flake class (work-item 270), not a walk_to bug.
+    let mut last_swing_send = Instant::now();
+    while t0.elapsed() < Duration::from_secs(20) && !own_swing {
+        if last_swing_send.elapsed() >= Duration::from_secs(2) {
+            let _ = c.send(&CMSG_ATTACKSWING { guid: Guid::new(mob) });
+            last_swing_send = Instant::now();
+        }
+        if let Ok(Smsg::SMSG_ATTACKERSTATEUPDATE(a)) = c.recv() {
+            if a.attacker.guid() == c.self_guid {
+                own_swing = true;
+            }
+        }
+    }
+    let _ = c.send(&CMSG_ATTACKSTOP {});
+    if !own_swing {
+        bail!("walkmelee FAIL: no own swing after walking into reach (walk_to position not tracked?)");
+    }
+    println!("[wire] WALKMELEE PASS \u{2713} walked 12yd -> 3yd and the swing fired");
+    Ok(())
+}
+
+// ---- atwar <rep_index> <0|1>: send one CMSG_SET_FACTION_ATWAR (the rep pane checkbox) and exit —
+// the round-trip is asserted by a following `init-factions <index> <standing> <0|1>` relog probe
+// (195 slice B). The wire u16 is the client's 0..63 rep-array slot, NOT a faction id.
+fn atwar(
+    c: &mut WireClient,
+    args: &mut dyn Iterator<Item = String>,
+    _mcx: &ModeCtx<'_>,
+) -> Result<()> {
+    use wow_world_messages::vanilla::{CMSG_SET_FACTION_ATWAR, Faction, FactionFlag};
+    let index: u16 = args.next().and_then(|s| s.parse().ok()).expect("usage: atwar <rep_index> <0|1>");
+    let on: u8 = args.next().and_then(|s| s.parse().ok()).expect("usage: atwar <rep_index> <0|1>");
+    let flags = if on != 0 { FactionFlag::new_at_war() } else { FactionFlag::empty() };
+    // gtker types the wire u16 as the closed `Faction` enum (keyed on faction IDS, another face of
+    // the field-names-lie) — an index with no variant would silently serialize as 0, so fail LOUD.
+    let faction = Faction::try_from(index)
+        .map_err(|_| anyhow!("no gtker Faction variant carries wire value {index} — extend this probe with a raw send"))?;
+    c.send(&CMSG_SET_FACTION_ATWAR { faction, flags })?;
+    std::thread::sleep(std::time::Duration::from_millis(800)); // let the reducer land before logout
+    println!("[atwar] sent CMSG_SET_FACTION_ATWAR slot={index} at_war={on}");
     Ok(())
 }
 
@@ -1556,29 +1796,37 @@ fn groundcast(
         MovementInfo, MovementInfo_MovementFlags, Object, ObjectType, Vector3d,
         MSG_MOVE_HEARTBEAT_Client,
     };
-    let spell: u32 = args.next().and_then(|s| s.parse().ok()).expect("usage: groundcast <spell_id> <x> <y> <z>");
+    let spell: u32 = args.next().and_then(|s| s.parse().ok()).expect("usage: groundcast <spell_id> <x> <y> <z> [dest]");
     let x: f32 = args.next().and_then(|s| s.parse().ok()).expect("x");
     let y: f32 = args.next().and_then(|s| s.parse().ok()).expect("y");
     let z: f32 = args.next().and_then(|s| s.parse().ok()).expect("z");
+    // "dest" (262, Flamestrike): stand ~20 yd WEST of (x,y,z) and cast WITH a DEST_LOCATION block at
+    // it — the clicked-ground shape. Default (Consecration) stands ON the point and self-casts.
+    let dest_mode = args.next().as_deref() == Some("dest");
+    let (sx, sy) = if dest_mode { (x - 20.0, y) } else { (x, y) };
     for i in 0..3u32 {
         c.send(&MSG_MOVE_HEARTBEAT_Client {
             info: MovementInfo {
                 flags: MovementInfo_MovementFlags::empty(),
                 timestamp: i * 100,
-                position: Vector3d { x, y, z },
-                orientation: 0.0,
+                position: Vector3d { x: sx, y: sy, z },
+                orientation: 0.0, // facing +x = the dest point in dest mode
                 fall_time: 0.0,
             },
         })?;
         std::thread::sleep(Duration::from_millis(120));
     }
-    println!("[ground] at ({x},{y},{z}); casting {spell}");
-    c.cast_spell(spell, 0)?;
+    println!("[ground] at ({sx},{sy},{z}); casting {spell} (dest_mode={dest_mode})");
+    if dest_mode {
+        c.cast_spell_at_dest(spell, x, y, z)?;
+    } else {
+        c.cast_spell(spell, 0)?;
+    }
     c.set_recv_timeout(Duration::from_millis(400))?;
     let t0 = Instant::now();
     let (mut go_hits, mut go_seen) = (0usize, false);
     let (mut dynobj_creates, mut ticks, mut reaps) = (0u32, 0u32, 0u32);
-    while t0.elapsed() < Duration::from_secs(12) {
+    while t0.elapsed() < Duration::from_secs(if dest_mode { 18 } else { 12 }) {
         match c.recv() {
             Ok(Smsg::SMSG_SPELL_GO(g)) if g.spell == spell => {
                 go_seen = true;
@@ -1610,9 +1858,19 @@ fn groundcast(
     }
     println!("[ground] RESULT go_seen={go_seen} go_hits={go_hits} dynobj_creates={dynobj_creates} ticks={ticks} reaps={reaps}");
     if !go_seen { bail!("groundcast FAIL: no SPELL_GO (cast rejected? mana?)"); }
-    if go_hits != 0 { bail!("groundcast FAIL: GO hit list not empty ({go_hits}) — caster impact animation"); }
+    if dest_mode {
+        // The clicked-ground nuke (Flamestrike eff0) must HIT the mobs at the click.
+        if go_hits == 0 { bail!("groundcast FAIL: dest-mode GO hit nobody — the nuke didn't anchor on the click"); }
+    } else if go_hits != 0 {
+        bail!("groundcast FAIL: GO hit list not empty ({go_hits}) — caster impact animation");
+    }
     if dynobj_creates == 0 { bail!("groundcast FAIL: no DYNAMICOBJECT CREATE (no swirl)"); }
-    if ticks < 2 { bail!("groundcast FAIL: only {ticks} tick damage log(s) — feedback missing or no hostile in radius"); }
+    // dest mode: >=1 damage log proves the dest pipeline delivers feedback (the nuke one-shots a
+    // low-level mob and a survivor CHASES out of the 5 yd patch before the 2s first tick — patch
+    // TICK mechanics are pinned by the self-anchored Consecration run, same engine). Self mode
+    // keeps >=2 (the caster stands in the area with the mob, ticks accumulate).
+    let min_ticks = if dest_mode { 1 } else { 2 };
+    if ticks < min_ticks { bail!("groundcast FAIL: only {ticks} tick damage log(s) — feedback missing or no hostile in radius"); }
     if reaps == 0 { bail!("groundcast FAIL: swirl never reaped (no DESTROY)"); }
     println!("[ground] GROUNDCAST PASS \u{2713}");
     Ok(())
@@ -1710,5 +1968,168 @@ fn setbutton(
     c.send(&CMSG_SET_ACTION_BUTTON { button, action, misc: 0, action_type })?;
     std::thread::sleep(std::time::Duration::from_millis(800)); // let the reducer land before logout
     println!("[btn] sent SET_ACTION_BUTTON slot={button} action={action} type={action_type}");
+    Ok(())
+}
+
+// ---- fishcast <spell_id>: cast Fishing via the real CMSG path (060) and assert the manual
+// START -> raw CAST_RESULT(OK) -> GO clear arrives. The catch itself is SQL-asserted outside.
+fn fishcast(
+    c: &mut WireClient,
+    args: &mut dyn Iterator<Item = String>,
+    _mcx: &ModeCtx<'_>,
+) -> Result<()> {
+    use std::time::{Duration, Instant};
+    let spell: u32 = args.next().and_then(|s| s.parse().ok()).expect("usage: fishcast <spell_id>");
+    c.cast_spell(spell, 0)?;
+    c.set_recv_timeout(Duration::from_millis(300))?;
+    // ALL-RAW drain: the 234 assert needs the TYPE-less PLAYER_SKILL_INFO partial, which gtker's
+    // typed reader consumes-and-rejects — one raw loop sees every frame exactly once.
+    let t0 = Instant::now();
+    let (mut start, mut go, mut skill_values) = (false, false, false);
+    while t0.elapsed() < Duration::from_secs(8) && !(start && go && skill_values) {
+        match c.recv_raw() {
+            Ok((0x0131, body)) if body.len() >= 4 => {
+                // SMSG_SPELL_START: packed guids lead; match the spell id anywhere (cheap raw pin).
+                if body.windows(4).any(|w| w == spell.to_le_bytes()) {
+                    start = true;
+                }
+            }
+            Ok((0x0132, body)) => {
+                if body.windows(4).any(|w| w == spell.to_le_bytes()) {
+                    go = true;
+                }
+            }
+            Ok((0x00A9, body)) => {
+                // 234: the catch's skill-up pushes PLAYER_SKILL_INFO — decode the VALUES mask and
+                // require the Fishing line id (356) at a real SKILL_INFO field index (base 718,
+                // 3 words/slot, 128 slots), not just the bytes appearing anywhere in the frame.
+                const SKILL_INFO_BASE: u16 = 718;
+                const SKILL_INFO_END: u16 = 718 + 128 * 3;
+                let hit = wire_client::values_mask::parse_values_updates(&body)
+                    .iter()
+                    .flat_map(|u| u.fields.iter())
+                    .any(|&(idx, v)| {
+                        (SKILL_INFO_BASE..SKILL_INFO_END).contains(&idx) && (v & 0xFFFF) == 356
+                    });
+                if hit {
+                    skill_values = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    println!("[fish] RESULT start={start} go={go} live_skill_values={skill_values}");
+    if !start || !go { bail!("fishcast FAIL: START/GO clear missing (start={start} go={go})"); }
+    if !skill_values { bail!("fishcast FAIL: no live PLAYER_SKILL_INFO values for Fishing (234)"); }
+    println!("[fish] FISHCAST PASS \u{2713} (incl. live skill-pane values)");
+    Ok(())
+}
+
+// ---- petsummon <spell_id>: cast a summon spell (Summon Imp 688) and assert the 023 pet binding:
+// (1) a Unit CREATE whose UNIT_FIELD_SUMMONEDBY == self (the pet), (2) SMSG_PET_SPELLS (0x0179)
+// carrying that pet guid, (3) the owner's UNIT_FIELD_SUMMON VALUES partial (TYPE-less → raw scan
+// for the pet guid low word in an UPDATE_OBJECT that is NOT the pet CREATE).
+fn petsummon(
+    c: &mut WireClient,
+    args: &mut dyn Iterator<Item = String>,
+    _mcx: &ModeCtx<'_>,
+) -> Result<()> {
+    use std::time::{Duration, Instant};
+    use wow_world_messages::vanilla::{Object, UpdateMask};
+    let spell: u32 =
+        args.next().and_then(|s| s.parse().ok()).expect("usage: petsummon <spell_id>");
+    let self_guid = c.self_guid;
+    c.cast_spell(spell, 0)?;
+    c.set_recv_timeout(Duration::from_millis(300))?;
+    let t0 = Instant::now();
+    let (mut pet_guid, mut pet_spells_guid) = (0u64, None::<u64>);
+    // 25s window: Summon Imp is a 10s TIMED cast (the pet only spawns at completion).
+    while t0.elapsed() < Duration::from_secs(25) && !(pet_guid != 0 && pet_spells_guid.is_some()) {
+        match c.recv() {
+            Ok(Smsg::SMSG_UPDATE_OBJECT(u)) => {
+                for o in &u.objects {
+                    if let Object::CreateObject { guid3, mask2, .. }
+                    | Object::CreateObject2 { guid3, mask2, .. } = o
+                    {
+                        if let UpdateMask::Unit(unit) = mask2 {
+                            if unit.unit_summonedby().map(|g| g.guid()) == Some(self_guid) {
+                                pet_guid = guid3.guid();
+                                println!("[pet] CREATE with SUMMONEDBY=self → pet {pet_guid:#x}");
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(Smsg::SMSG_PET_SPELLS(p)) => {
+                pet_spells_guid = Some(p.pet.guid());
+                println!(
+                    "[pet] SMSG_PET_SPELLS pet={:#x} bar={}",
+                    p.pet.guid(),
+                    p.action_bars.is_some()
+                );
+            }
+            _ => {}
+        }
+    }
+    println!(
+        "[pet] RESULT summonedby_create={} pet_spells={}",
+        pet_guid != 0,
+        pet_spells_guid.is_some()
+    );
+    if pet_guid == 0 {
+        bail!("petsummon FAIL: no Unit CREATE carried UNIT_FIELD_SUMMONEDBY=self (023)");
+    }
+    match pet_spells_guid {
+        Some(g) if g == pet_guid => {}
+        other => bail!("petsummon FAIL: SMSG_PET_SPELLS missing/mismatched (got {other:?})"),
+    }
+    println!("[pet] PETSUMMON PASS \u{2713} (SUMMONEDBY create + PET_SPELLS bar)");
+    Ok(())
+}
+
+// ---- casttime <spell_id> <target_guid> <x> <y> <z>: begin a timed cast at a mob and report the
+// SMSG_SPELL_START timer (the server's FOLDED cast time — the 264 spell-modifier verify), then
+// cancel so nothing lands. Positions 20 yd west of the target, facing it.
+fn casttime(
+    c: &mut WireClient,
+    args: &mut dyn Iterator<Item = String>,
+    _mcx: &ModeCtx<'_>,
+) -> Result<()> {
+    use std::time::{Duration, Instant};
+    use wow_world_messages::vanilla::{
+        CMSG_CANCEL_CAST, MovementInfo, MovementInfo_MovementFlags, Vector3d, MSG_MOVE_HEARTBEAT_Client,
+    };
+    let spell: u32 = args.next().and_then(|s| s.parse().ok()).expect("usage: casttime <spell> <target> <x> <y> <z>");
+    let target: u64 = args.next().and_then(|s| s.parse().ok()).expect("target guid");
+    let mx: f32 = args.next().and_then(|s| s.parse().ok()).expect("x");
+    let my: f32 = args.next().and_then(|s| s.parse().ok()).expect("y");
+    let mz: f32 = args.next().and_then(|s| s.parse().ok()).expect("z");
+    for i in 0..3u32 {
+        c.send(&MSG_MOVE_HEARTBEAT_Client {
+            info: MovementInfo {
+                flags: MovementInfo_MovementFlags::empty(),
+                timestamp: i * 100,
+                position: Vector3d { x: mx - 20.0, y: my, z: mz },
+                orientation: 0.0,
+                fall_time: 0.0,
+            },
+        })?;
+        std::thread::sleep(Duration::from_millis(120));
+    }
+    c.set_selection(target)?;
+    c.cast_spell(spell, target)?;
+    c.set_recv_timeout(Duration::from_millis(300))?;
+    let t0 = Instant::now();
+    let mut timer: Option<u32> = None;
+    while t0.elapsed() < Duration::from_secs(5) && timer.is_none() {
+        if let Ok(Smsg::SMSG_SPELL_START(s)) = c.recv() {
+            if s.spell == spell {
+                timer = Some(s.timer);
+            }
+        }
+    }
+    let _ = c.send(&CMSG_CANCEL_CAST { id: spell });
+    let Some(t) = timer else { bail!("casttime FAIL: no SMSG_SPELL_START for {spell}") };
+    println!("[casttime] START timer = {t}ms");
     Ok(())
 }

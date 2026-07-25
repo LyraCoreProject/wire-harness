@@ -20,6 +20,9 @@ CORPSE=$(python3 -c "print((0xF101 << 48) | $GINGER)")
 # stage: level 10 (below the sickness gate), full health, a wolf waiting on the pad
 scall debug_set_level "$GINGER" 10
 sqlq "DELETE FROM game_aura WHERE target_guid = $GINGER AND spell_id = $SICKNESS" >/dev/null
+# Reset the corpse-reclaim ESCALATION ladder (226): other suite tests kill Ginger too, and a repeat
+# death inside the escalation window waits 60s where this test asserts the first-death 30s.
+sqlq "UPDATE game_character SET death_expire_micros = 0 WHERE guid = $GINGER" >/dev/null
 stay_start TEST test123 Ginger || exit 1
 scall debug_teleport "$GINGER" 0 $PAD_X $PAD_Y $PAD_Z 0
 scall debug_set_health "$GINGER" 100000
@@ -53,9 +56,12 @@ WIRE=$!
 wait_for_file 30 "$DEATH_READY"
 if [ -f "$DEATH_READY" ]; then
   scall debug_set_health "$GINGER" 1
+  purge_creatures_near "$PAD_X" "$PAD_Y" 30 "$WOLF" # keep the fixture wolf; clear real strays
   scall debug_engage "$WOLF" "$GINGER" # the wolf lands the real killing blow
   DEAD=""
-  for _ in $(seq 1 30); do
+  # 270: 45s (was 30s) — absorbs a congestion-slowed melee tick + the OOC-regen amplifier (a delayed
+  # first swing lets Ginger regen off 1 HP before enter_combat stops it, needing more 1-3dmg swings).
+  for _ in $(seq 1 45); do
     DEAD=$(sqlq "SELECT dead FROM game_world_entity WHERE guid = $GINGER" | grep -c true)
     [ "$DEAD" = "1" ] && break
     sleep 1
@@ -87,7 +93,10 @@ if [ -f "$DEATH_RECLAIMED" ]; then
   DEADNOW=$(sqlq "SELECT dead FROM game_world_entity WHERE guid = $GINGER" | grep -c true)
   assert_eq "reclaim: no longer dead" "$DEADNOW" "0"
   # 50% res + up to a few out-of-combat regen ticks between the reclaim and this read
-  assert_ge "reclaim: resurrected at ~50% health (>= half)" "${HP:-0}" "$(( ${MAXHP:-200} / 2 ))"
+  # reclaim gives floor(max_health/2); the stat-derived max can shift ~2 between the reclaim and this
+  # read (66<->68), so assert a TOLERANT ~50% band (>= 45%) rather than an exact-half boundary that
+  # flakes by 1 at an odd max_health. The mechanic (res at half, not full, not tiny) is what matters.
+  assert_ge "reclaim: resurrected at ~50% health (>= 45%)" "${HP:-0}" "$(( ${MAXHP:-200} * 45 / 100 ))"
   assert_lt "reclaim: resurrected at ~50% health (< 3/4)" "${HP:-999}" "$(( ${MAXHP:-0} * 3 / 4 ))"
   assert_eq "reclaim: corpse reclaim gives NO rez sickness (any level)" \
     "$(sql1 "SELECT COUNT(*) AS n FROM game_aura WHERE target_guid = $GINGER AND spell_id = $SICKNESS")" "0"
