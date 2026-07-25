@@ -46,6 +46,8 @@ use wow_world_messages::Guid;
 
 const LOGON_PORT: u16 = 3724;
 pub const DEFAULT_WORLD_ADDR: &str = "127.0.0.1:8085";
+/// Default logon-tier address — the same `127.0.0.1:3724` every existing caller assumed.
+pub const DEFAULT_LOGON_ADDR: &str = "127.0.0.1:3724";
 
 fn ns(s: &str) -> Result<NormalizedString> {
     NormalizedString::new(s).map_err(|e| anyhow!("normalized string {s:?}: {e:?}"))
@@ -54,8 +56,19 @@ fn ns(s: &str) -> Result<NormalizedString> {
 /// Complete SRP6 logon and return `(session key K, world server address)`.
 /// Mirrors `gateway/src/logon/mod.rs` `full_srp6_handshake_and_realm_list`.
 pub fn logon(account: &str, password: &str) -> Result<([u8; 40], String)> {
-    let mut s = TcpStream::connect(("127.0.0.1", LOGON_PORT))
-        .with_context(|| format!("connect logon :{LOGON_PORT}"))?;
+    logon_at(DEFAULT_LOGON_ADDR, account, password)
+}
+
+/// [`logon`] against an explicit `host:port` (a bare host defaults to the standard logon port).
+/// Added for the capacity benchmark, which must be re-runnable against an arbitrary shard's
+/// gateway (work-item #18 AC#4); every other caller goes through [`logon`].
+pub fn logon_at(logon_addr: &str, account: &str, password: &str) -> Result<([u8; 40], String)> {
+    let addr = if logon_addr.contains(':') {
+        logon_addr.to_string()
+    } else {
+        format!("{logon_addr}:{LOGON_PORT}")
+    };
+    let mut s = TcpStream::connect(&addr).with_context(|| format!("connect logon {addr}"))?;
     s.set_read_timeout(Some(Duration::from_secs(10)))?;
 
     CMD_AUTH_LOGON_CHALLENGE_Client {
