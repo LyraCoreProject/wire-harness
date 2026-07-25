@@ -4,6 +4,11 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 publish = false
+# The capacity benchmark (issue #18) added a SECOND binary to this crate, which made the bare
+# `cargo run -p wire-client` that ~6 test scripts use ambiguous — every one of them failed with
+# "could not determine which binary to run". Name the default so those scripts keep working;
+# the benchmark is reached explicitly via `--bin bench`.
+default-run = "wire-client"
 
 # Headless 1.12.1 (build 5875) wire test-client: speaks the real WoW protocol to the
 # gateway so tests can drive CMSG and assert on decoded SMSG (no wine client in the loop).
