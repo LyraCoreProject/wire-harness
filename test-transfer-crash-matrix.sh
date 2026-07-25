@@ -64,15 +64,18 @@ PAD_X=-8930.0; PAD_Y=-250.0; PAD_Z=80.0    # the open-world staging pad (test-bo
 DM_TRIGGER=78                              # "Deadmines - Entering" → map 36
 FAILED=0
 
-# ponytail: the seven step names are a literal list of strings — the same list as
-# `transfer::ABORT_STEPS` and as the headless matrix's `kill_at` loop. If that list ever grows, this
-# one is a one-line edit; a shared generator would cost more than it saves.
+# ponytail: the eight step names are a literal list of strings — the same list as
+# `transfer::ABORT_STEPS`. The headless matrix now iterates `ABORT_STEPS` directly; THIS list is the
+# only hand-copy left, and it has already drifted once (#34 added `publish_shard_index` to the drive
+# and to `ABORT_STEPS` without touching this file, so the live matrix silently kept testing seven
+# boundaries and reporting PASS). If `ABORT_STEPS` grows again, this is the one-line edit.
 STEPS=(
   begin_transfer
   ensure_instance
   import_character_blob
   confirm_import
   finish_transfer
+  publish_shard_index
   release_transfer
   evict_instance_population
 )
