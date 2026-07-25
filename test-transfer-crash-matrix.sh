@@ -29,6 +29,14 @@
 #   ZERO-LOSS  at least one database holds a durable `game_character` row  (never zero)
 #   NO-DUPE    at most one database holds a LIVE copy                      (never both)
 #
+# Neither of those is worth anything on its own, because Ginger's STAGED state — one durable,
+# unfenced copy on the world database — satisfies both. So each step also asserts:
+#
+#   PROGRESS   after the injected death the SOURCE copy is fenced or gone   (the drive really ran)
+#   SETTLE     after the clean restart + login, exactly one LIVE copy AND exactly one DURABLE copy
+#              (one live but two durable = the player is fine and a copy is stranded — AC#3 asks
+#              for whole on exactly ONE shard, and a stale ledger row wedges the guid's next hop)
+#
 # where LIVE = the row exists AND no `game_transfer_out`/`game_transfer_in` row fences it under this
 # transfer id (transfer_id IS the character guid). This mirrors `FakeShardDb::live` in the gateway's
 # headless crash matrix (`world::tests::a_gateway_kill_at_every_transfer_step_recovers_to_...`).
@@ -143,7 +151,17 @@ bring_home() {
     return 1
   fi
   sqlq "DELETE FROM game_instance_binding WHERE character_guid = $guid" >/dev/null
-  sqlq "UPDATE game_character SET x = $PAD_X, y = $PAD_Y, z = $PAD_Z, map_id = 0, instance_id = 0 WHERE guid = $guid" >/dev/null
+  # `game_character` has NO `instance_id` column — it is `pending_instance_id` (module/src/character.rs).
+  # Naming a column that does not exist makes spacetime reject the WHOLE statement, and `sqlq`
+  # swallows the error (2>/dev/null, rc unchecked): the staging then silently does nothing and the
+  # matrix runs against an unknown starting position. test-bot-deadmines.sh is the precedent for the
+  # same pad, and it stages no instance column at all.
+  sqlq "UPDATE game_character SET x = $PAD_X, y = $PAD_Y, z = $PAD_Z, map_id = 0, pending_instance_id = 0 WHERE guid = $guid" >/dev/null
+  # ASSERT the write landed. A silently-rejected UPDATE is exactly how the bug above hid.
+  if [ "$(db_count "$DB" "SELECT COUNT(*) AS n FROM game_character WHERE guid = $guid AND map_id = 0")" != "1" ]; then
+    echo "[xcrash] the staging UPDATE did not take — Ginger is not on map 0 on '$DB' (rejected SQL?)" >&2
+    return 1
+  fi
 }
 
 # ---------- preflight ----------
@@ -185,7 +203,17 @@ for STEP in "${STEPS[@]}"; do
   gw_start "" || { bad "clean gateway would not start"; MATRIX+=("FAIL $STEP"); continue; }
   bring_home "$GINGER" || { bad "could not stage Ginger on '$DB'"; MATRIX+=("FAIL $STEP"); continue; }
   spacetime call "$IDB" -- release_transfer "$GINGER" >/dev/null 2>&1 # clear any fence a previous step left
-  note "staged: Ginger on '$DB', map 0, pad ($PAD_X $PAD_Y $PAD_Z)"
+  # ...and PROVE the instance shard is empty of her before arming anything. `bring_home` only
+  # guarantees a copy on '$DB'; it never looks at '$IDB'. A copy left there by an earlier step makes
+  # ZERO-LOSS pass no matter what the injection does (the count is already >= 1 before the transfer
+  # starts), and the `release_transfer` above has just UN-FENCED it — so the pair would be live on
+  # both shards before this step's crash point is even reached. Refuse to report against that.
+  STAGED_I=$(has_char "$IDB" "$GINGER")
+  if [ "$STAGED_I" != "0" ]; then
+    bad "staging: '$IDB' still holds $STAGED_I durable copy/copies of Ginger BEFORE the injection — every assertion below would be measured against a two-copy start state. Aborting this step rather than reporting against it."
+    MATRIX+=("FAIL $STEP"); continue
+  fi
+  note "staged: Ginger on '$DB' ONLY, map 0, pad ($PAD_X $PAD_Y $PAD_Z)"
 
   # 2. restart WITH the injection armed.
   gw_start "$STEP" || { bad "injected gateway would not start"; MATRIX+=("FAIL $STEP"); continue; }
@@ -219,6 +247,22 @@ for STEP in "${STEPS[@]}"; do
   HW=$(has_char "$DB" "$GINGER");  HI=$(has_char "$IDB" "$GINGER")
   LW=$(live_on  "$DB" "$GINGER");  LI=$(live_on  "$IDB" "$GINGER")
   note "durable: $DB=$HW $IDB=$HI   live(unfenced): $DB=$LW $IDB=$LI"
+  # PROGRESS — the one assertion that is not satisfied by "nothing happened". Ginger sits durable
+  # and unfenced on '$DB' at the start of every step, and in THAT state ZERO-LOSS (1 >= 1), NO-DUPE
+  # (1 <= 1) and the post-recovery check (1 live) all pass. The injected death above is the only
+  # other non-vacuous check, so assert the DURABLE evidence too: every crash point from step 1 on
+  # leaves the source copy either FENCED (1-4: its out-row, or the confirm in-row) or GONE (5-7,
+  # finish_transfer deleted it). Still durable AND unfenced means the drive never reached step 1 —
+  # the portal never fired, or the transfer never routed cross-database — and nothing below is
+  # attributable to $STEP. Robust to the reaper landing first: roll-forward leaves it GONE.
+  FW=$(fenced_by "$DB" "$GINGER")
+  if [ "$HW" = "0" ]; then
+    good "PROGRESS: the source copy is GONE from '$DB' — the drive reached $STEP (>= finish_transfer)"
+  elif [ "${FW:-0}" -ge 1 ] 2>/dev/null; then
+    good "PROGRESS: the source copy on '$DB' is FENCED by $FW escrow ledger row(s) — the drive really reached $STEP"
+  else
+    bad "PROGRESS: Ginger is still durable AND UNFENCED on '$DB' (durable=$HW, fences=$FW) — the transfer never got past begin_transfer, so ZERO-LOSS/NO-DUPE/recovery below would all pass VACUOUSLY. Nothing here is attributable to $STEP."
+  fi
   if [ $(( HW + HI )) -ge 1 ]; then
     good "ZERO-LOSS: $(( HW + HI )) durable game_character copy/copies survive the crash"
   else
@@ -246,6 +290,17 @@ for STEP in "${STEPS[@]}"; do
     good "post-recovery: settled LIVE on exactly one database ($DB=$LW, $IDB=$LI)"
   else
     bad "post-recovery: expected exactly 1 LIVE copy after the restart+login, found $(( LW + LI )) (durable $DB=$HW/$IDB=$HI, live $DB=$LW/$IDB=$LI) — recovery did not settle"
+  fi
+  # AC#3 says WHOLE ON EXACTLY ONE SHARD, and the live count alone does not say that: a recovery
+  # that puts the player back in the world while leaving a stranded durable copy behind (frozen
+  # under a never-cleared out-row, or orphaned unfenced) reads as 1 LIVE and would be reported as a
+  # PASS. Two durable copies are the safe state only DURING the protocol; once it has settled they
+  # are a leak, and the frozen one can wedge the guid's next transfer (`BeginPlan::Replay` on a
+  # stale ledger row — see `settle_transfer`'s no-escrow arm).
+  if [ $(( HW + HI )) -eq 1 ]; then
+    good "post-recovery: exactly one DURABLE copy remains ($DB=$HW, $IDB=$HI)"
+  else
+    bad "post-recovery: expected exactly 1 DURABLE game_character row after the restart+login, found $(( HW + HI )) ($DB=$HW, $IDB=$HI) — the transfer settled the PLAYER but stranded a copy on the other database"
   fi
 
   if [ "$STEP_FAILED" -eq 0 ]; then
