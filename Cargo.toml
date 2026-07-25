@@ -16,3 +16,7 @@ wow_world_messages = { version = "0.3", features = ["vanilla", "sync"] }
 # Only needed to name `FriendResult` (SMSG_FRIEND_STATUS's result field) — see gateway/Cargo.toml.
 wow_world_base = "0.3"
 anyhow = "1"
+# `bench` (src/bin/bench) only: the capacity report is a serde struct + a Display, and both
+# versions are already in the workspace lockfile — no new dependency tree.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
