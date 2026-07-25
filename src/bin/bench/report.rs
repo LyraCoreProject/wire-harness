@@ -32,11 +32,18 @@ pub fn plan_ramp(stages: &[usize]) -> Result<Vec<RampStep>, String> {
     if stages.is_empty() {
         return Err("empty ramp: pass --stages 50,100,150,200".into());
     }
+    // `--stages 0` is the OBSERVE-ONLY run (#21): connect nobody, hold the window, and report what
+    // the writers did. The load comes from outside the harness — N scripted dungeon runs — and the
+    // thing being measured is the pair of writers, not this process's synthetic players. It is
+    // deliberately the ONLY way to get a zero rung: a `0` anywhere inside a real ramp is a typo.
+    if stages == [0] {
+        return Ok(vec![RampStep { target: 0, spawn: 0 }]);
+    }
     let mut plan = Vec::with_capacity(stages.len());
     let mut live = 0usize;
     for &target in stages {
         if target == 0 {
-            return Err("a ramp stage must be > 0".into());
+            return Err("a ramp stage must be > 0 (use `--stages 0` alone for an observe-only run)".into());
         }
         if target <= live {
             return Err(format!(
@@ -120,7 +127,9 @@ impl Latency {
 //  Report
 // ---------------------------------------------------------------------------------------------
 
-pub const SCHEMA_VERSION: u32 = 1;
+/// 2 (#21): `target.witness_db` + `stages[].witness_writer` — the second sampled database. Purely
+/// additive and both fields are `#[serde(default)]`, so a v1 artifact still deserializes.
+pub const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Target {
@@ -132,6 +141,12 @@ pub struct Target {
     pub metrics_url: String,
     /// `db=` label prefix selecting one database on the node; empty = aggregate all.
     pub db: String,
+    /// `--witness-db`: a SECOND database sampled over the same measured windows (#21). Empty = not
+    /// used. The witness is never driven by this harness — it is there so one run can state both
+    /// halves of "instance load scales on the pool while the open world stays flat" from the same
+    /// window, instead of from two runs an operator has to argue were comparable.
+    #[serde(default)]
+    pub witness_db: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -225,6 +240,9 @@ pub struct Stage {
     pub client: ClientCounters,
     pub harness: HarnessHealth,
     pub writer: Writer,
+    /// The `--witness-db` database's writer over the SAME window (#21). `None` = no witness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub witness_writer: Option<Writer>,
     pub tx_per_sec_by_reducer: Vec<NamedRate>,
     pub event_tables: Vec<TableRate>,
     /// A node restart / module republish reset the node's counters inside this window, so every
@@ -291,6 +309,14 @@ impl fmt::Display for Report {
             self.target.metrics_url,
             if self.target.db.is_empty() { "<all databases on the node>" } else { &self.target.db }
         )?;
+        if !self.target.witness_db.is_empty() {
+            writeln!(
+                f,
+                "witness db     {} — sampled over the same windows, driven by nothing in this \
+                 harness",
+                self.target.witness_db
+            )?;
+        }
         writeln!(
             f,
             "ramp           {:?}, {}s warm-up + {}s measured window per rung, {}ms heartbeat, \
@@ -398,6 +424,19 @@ impl fmt::Display for Report {
                     s.writer.txns_per_sec,
                     s.writer.mean_queue_wait_ms
                 )?;
+                if let Some(w) = &s.witness_writer {
+                    writeln!(
+                        f,
+                        "witness: occupancy {:.1}% ({:.2}s CPU over {:.1}s wall), {:.0} tx/s, mean \
+                         queue wait {:.2}ms — database {}",
+                        w.occupancy_pct,
+                        w.total_cpu_sec,
+                        s.window_secs,
+                        w.txns_per_sec,
+                        w.mean_queue_wait_ms,
+                        self.target.witness_db
+                    )?;
+                }
                 writeln!(
                     f,
                     "egress:  {:.0} KiB/s to clients, {:.0} rows scanned/s",
@@ -523,7 +562,17 @@ mod tests {
         assert!(plan_ramp(&[100, 50]).is_err());
         assert!(plan_ramp(&[50, 50]).is_err());
         assert!(plan_ramp(&[]).is_err());
-        assert!(plan_ramp(&[0]).is_err());
+    }
+
+    /// `--stages 0` is the observe-only run (#21): one window, nobody connected, both writers
+    /// reported. A `0` anywhere else is still a typo and still refused, so the zero rung cannot be
+    /// reached by accident from a real ramp.
+    #[test]
+    fn a_lone_zero_stage_is_the_observe_only_run_and_a_zero_anywhere_else_is_refused() {
+        assert_eq!(plan_ramp(&[0]).unwrap(), vec![RampStep { target: 0, spawn: 0 }]);
+        assert!(plan_ramp(&[0, 50]).is_err(), "a zero inside a ramp is a typo, not a mode");
+        assert!(plan_ramp(&[50, 0]).is_err());
+        assert!(plan_ramp(&[0, 0]).is_err());
     }
 
     #[test]
@@ -546,6 +595,7 @@ mod tests {
                 world: "127.0.0.1:8085".into(),
                 metrics_url: "http://127.0.0.1:3000/v1/metrics".into(),
                 db: String::new(),
+                witness_db: String::new(),
             },
             RunConfig { stages: vec![50], hold_secs: 60, ..Default::default() },
         );

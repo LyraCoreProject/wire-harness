@@ -80,9 +80,15 @@ TARGET (re-runnable per shard):
   --world HOST:PORT       world tier override                      [realm-list answer]
   --metrics URL           SpacetimeDB node metrics endpoint        [http://127.0.0.1:3000/v1/metrics]
   --db PREFIX             db= label prefix selecting ONE database  [required if the node hosts >1]
+  --witness-db PREFIX     a SECOND database sampled over the same measured windows and reported
+                          alongside the first. Nothing in this harness drives it — it is how one
+                          run states both halves of \"instance load scales on the pool while the
+                          open world stays flat\" (#21) from the same window.  [none]
 
 RAMP:
   --stages 50,100,150,200 additive player rungs                    [50,100,150,200]
+  --stages 0              OBSERVE-ONLY: connect nobody, hold one window, report both writers.
+                          For load this harness does not generate (e.g. N scripted dungeon runs).
   --warmup SECS           settle time after each rung before measuring   [15]
   --hold SECS             measured window per rung                       [60]
   --login-stagger-ms MS   delay between consecutive logins              [40]
@@ -536,6 +542,34 @@ fn validate_db_selection(s: &metrics::Snapshot, db: &str, dbf: &str) -> Result<(
     Ok(())
 }
 
+/// The `--witness-db`'s own preflight (#21), and its failure mode is nastier than `--db`'s.
+///
+/// A witness that matches nothing reports **0.0% occupancy** — which reads exactly like "the open
+/// world stayed perfectly flat while the instance pool absorbed the load", i.e. the conclusion the
+/// witness exists to *test*. An instrument that can confirm its own hypothesis by typo is not an
+/// instrument. A witness equal to the primary `--db` is refused for the same reason: it reports one
+/// writer twice and the two columns agree by construction.
+fn validate_witness_selection(s: &metrics::Snapshot, db: &str, witness: &str, wdbf: &str) -> Result<()> {
+    if witness.is_empty() {
+        return Ok(()); // no witness: the pre-#21 single-database report
+    }
+    if !s.has_any(metrics::OCCUPANCY_FAMILY, &[wdbf]) {
+        bail!(
+            "--witness-db {witness:?} matches no database on this node — it would report 0.0% \
+             occupancy, which is indistinguishable from the flat second writer this comparison is \
+             supposed to demonstrate.\nmeasurable databases: {:?}",
+            s.databases_with(metrics::OCCUPANCY_FAMILY)
+        );
+    }
+    if !db.is_empty() && (witness.starts_with(db) || db.starts_with(witness)) {
+        bail!(
+            "--witness-db {witness:?} and --db {db:?} select the same database — the report would \
+             show one writer in two columns, which agree by construction and prove nothing"
+        );
+    }
+    Ok(())
+}
+
 /// Park every required metric family the current selection cannot see. `parked[]` is the report's
 /// honesty mechanism, and a hard-coded entry cannot detect a metric that actually went missing —
 /// this makes the list a function of the live scrape, so a field reading `0` because its family was
@@ -568,6 +602,10 @@ fn main() -> Result<()> {
     let metrics_url = args.str("metrics", "http://127.0.0.1:3000/v1/metrics");
     let db = args.str("db", "");
     let dbf = metrics::db_filter(&db);
+    // #21: the second database, sampled but never driven. Empty = absent; the whole feature is one
+    // extra `writer_stats` call per window, so an unused witness costs a run nothing.
+    let witness_db = args.str("witness-db", "");
+    let witness_dbf = metrics::db_filter(&witness_db);
     let table_filter = args.str("tables-filter", "");
     // SAFETY GATE. Every default in this binary points at the LOCAL DEVELOPMENT STACK, so a bare
     // `cargo run -p wire-client --bin bench` used to log 200 synthetic players into whatever node
@@ -597,7 +635,8 @@ fn main() -> Result<()> {
         // Validate AFTER printing, so the operator sees the node's actual identities alongside the
         // complaint — but still fail, so the runner script's `|| exit 1` catches a bad selection
         // before it commits the machine to an eight-minute ramp that measures nothing.
-        return validate_db_selection(&preflight, &db, &dbf);
+        validate_db_selection(&preflight, &db, &dbf)?;
+        return validate_witness_selection(&preflight, &db, &witness_db, &witness_dbf);
     }
     let Some(label) = label else {
         bail!(
@@ -611,6 +650,7 @@ fn main() -> Result<()> {
         );
     };
     validate_db_selection(&preflight, &db, &dbf)?;
+    validate_witness_selection(&preflight, &db, &witness_db, &witness_dbf)?;
 
     let sh = Arc::new(Shared {
         epoch: Instant::now(),
@@ -642,6 +682,7 @@ fn main() -> Result<()> {
             world: cfg.world.clone().unwrap_or_else(|| "<realm-list>".into()),
             metrics_url: metrics_url.clone(),
             db: db.clone(),
+            witness_db: witness_db.clone(),
         },
         run_cfg,
     );
@@ -714,7 +755,13 @@ fn main() -> Result<()> {
         let d = m0.delta(&m1);
         // Every metric read here is a monotonic counter, so a negative delta means the node's
         // counters were reset inside the window (restart / republish) and the stage is void.
-        let counter_reset = d.first_negative(&[&dbf]).map(|(k, v)| {
+        // The witness's series are part of the window too: a counter reset that only touched the
+        // witness would otherwise void nothing and quietly hand back a bogus second column.
+        let mut reset_filters: Vec<&str> = vec![&dbf];
+        if !witness_db.is_empty() {
+            reset_filters.push(&witness_dbf);
+        }
+        let counter_reset = d.first_negative(&reset_filters).map(|(k, v)| {
             eprintln!("[bench] rung {}: COUNTER RESET during the window ({k} went {v:+.3}) — this stage's server-side numbers are void", step.target);
             k.clone()
         });
@@ -740,6 +787,8 @@ fn main() -> Result<()> {
                 harness_backpressure_events: dc[4],
             },
             writer: writer_stats(&d, secs, &dbf),
+            witness_writer: (!witness_db.is_empty())
+                .then(|| writer_stats(&d, secs, &witness_dbf)),
             tx_per_sec_by_reducer: tx_by_reducer(&d, secs, &dbf, 15),
             event_tables: table_rates(&d, secs, &dbf, &table_filter, 20),
         };
@@ -953,6 +1002,74 @@ spacetime_num_bytes_sent_to_clients_total{db="aaa",txn_type="Reducer"} 5
         assert!(validate_db_selection(&metrics::parse(ONE_DB), "", &dbf).is_ok());
         // A node with nothing published is refused too, rather than measuring an empty ramp.
         assert!(validate_db_selection(&metrics::parse(""), "", &dbf).is_err());
+    }
+
+    /// #21: the witness column's failure modes, both of which would *confirm the hypothesis*.
+    /// A witness that matches nothing reports 0.0% — "the open world stayed flat" — and a witness
+    /// that selects the same database as `--db` reports one writer twice, so the two columns track
+    /// each other perfectly no matter what the pool does.
+    #[test]
+    fn a_witness_that_matches_nothing_or_duplicates_the_primary_db_is_refused() {
+        let two = metrics::parse(TWO_DBS);
+        // Matches nothing → would publish a beautifully flat 0.0%.
+        let ghost = metrics::db_filter("deadbeef");
+        assert_eq!(writer_stats(&two, 60.0, &ghost).occupancy_pct, 0.0);
+        let err = validate_witness_selection(&two, "aaa", "deadbeef", &ghost).unwrap_err().to_string();
+        assert!(err.contains("matches no database"), "{err}");
+        assert!(err.contains("bbb"), "the error must name the identities that DO exist: {err}");
+        // Same database in both columns.
+        let err = validate_witness_selection(&two, "aaa", "aaa", &metrics::db_filter("aaa"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("same database"), "{err}");
+        // …and both are PREFIX selectors, so overlap is the realistic typo, not equality:
+        // `--db spacetime-instances --witness-db spacetime-instances-1` makes the primary column
+        // aggregate the witness. Tightening the guard to `witness == db` left this suite green.
+        let err = validate_witness_selection(&two, "aa", "aaa", &metrics::db_filter("aaa"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("same database"), "a witness the primary's prefix swallows: {err}");
+        let err = validate_witness_selection(&two, "aaa", "aa", &metrics::db_filter("aa"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("same database"), "a witness that swallows the primary: {err}");
+        // Two genuinely different databases is the whole point, and no witness at all is the
+        // pre-#21 report — neither may be refused.
+        assert!(validate_witness_selection(&two, "aaa", "bbb", &metrics::db_filter("bbb")).is_ok());
+        assert!(validate_witness_selection(&two, "aaa", "", &metrics::db_filter("")).is_ok());
+    }
+
+    /// …and that the witness is actually SAMPLED. The ramp loop in `main` has no unit harness (it
+    /// scrapes a live node), so this is a source scan, like the module's reducer-body tripwires.
+    /// Adversarial review: hard-coding `witness_writer: None` and dropping the witness from the
+    /// counter-reset filters each left all 22 wire-client tests green — the preflight refusals above
+    /// pin only that a bad selection is REFUSED, never that a good one produces a second column.
+    #[test]
+    fn the_witness_column_is_sampled_over_the_same_window_and_voids_on_its_own_counter_reset() {
+        let src = include_str!("main.rs");
+        let at = src.find("fn main() -> Result<()> {").expect("`main` moved");
+        // Bound the scan at the test module, or the assertion strings BELOW would satisfy it
+        // themselves — a self-matching scanner passes on an empty `main`. (Caught by re-running the
+        // two mutations this test exists for: both stayed green until this line was added.)
+        let end = src[at..].find("\n#[cfg(test)]").expect("the test module follows `main`");
+        let body: String = src[at..at + end]
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            body.contains("witness_writer: (!witness_db.is_empty())")
+                && body.contains("writer_stats(&d, secs, &witness_dbf)"),
+            "the ramp loop no longer derives `witness_writer` from THIS window's scrape delta — \
+             `--witness-db` would be accepted at preflight and then report nothing, and #21 AC#2's \
+             whole flat-vs-scales comparison would silently collapse to the single-writer report"
+        );
+        assert!(
+            body.contains("reset_filters.push(&witness_dbf)"),
+            "the counter-reset check no longer covers the witness's series — a node restart that \
+             touched only the witness database would void nothing and hand back a bogus second \
+             column for a window whose counters were reset mid-flight"
+        );
     }
 
     #[test]
