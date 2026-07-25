@@ -1022,10 +1022,54 @@ spacetime_num_bytes_sent_to_clients_total{db="aaa",txn_type="Reducer"} 5
             .unwrap_err()
             .to_string();
         assert!(err.contains("same database"), "{err}");
+        // …and both are PREFIX selectors, so overlap is the realistic typo, not equality:
+        // `--db spacetime-instances --witness-db spacetime-instances-1` makes the primary column
+        // aggregate the witness. Tightening the guard to `witness == db` left this suite green.
+        let err = validate_witness_selection(&two, "aa", "aaa", &metrics::db_filter("aaa"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("same database"), "a witness the primary's prefix swallows: {err}");
+        let err = validate_witness_selection(&two, "aaa", "aa", &metrics::db_filter("aa"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("same database"), "a witness that swallows the primary: {err}");
         // Two genuinely different databases is the whole point, and no witness at all is the
         // pre-#21 report — neither may be refused.
         assert!(validate_witness_selection(&two, "aaa", "bbb", &metrics::db_filter("bbb")).is_ok());
         assert!(validate_witness_selection(&two, "aaa", "", &metrics::db_filter("")).is_ok());
+    }
+
+    /// …and that the witness is actually SAMPLED. The ramp loop in `main` has no unit harness (it
+    /// scrapes a live node), so this is a source scan, like the module's reducer-body tripwires.
+    /// Adversarial review: hard-coding `witness_writer: None` and dropping the witness from the
+    /// counter-reset filters each left all 22 wire-client tests green — the preflight refusals above
+    /// pin only that a bad selection is REFUSED, never that a good one produces a second column.
+    #[test]
+    fn the_witness_column_is_sampled_over_the_same_window_and_voids_on_its_own_counter_reset() {
+        let src = include_str!("main.rs");
+        let at = src.find("fn main() -> Result<()> {").expect("`main` moved");
+        // Bound the scan at the test module, or the assertion strings BELOW would satisfy it
+        // themselves — a self-matching scanner passes on an empty `main`. (Caught by re-running the
+        // two mutations this test exists for: both stayed green until this line was added.)
+        let end = src[at..].find("\n#[cfg(test)]").expect("the test module follows `main`");
+        let body: String = src[at..at + end]
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            body.contains("witness_writer: (!witness_db.is_empty())")
+                && body.contains("writer_stats(&d, secs, &witness_dbf)"),
+            "the ramp loop no longer derives `witness_writer` from THIS window's scrape delta — \
+             `--witness-db` would be accepted at preflight and then report nothing, and #21 AC#2's \
+             whole flat-vs-scales comparison would silently collapse to the single-writer report"
+        );
+        assert!(
+            body.contains("reset_filters.push(&witness_dbf)"),
+            "the counter-reset check no longer covers the witness's series — a node restart that \
+             touched only the witness database would void nothing and hand back a bogus second \
+             column for a window whose counters were reset mid-flight"
+        );
     }
 
     #[test]
