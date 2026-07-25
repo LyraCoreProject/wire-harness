@@ -119,14 +119,66 @@ impl Snapshot {
     /// Sum every sample of `name` whose label blob contains all of `filters`
     /// (raw substrings, e.g. `txn_type="Reducer"`).
     pub fn sum(&self, name: &str, filters: &[&str]) -> f64 {
+        self.matching(name, filters).map(|(_, v)| *v).sum()
+    }
+
+    /// Every `(key, value)` of `name` whose label blob contains all of `filters`.
+    fn matching<'a>(
+        &'a self,
+        name: &'a str,
+        filters: &'a [&'a str],
+    ) -> impl Iterator<Item = (&'a String, &'a f64)> + 'a {
+        self.0.iter().filter(move |(k, _)| {
+            let (n, labels) = split_key(k);
+            n == name && filters.iter().all(|f| labels.contains(f))
+        })
+    }
+
+    /// Does ANY sample match? [`Snapshot::sum`] cannot answer this: it returns `0.0` both for "the
+    /// series summed to zero" and for "no such series exists". The difference is the whole ball
+    /// game — a `--db` prefix that matches nothing makes every server-side number in the report
+    /// `0.0`, which reads exactly like a completely idle writer. Preflight uses this to refuse the
+    /// run instead of publishing a confident zero.
+    pub fn has_any(&self, name: &str, filters: &[&str]) -> bool {
+        self.matching(name, filters).next().is_some()
+    }
+
+    /// On a DELTA snapshot: the first sample that went BACKWARDS, if any. Every metric this
+    /// benchmark reads is a monotonically-increasing counter, so a negative delta can only mean the
+    /// counters were reset underneath the measured window (node restart, module republish) — in
+    /// which case every rate and the occupancy figure for that window are garbage and must be
+    /// flagged rather than reported.
+    pub fn first_negative(&self, filters: &[&str]) -> Option<(&String, f64)> {
         self.0
             .iter()
             .filter(|(k, _)| {
-                let (n, labels) = split_key(k);
-                n == name && filters.iter().all(|f| labels.contains(f))
+                let (_, labels) = split_key(k);
+                filters.iter().all(|f| labels.contains(f))
             })
-            .map(|(_, v)| *v)
-            .sum()
+            .find(|(_, v)| **v < 0.0)
+            .map(|(k, v)| (k, *v))
+    }
+
+    /// Every distinct `db=` label value on the node, sorted.
+    pub fn databases(&self) -> Vec<String> {
+        self.0
+            .keys()
+            .map(|k| split_key(k).1)
+            .filter_map(|labels| label_value(labels, "db"))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    /// The `db=` identities that expose `name` — i.e. the databases this report could actually
+    /// measure. Distinct from [`Snapshot::databases`], which also lists the node's placeholder
+    /// label (it carries only zeroed bookkeeping series, never transaction CPU).
+    pub fn databases_with(&self, name: &str) -> Vec<String> {
+        self.matching(name, &[])
+            .filter_map(|(k, _)| label_value(split_key(k).1, "db"))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
     }
 
     /// Sum `name` grouped by one label, sorted by value descending. Empty label values are
@@ -153,7 +205,8 @@ impl Snapshot {
 }
 
 /// Substring filter selecting one database on the node: `db="<prefix>`. An empty `db` yields an
-/// always-true filter (aggregate every database — the normal single-module local node).
+/// always-true filter (aggregate every database — only safe on a node hosting ONE database; see
+/// `main.rs::validate_db_selection`).
 pub fn db_filter(db: &str) -> String {
     if db.is_empty() {
         String::new()
@@ -161,6 +214,23 @@ pub fn db_filter(db: &str) -> String {
         format!("db=\"{db}")
     }
 }
+
+/// The node metric families the server-side half of the report is built from: `(report field,
+/// metric name)`. Preflight refuses the run if the `--db` selection exposes NONE of them, and
+/// parks (in the report's own `parked[]`) any individual family it cannot see — so a field that
+/// reads `0` because the metric was missing is never mistaken for a measured zero.
+pub const REQUIRED_FAMILIES: &[(&str, &str)] = &[
+    ("writer occupancy %", "spacetime_txn_cpu_time_sec_sum"),
+    ("tx/s by reducer", "spacetime_num_txns_total"),
+    ("event inserts/s", "spacetime_num_rows_inserted_total"),
+    ("event reaps/s", "spacetime_num_rows_deleted_total"),
+    ("queue wait (saturation)", "spacetime_reducer_wait_time_sec_sum"),
+    ("egress bytes/s", "spacetime_num_bytes_sent_to_clients_total"),
+];
+
+/// The one family whose presence defines "this database is measurable at all" — occupancy is THE
+/// capacity number, and it is the family the `--db` selection is validated against.
+pub const OCCUPANCY_FAMILY: &str = "spacetime_txn_cpu_time_sec_sum";
 
 #[cfg(test)]
 mod tests {
@@ -224,6 +294,55 @@ spacetime_num_rows_inserted_total{db="abc",table_name="game_movement_event",txn_
             "movement_update did not move during the window, so it is not a group at all"
         );
         assert_eq!(d.sum("spacetime_num_txns_total", &[r#"reducer="movement_update""#]), 0.0);
+    }
+
+    /// The bug this guards is the nastiest one the harness can have: a `--db` prefix that matches
+    /// nothing makes EVERY server-side number `0.0`, which renders as a perfectly plausible report
+    /// of a completely idle writer. `sum` cannot tell the two apart; `has_any` can.
+    #[test]
+    fn has_any_separates_an_absent_series_from_a_zero_valued_one() {
+        let s = parse(SAMPLE);
+        assert!(s.has_any("spacetime_txn_cpu_time_sec_sum", &[r#"db="abc"#]));
+        assert!(!s.has_any("spacetime_txn_cpu_time_sec_sum", &[r#"db="deadbeef"#]));
+        assert!(!s.has_any("no_such_metric", &[]));
+        // The trap: both of these sum to 0.0, but only one of them was measured.
+        let zeroed = parse(r#"spacetime_num_txns_total{db="abc",reducer="idle"} 0"#);
+        assert_eq!(zeroed.sum("spacetime_num_txns_total", &[r#"db="abc"#]), 0.0);
+        assert_eq!(zeroed.sum("spacetime_num_txns_total", &[r#"db="zzz"#]), 0.0);
+        assert!(zeroed.has_any("spacetime_num_txns_total", &[r#"db="abc"#]));
+        assert!(!zeroed.has_any("spacetime_num_txns_total", &[r#"db="zzz"#]));
+    }
+
+    #[test]
+    fn first_negative_catches_a_counter_reset_mid_window() {
+        let before = parse(SAMPLE);
+        // The node restarted: cumulative counters are back near zero, so the delta goes backwards.
+        let after = parse(&SAMPLE.replace("} 400", "} 12"));
+        let d = before.delta(&after);
+        let (key, v) = d.first_negative(&[]).expect("a reset must be detectable");
+        assert!(key.contains("movement_update"), "got {key}");
+        assert_eq!(v, -388.0);
+        // A well-behaved window has no negative sample at all.
+        assert!(before.delta(&before).first_negative(&[]).is_none());
+    }
+
+    #[test]
+    fn databases_lists_identities_and_which_ones_are_measurable() {
+        let s = parse(SAMPLE);
+        assert_eq!(s.databases(), vec!["abc".to_string(), "zzz".to_string()]);
+        // Both databases carry transaction CPU here, so both are measurable — this is exactly the
+        // multi-database case where an empty --db would silently conflate two writers.
+        assert_eq!(s.databases_with(OCCUPANCY_FAMILY), vec!["abc".to_string(), "zzz".to_string()]);
+        // A node whose second identity is the placeholder label (zeroed bookkeeping only) has one
+        // measurable database, and an empty --db is safe there.
+        let one = parse(
+            r#"
+spacetime_txn_cpu_time_sec_sum{db="abc",reducer="",txn_type="Reducer"} 10.5
+spacetime_num_table_rows{db="000abcd",table_name="x"} 135
+"#,
+        );
+        assert_eq!(one.databases().len(), 2);
+        assert_eq!(one.databases_with(OCCUPANCY_FAMILY), vec!["abc".to_string()]);
     }
 
     #[test]

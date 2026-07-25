@@ -88,6 +88,17 @@ pub struct Latency {
 }
 
 impl Latency {
+    /// Render one percentile for the human report. A window with NO samples reports every
+    /// percentile as `0`, which in a latency column reads as "0ms — excellent" rather than
+    /// "nothing was observed". Print an em dash instead, so an empty rung is unmistakable.
+    pub fn cell(&self, value: u32) -> String {
+        if self.samples == 0 {
+            "—".to_string()
+        } else {
+            value.to_string()
+        }
+    }
+
     pub fn from_samples(mut v: Vec<u32>) -> Self {
         if v.is_empty() {
             return Self::default();
@@ -157,6 +168,10 @@ pub struct Writer {
     pub occupancy_pct: f64,
     pub reducer_cpu_sec: f64,
     pub subscribe_cpu_sec: f64,
+    /// Everything else `txn_cpu_time` is labelled with — `Update`, `Unsubscribe`, `Sql`,
+    /// `Internal`. Occupancy is built from the TOTAL, so without this bucket the human report's
+    /// "Xs reducer + Ys subscribe" decomposition does not add up to the headline percentage.
+    pub other_cpu_sec: f64,
     pub total_cpu_sec: f64,
     pub txns_per_sec: f64,
     /// Mean time a reducer spent QUEUED before running. Queueing delay is the saturation tell:
@@ -179,17 +194,43 @@ pub struct ClientCounters {
     pub harness_backpressure_events: u64,
 }
 
+/// The harness measuring ITSELF. Every movement-latency sample is stamped when the observing
+/// player's thread dequeues the packet, not when the kernel delivered it, so any delay in getting
+/// that thread onto a CPU is added to the reported server latency. With 200 OS threads running SRP6
+/// and per-packet decryption on the same box as the server, that is a real risk of reporting
+/// client-side scheduling delay as server saturation.
+///
+/// This is the control: each player also records how LATE its own heartbeat fired against its own
+/// schedule (`Instant::now() - next_hb` at send time), measured on the same clock and subject to
+/// the same scheduler. It is a lower bound on the harness's contribution — if `p95` here is a
+/// meaningful fraction of the movement `p95`, the rung is measuring the benchmark, not the server.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct HarnessHealth {
+    /// Heartbeat scheduling lateness, ms.
+    pub wakeup_lag_ms: Latency,
+    /// Player threads that entered the world and then lost their session before this window ended.
+    pub players_dropped: usize,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Stage {
     pub players_target: usize,
+    /// Players STILL in the world when the measured window closed — not a cumulative login tally.
+    /// A session that dies mid-run must shrink the offered load in the report too, or a rung looks
+    /// like it sustained 200 players when 60 of them had gone quiet.
     pub players_connected: usize,
     pub players_failed: usize,
     pub window_secs: f64,
     pub movement_latency_ms: Latency,
     pub client: ClientCounters,
+    pub harness: HarnessHealth,
     pub writer: Writer,
     pub tx_per_sec_by_reducer: Vec<NamedRate>,
     pub event_tables: Vec<TableRate>,
+    /// A node restart / module republish reset the node's counters inside this window, so every
+    /// server-side number above is a difference across the reset. Reported, never silently
+    /// swallowed; the stage's numbers are void.
+    pub counter_reset: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -274,19 +315,26 @@ impl fmt::Display for Report {
             "|--------:|----------:|-------------------:|--------------:|-----:|---------:|----:|----:|----:|--------:|"
         )?;
         for s in &self.stages {
+            let l = &s.movement_latency_ms;
             writeln!(
                 f,
-                "| {} | {} | {:.1} | {:.1} | {:.0} | {} | {} | {} | {} | {} |",
+                "| {} | {} | {} | {:.1} | {:.0} | {} | {} | {} | {} | {} |",
                 s.players_target,
                 s.players_connected,
-                s.writer.occupancy_pct,
+                // A stage whose counters were reset mid-window has no valid occupancy at all —
+                // print the fact, not a number nobody can tell is wrong.
+                if s.counter_reset {
+                    "VOID (counter reset)".to_string()
+                } else {
+                    format!("{:.1}", s.writer.occupancy_pct)
+                },
                 s.writer.mean_queue_wait_ms,
                 s.writer.txns_per_sec,
-                s.movement_latency_ms.p50_ms,
-                s.movement_latency_ms.p95_ms,
-                s.movement_latency_ms.p99_ms,
-                s.movement_latency_ms.max_ms,
-                s.movement_latency_ms.samples,
+                l.cell(l.p50_ms),
+                l.cell(l.p95_ms),
+                l.cell(l.p99_ms),
+                l.cell(l.max_ms),
+                l.samples,
             )?;
         }
         writeln!(f)?;
@@ -296,8 +344,13 @@ impl fmt::Display for Report {
             writeln!(f)?;
             writeln!(
                 f,
-                "connected {}/{} ({} failed), measured window {:.1}s",
-                s.players_connected, s.players_target, s.players_failed, s.window_secs
+                "connected {}/{} at window close ({} failed to log in, {} dropped mid-run), \
+                 measured window {:.1}s",
+                s.players_connected,
+                s.players_target,
+                s.players_failed,
+                s.harness.players_dropped,
+                s.window_secs
             )?;
             writeln!(
                 f,
@@ -311,23 +364,47 @@ impl fmt::Display for Report {
                 s.client.frames_received,
                 s.client.harness_backpressure_events
             )?;
+            let w = &s.harness.wakeup_lag_ms;
             writeln!(
                 f,
-                "writer:  occupancy {:.1}% ({:.2}s reducer + {:.2}s subscribe CPU over {:.1}s wall), \
-                 {:.0} tx/s, mean queue wait {:.2}ms",
-                s.writer.occupancy_pct,
-                s.writer.reducer_cpu_sec,
-                s.writer.subscribe_cpu_sec,
-                s.window_secs,
-                s.writer.txns_per_sec,
-                s.writer.mean_queue_wait_ms
+                "harness: heartbeat wake-up lag p50/p95/p99 {}/{}/{}ms — the harness's OWN \
+                 scheduling delay, which is included in the movement numbers above",
+                w.cell(w.p50_ms),
+                w.cell(w.p95_ms),
+                w.cell(w.p99_ms)
             )?;
-            writeln!(
-                f,
-                "egress:  {:.0} KiB/s to clients, {:.0} rows scanned/s",
-                s.writer.egress_bytes_per_sec / 1024.0,
-                s.writer.rows_scanned_per_sec
-            )?;
+            if s.counter_reset {
+                // Print NO server-side figure for this stage. Every one of them is a difference
+                // taken across a counter reset, and a number a reader has to remember to discount
+                // is a number that eventually gets quoted. The JSON keeps the raw values (with
+                // `counter_reset: true`) for anyone debugging the run itself.
+                writeln!(
+                    f,
+                    "writer:  VOID — the node's counters reset inside this window (restart / \
+                     republish), so occupancy, tx/s, queue wait, egress and the per-reducer and \
+                     per-table rates below are all differences across the reset. Re-run this rung."
+                )?;
+            } else {
+                writeln!(
+                    f,
+                    "writer:  occupancy {:.1}% ({:.2}s reducer + {:.2}s subscribe + {:.2}s other \
+                     = {:.2}s CPU over {:.1}s wall), {:.0} tx/s, mean queue wait {:.2}ms",
+                    s.writer.occupancy_pct,
+                    s.writer.reducer_cpu_sec,
+                    s.writer.subscribe_cpu_sec,
+                    s.writer.other_cpu_sec,
+                    s.writer.total_cpu_sec,
+                    s.window_secs,
+                    s.writer.txns_per_sec,
+                    s.writer.mean_queue_wait_ms
+                )?;
+                writeln!(
+                    f,
+                    "egress:  {:.0} KiB/s to clients, {:.0} rows scanned/s",
+                    s.writer.egress_bytes_per_sec / 1024.0,
+                    s.writer.rows_scanned_per_sec
+                )?;
+            }
             writeln!(f)?;
             writeln!(f, "tx/s by reducer (top {}):", s.tx_per_sec_by_reducer.len())?;
             for r in &s.tx_per_sec_by_reducer {
@@ -395,6 +472,38 @@ mod tests {
         assert_eq!(l.max_ms, 1000);
         assert!((l.mean_ms - 220.0).abs() < 1e-9);
         assert_eq!(Latency::from_samples(vec![]), Latency::default());
+    }
+
+    /// A rung that observed NOTHING must not render as a rung with excellent latency. `0ms p99`
+    /// is the single most flattering number in the report, and it is exactly what an empty window
+    /// produces.
+    #[test]
+    fn an_empty_latency_window_renders_as_a_dash_not_as_zero_ms() {
+        let empty = Latency::default();
+        assert_eq!(empty.cell(empty.p99_ms), "—");
+        let real = Latency::from_samples(vec![0, 0, 0]);
+        assert_eq!(real.cell(real.p99_ms), "0", "a MEASURED zero still prints as zero");
+
+        let mut r = Report::new("empty", Target::default(), RunConfig::default());
+        r.stages.push(Stage { players_target: 200, ..Default::default() });
+        let text = r.to_string();
+        assert!(text.contains("| 200 | 0 | 0.0 | 0.0 | 0 | — | — | — | — | 0 |"), "{text}");
+    }
+
+    /// A stage whose window straddled a node restart has no valid server-side number at all — the
+    /// deltas are differences across the reset. It must say so where the headline is read.
+    #[test]
+    fn a_counter_reset_voids_the_headline_occupancy_cell() {
+        let mut r = Report::new("reset", Target::default(), RunConfig::default());
+        r.stages.push(Stage {
+            players_target: 100,
+            counter_reset: true,
+            writer: Writer { occupancy_pct: -412.7, ..Default::default() },
+            ..Default::default()
+        });
+        let text = r.to_string();
+        assert!(text.contains("VOID (counter reset)"), "{text}");
+        assert!(!text.contains("-412.7"), "the bogus number must not be printed at all:\n{text}");
     }
 
     #[test]
