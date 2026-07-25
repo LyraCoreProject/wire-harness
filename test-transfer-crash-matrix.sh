@@ -142,7 +142,34 @@ bring_home() {
   if [ "$holder" = "$IDB" ]; then
     # Cross-map teleport writes the DESTINATION into the character row and despawns the entity; the
     # next world entry is what actually drives the transfer back (`settle_transfer`).
-    spacetime call "$IDB" -- debug_teleport "$guid" 0 $PAD_X $PAD_Y $PAD_Z 0 >/dev/null 2>&1
+    #
+    # ORDER IS LOAD-BEARING (first live run, 2026-07-25): `debug_teleport` resolves the mover through
+    # `entity_by_owner` and REFUSES with "no live entity for guid N" when the character is durable but
+    # logged out — which is exactly the state a crash-recovered Ginger is in on the instance shard. The
+    # original order (teleport, then log in) therefore no-oped every time, and because the call's error
+    # was swallowed the matrix reported "could not stage" with no reason. Materialise her FIRST with a
+    # held session, teleport while she is live, then drop it.
+    # scenario-lib's helpers all read the GLOBAL $DB (it sets `DB=spacetime-core` on source), and
+    # stay_start polls `game_world_entity` there — so it would wait for a live entity on the world
+    # shard for a character who is live on the INSTANCE shard, and time out with "never went live".
+    # Point $DB at the instance shard for the materialise, then restore it.
+    local _saved_db=$DB
+    DB=$IDB
+    if ! stay_start TEST test123 Ginger; then
+      DB=$_saved_db
+      echo "[xcrash] bring_home: could not open a session on '$IDB' to materialise Ginger" >&2
+      return 1
+    fi
+    local tp_err
+    if ! tp_err=$(spacetime call "$IDB" -- debug_teleport "$guid" 0 $PAD_X $PAD_Y $PAD_Z 0 2>&1); then
+      echo "[xcrash] bring_home: debug_teleport on '$IDB' failed: $tp_err" >&2
+      stay_stop
+      DB=$_saved_db
+      return 1
+    fi
+    stay_stop
+    DB=$_saved_db
+    # The world entry on the NEXT login is what drives `settle_transfer` back to '$DB'.
     timeout 90 "$WC" TEST test123 Ginger logout >/dev/null 2>&1
   fi
   if [ "$(has_char "$DB" "$guid")" != "1" ]; then
