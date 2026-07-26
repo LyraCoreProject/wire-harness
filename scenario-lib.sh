@@ -7,9 +7,15 @@
 DB=spacetime-core
 WC=./target/debug/wire-client
 
-sqlq() { spacetime sql "$DB" "$1" 2>/dev/null; }
+# $2/db is optional on every read/lookup helper below (default: the $DB global) — issue #70: a
+# character living on a NON-default database (e.g. an instance or continent shard) used to read as
+# "never went live" because every helper was hardwired to the single global. Pass a db explicitly
+# only where a caller genuinely needs one shard's answer while $DB names another (see
+# test-transfer-crash-matrix.sh's bring_home for the motivating case); every existing call site is
+# unchanged because the parameter defaults to $DB when omitted.
+sqlq() { spacetime sql "${2:-$DB}" "$1" 2>/dev/null; } # $1=query $2=database (optional)
 scall() { spacetime call "$DB" -- "$@" >/dev/null 2>&1; }
-char_guid() { sqlq "SELECT guid FROM game_character WHERE name = '$1'" | grep -oE '[0-9]+' | tail -1; }
+char_guid() { sqlq "SELECT guid FROM game_character WHERE name = '$1'" "$2" | grep -oE '[0-9]+' | tail -1; } # $1=name $2=database (optional)
 # first numeric column of the first data row
 sql1() { sqlq "$1" | sed -n 3p | awk -F'|' '{gsub(/ /,"",$1); print $1}'; }
 
@@ -79,15 +85,53 @@ assert_ge() { if [ -n "$2" ] && [ "$2" -ge "$3" ] 2>/dev/null; then step_ok "$1 
 assert_gt() { if [ -n "$2" ] && [ "$2" -gt "$3" ] 2>/dev/null; then step_ok "$1 ($2 > $3)"; else step_fail "$1: got '$2' want > $3"; fi; }
 assert_lt() { if [ -n "$2" ] && [ "$2" -lt "$3" ] 2>/dev/null; then step_ok "$1 ($2 < $3)"; else step_fail "$1: got '$2' want < $3"; fi; }
 
-SC_STAY_PID=""; SC_STAY_SENTINEL=""
-stay_start() { # $1=account $2=pass $3=char $4=deadline_secs (optional, default 60)
+# Wait for a backgrounded wire-client PID to exit, with a shell-side deadline of its own. A plain
+# `wait $PID` trusts the client's own self-exit contract (stay_start's $4/deadline_secs below) with
+# no floor here — a client that never notices the sentinel or fails to honor its own deadline would
+# hang the CALLER forever (issue #70 deadline audit: this was the one un-bounded wait in the file).
+# Budget past the requested deadline, then SIGKILL and proceed rather than hang.
+#
+# review (issue #70): `kill -0`/`kill -9` operate on a bare pid number — they do not check that it is
+# still OUR wire-client. A pid this shell has already reaped (via a PRIOR call to this function) can
+# be recycled by the OS for an unrelated process; if that recycled pid is then handed back in here a
+# second time, the budget would elapse waiting on a process we have no relationship to and then
+# SIGKILL it. This is not hypothetical: stay_start's own retry-teardown below already calls this
+# function once per failed attempt, and callers that don't check stay_start's return code
+# (test-scenario-death.sh's `stay_start ... || FAILED=1` followed unconditionally by `stay_stop`, and
+# test-scenario-vendor.sh's `stay_start ... && scall ...` followed unconditionally by `stay_stop`, are
+# two live examples already in this tree) then run stay_stop against that same, already-reaped
+# SC_STAY_PID. Two independent defenses: (1) stay_start now clears SC_STAY_PID immediately after this
+# function reaps it, so a later unconditional stay_stop sees nothing to do (see below); (2) as a
+# belt-and-suspenders check here too, refuse the kill if the pid no longer looks like our client.
+_stay_wait_exit() { # $1=pid $2=budget_secs
+  local i
+  for i in $(seq 1 "$2"); do
+    kill -0 "$1" 2>/dev/null || { wait "$1" 2>/dev/null; return 0; }
+    sleep 1
+  done
+  if ! ps -o comm= -p "$1" 2>/dev/null | grep -q '^wire-client$'; then
+    echo "[orch] stay: pid $1 did not exit within ${2}s, but no longer looks like our wire-client" \
+         "(stale/reused pid) — refusing to kill it" >&2
+    return 0
+  fi
+  echo "[orch] stay: wire-client pid $1 did not exit within ${2}s — killing it" >&2
+  kill -9 "$1" 2>/dev/null
+  wait "$1" 2>/dev/null
+}
+
+SC_STAY_PID=""; SC_STAY_SENTINEL=""; SC_STAY_DEADLINE=""
+stay_start() { # $1=account $2=pass $3=char $4=deadline_secs (optional, default 60) $5=database (optional, default $DB)
   # deadline_secs (work-item 157): the wire client's stay mode self-exits (rc 0, silent) once its
   # own deadline elapses, regardless of whether stay_stop has been called yet. A caller that holds
   # the session live across a longer poll window than 60s (scenario-vendor's Step 4 fight-durability
   # poll runs up to 120s) MUST pass a deadline that exceeds that window, or the session — and the
   # character's live connection — can vanish mid-poll.
-  local guid attempt; guid=$(char_guid "$3")
+  # $5/database (issue #70): lets a caller materialise a session and poll for its entity on a
+  # database OTHER than $DB (e.g. an instance/continent shard) without reassigning the global.
+  local db="${5:-$DB}"
+  local guid attempt; guid=$(char_guid "$3" "$db")
   local deadline="${4:-60}"
+  SC_STAY_DEADLINE="$deadline"
   SC_STAY_SENTINEL="/tmp/sc_stay_$$_$3"
   # A fast relogin can race the PREVIOUS session's disconnect cleanup (which despawns the character
   # guid and would delete the NEW session's entity from under us) — settle first, then verify the
@@ -101,26 +145,31 @@ stay_start() { # $1=account $2=pass $3=char $4=deadline_secs (optional, default 
     SC_STAY_PID=$!
     local live=""
     for _ in $(seq 1 20); do
-      live=$(sqlq "SELECT guid FROM game_world_entity WHERE guid = $guid" | grep -oE '[0-9]+' | tail -1)
+      live=$(sqlq "SELECT guid FROM game_world_entity WHERE guid = $guid" "$db" | grep -oE '[0-9]+' | tail -1)
       [ -n "$live" ] && break
       sleep 1
     done
     if [ -n "$live" ]; then
       sleep 2
-      if [ -n "$(sqlq "SELECT guid FROM game_world_entity WHERE guid = $guid" | grep -oE '[0-9]+' | tail -1)" ]; then
+      if [ -n "$(sqlq "SELECT guid FROM game_world_entity WHERE guid = $guid" "$db" | grep -oE '[0-9]+' | tail -1)" ]; then
         return 0
       fi
       echo "[orch] stay_start: $3 entity reaped by a stale disconnect (attempt $attempt) — retrying" >&2
     fi
-    touch "$SC_STAY_SENTINEL"; wait "$SC_STAY_PID" 2>/dev/null; sleep 2
+    # Clear SC_STAY_PID as soon as this attempt's client is reaped (issue #70 review): if this was
+    # the LAST attempt, stay_start returns 1 below with SC_STAY_PID now empty, so a caller that calls
+    # stay_stop unconditionally after a failed stay_start (two such callers already exist — see
+    # _stay_wait_exit's comment) finds nothing to wait on/kill, instead of re-using this attempt's
+    # now-stale, already-reaped pid.
+    touch "$SC_STAY_SENTINEL"; _stay_wait_exit "$SC_STAY_PID" $(( deadline + 15 )); SC_STAY_PID=""; sleep 2
   done
   echo "[orch] stay_start: $3 never went live" >&2
   return 1
 }
 stay_stop() {
   [ -n "$SC_STAY_SENTINEL" ] && touch "$SC_STAY_SENTINEL"
-  [ -n "$SC_STAY_PID" ] && wait "$SC_STAY_PID" 2>/dev/null
-  SC_STAY_PID=""; SC_STAY_SENTINEL=""
+  [ -n "$SC_STAY_PID" ] && _stay_wait_exit "$SC_STAY_PID" $(( ${SC_STAY_DEADLINE:-60} + 15 ))
+  SC_STAY_PID=""; SC_STAY_SENTINEL=""; SC_STAY_DEADLINE=""
   sleep 1
 }
 

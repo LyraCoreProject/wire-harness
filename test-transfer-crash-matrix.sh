@@ -64,26 +64,47 @@ PAD_X=-8930.0; PAD_Y=-250.0; PAD_Z=80.0    # the open-world staging pad (test-bo
 DM_TRIGGER=78                              # "Deadmines - Entering" → map 36
 FAILED=0
 
-# ponytail: the eight step names are a literal list of strings — the same list as
-# `transfer::ABORT_STEPS`. The headless matrix now iterates `ABORT_STEPS` directly; THIS list is the
-# only hand-copy left, and it has already drifted once (#34 added `publish_shard_index` to the drive
-# and to `ABORT_STEPS` without touching this file, so the live matrix silently kept testing seven
-# boundaries and reporting PASS). If `ABORT_STEPS` grows again, this is the one-line edit.
-STEPS=(
-  begin_transfer
-  ensure_instance
-  import_character_blob
-  confirm_import
-  finish_transfer
-  publish_shard_index
-  release_transfer
-  evict_instance_population
-)
+# Derive the step list from the production source (`transfer::ABORT_STEPS`) instead of restating it
+# (issue #70) — the hand-copied list here already drifted once (#34 added `publish_shard_index` to
+# the drive and to `ABORT_STEPS` without touching this file, so the live matrix silently kept testing
+# seven boundaries and reporting PASS). This is a plain-text extraction of the Rust array literal —
+# no compiler, no `cargo run`, nothing that needs a node — so it costs nothing at run time and cannot
+# itself drift: the list IS `ABORT_STEPS`, read straight off the file the headless matrix also uses.
+#
+# review (issue #70): the original form here (`sed -n '/pub const ABORT_STEPS/,/];/p'` with no line
+# anchors, then `grep -oP '"\K[^"]+(?=")'` over the whole range) has two real failure modes, both
+# reproduced against copies of this exact file:
+#   1. A `//` comment ABOVE the declaration that happens to mention the constant's name and its own
+#      "];" on the same source line (e.g. quoting an old array shape in a historical note) makes
+#      sed's end-address close the range on THAT decoy line — the real array below is never read.
+#   2. A `//` comment INSIDE the array block that contains a literal "];" substring (e.g. referencing
+#      an old inline-call snippet) closes the range early too, silently truncating the extracted list
+#      to whatever came before that comment (2 of 8 in one reproduction) — non-empty, so the old
+#      zero-length guard below never fired, and the matrix would have reported "PASS — all 2 crash
+#      points hold" while never touching the other 6.
+# Fixed by: anchoring both sed addresses to the start of a line (so a mention inside a comment, which
+# never starts a line with `pub const ABORT_STEPS` or consists ONLY of `];`, cannot match), dropping
+# any line that is itself a comment before grepping for quoted strings (defeats a comment line that
+# quotes a fake step name inline), and cross-checking the extracted count against the `[&str; N]`
+# length the const's own line declares — Rust would refuse to compile a mismatch between that length
+# and the literal, so it is a reliable independent witness against ANY malformed extraction (partial,
+# padded, or duplicated), not just the two shapes reproduced above.
+TRANSFER_RS=gateway/src/world/transfer.rs
+DECLARED_N=$(grep -m1 -oP '^pub const ABORT_STEPS: \[&str; \K[0-9]+' "$TRANSFER_RS")
+mapfile -t STEPS < <(sed -n '/^pub const ABORT_STEPS/,/^\];$/p' "$TRANSFER_RS" \
+  | grep -v '^[[:space:]]*//' | grep -oP '"\K[^"]+(?=")')
+if [ -z "$DECLARED_N" ] || [ "${#STEPS[@]}" -eq 0 ] || [ "${#STEPS[@]}" -ne "$DECLARED_N" ]; then
+  echo "[xcrash] could not extract ABORT_STEPS out of $TRANSFER_RS cleanly — declared length=" \
+       "'${DECLARED_N:-?}' extracted=${#STEPS[@]}. The array literal's shape" >&2
+  echo "[xcrash] changed (rename/reformat?); update the sed/grep extraction above to match it." >&2
+  exit 2
+fi
 
 # ---------- cross-database SQL ----------
-# scenario-lib's sqlq/sql1 are hardwired to $DB; the whole point here is asking BOTH databases the
-# same question, so this takes the database as an argument. An unreadable count answers -1 rather
-# than "" so a broken query fails an assertion loudly instead of reading as a zero.
+# scenario-lib's sql1 (unlike sqlq, see issue #70) has no database parameter, and this matrix's whole
+# point is asking BOTH databases the same question — so this takes the database as an argument
+# rather than growing sql1 a form nothing else needs. An unreadable count answers -1 rather than ""
+# so a broken query fails an assertion loudly instead of reading as a zero.
 db_count() { # $1=database $2=sql
   local v
   v=$(spacetime sql "$1" "$2" 2>/dev/null | sed -n 3p | awk -F'|' '{gsub(/ /,"",$1); print $1}')
@@ -152,14 +173,11 @@ bring_home() {
     # original order (teleport, then log in) therefore no-oped every time, and because the call's error
     # was swallowed the matrix reported "could not stage" with no reason. Materialise her FIRST with a
     # held session, teleport while she is live, then drop it.
-    # scenario-lib's helpers all read the GLOBAL $DB (it sets `DB=spacetime-core` on source), and
-    # stay_start polls `game_world_entity` there — so it would wait for a live entity on the world
-    # shard for a character who is live on the INSTANCE shard, and time out with "never went live".
-    # Point $DB at the instance shard for the materialise, then restore it.
-    local _saved_db=$DB
-    DB=$IDB
-    if ! stay_start TEST test123 Ginger; then
-      DB=$_saved_db
+    # scenario-lib's stay_start now takes the database as its $5 parameter (issue #70) instead of
+    # requiring callers to reassign the global $DB around the call — it would otherwise poll
+    # `game_world_entity` on the world shard for a character who is live on the INSTANCE shard, and
+    # time out with "never went live".
+    if ! stay_start TEST test123 Ginger 60 "$IDB"; then
       echo "[xcrash] bring_home: could not open a session on '$IDB' to materialise Ginger" >&2
       return 1
     fi
@@ -167,11 +185,9 @@ bring_home() {
     if ! tp_err=$(spacetime call "$IDB" -- debug_teleport "$guid" 0 $PAD_X $PAD_Y $PAD_Z 0 2>&1); then
       echo "[xcrash] bring_home: debug_teleport on '$IDB' failed: $tp_err" >&2
       stay_stop
-      DB=$_saved_db
       return 1
     fi
     stay_stop
-    DB=$_saved_db
     # The world entry on the NEXT login is what drives `settle_transfer` back to '$DB'.
     timeout 90 "$WC" TEST test123 Ginger logout >/dev/null 2>&1
   fi
