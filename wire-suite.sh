@@ -271,6 +271,9 @@ t_party_brains() { bash tools/wire-client/test-party-brains.sh; }
 t_bot_goals() { bash tools/wire-client/test-bot-goals.sh; }
 t_bot_serendipity() { bash tools/wire-client/test-bot-serendipity.sh; }
 t_bot_follow() { bash tools/wire-client/test-bot-follow.sh; }
+# #51: a PLAYER invites a BOT. Self-SKIPs (exit 77) without the playerbots drop-in, and says so
+# loudly when run single-database — the plane the bug could not occur on (see the script header).
+t_bot_invite() { bash tools/wire-client/test-bot-invite.sh; }
 t_bot_deadmines() { bash tools/wire-client/test-bot-deadmines.sh; }
 t_eventai_cast() { bash tools/wire-client/test-eventai-cast.sh; }
 t_relay_stress() { bash tools/wire-client/test-relay-stress.sh; }
@@ -319,7 +322,7 @@ ALL_TESTS=(
   persist_health repop_delay respec ding combat_regen cast_flow cast_interrupt ghost_reveal
   init_factions levelup_info vendor_reaction atwar packet_lint walkmelee content_audit real_quest
   scenario_quest scenario_vendor scenario_train scenario_weaponmaster scenario_death
-  aoi_relay soak playerbots pet_control exploration rest_state group party_brains bot_goals class_roles bot_serendipity bot_follow bot_deadmines eventai_cast relay_stress addon_bridge
+  aoi_relay soak playerbots pet_control exploration rest_state group party_brains bot_goals class_roles bot_serendipity bot_follow bot_invite bot_deadmines eventai_cast relay_stress addon_bridge
   transfer_crash_matrix
 )
 START=$(date +%s)
