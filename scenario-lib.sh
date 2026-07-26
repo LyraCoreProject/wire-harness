@@ -15,7 +15,11 @@ WC=./target/debug/wire-client
 # unchanged because the parameter defaults to $DB when omitted.
 sqlq() { spacetime sql "${2:-$DB}" "$1" 2>/dev/null; } # $1=query $2=database (optional)
 scall() { spacetime call "$DB" -- "$@" >/dev/null 2>&1; }
-char_guid() { sqlq "SELECT guid FROM game_character WHERE name = '$1'" "$2" | grep -oE '[0-9]+' | tail -1; } # $1=name $2=database (optional)
+# `${2:-}` not `$2`: callers that omit the database are the common case, and this library is sourced
+# by scripts running under `set -u` (test-transfer-crash-matrix.sh does) where a bare `$2` on a
+# one-argument call is a fatal unbound-variable error. Empty then falls through sqlq's own `${2:-$DB}`
+# back to the global, so a caller passing nothing behaves exactly as it did before issue #70.
+char_guid() { sqlq "SELECT guid FROM game_character WHERE name = '$1'" "${2:-}" | grep -oE '[0-9]+' | tail -1; } # $1=name $2=database (optional)
 # first numeric column of the first data row
 sql1() { sqlq "$1" | sed -n 3p | awk -F'|' '{gsub(/ /,"",$1); print $1}'; }
 
