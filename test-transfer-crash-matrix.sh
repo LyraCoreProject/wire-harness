@@ -41,14 +41,24 @@
 # transfer id (transfer_id IS the character guid). This mirrors `FakeShardDb::live` in the gateway's
 # headless crash matrix (`world::tests::a_gateway_kill_at_every_transfer_step_recovers_to_...`).
 #
-# STATUS: **UNRUN.** Written against a live two-client session that could not be disturbed; every
-# assertion below is unexercised. Treat the first run as the real acceptance run.
+# STATUS: RUN, and green on both boundaries.
+#   instance  (spacetime-core ↔ spacetime-instances, map 36) — 8/8, 2026-07-27, after #81's fix.
+#   continent (spacetime-core ↔ spacetime-world-1,   map 1)  — #70; see that issue for the run.
+# It reached 8/8 on the instance boundary only after #91/#98 (staging) and #81 (a real product
+# defect this matrix is what found). Treat a change to it as a change to the instrument Phase B's
+# crash guarantees rest on.
+#
+# KNOWN GAP (#100): the gateway is started WITHOUT `GW_REALM_CORE`, so `realm_core()` falls back to
+# the default shard and the character→shard index read here is that shard's own copy. Production
+# runs four databases. Every result below is from the two-database shape.
 #
 # Prereqs (this script SKIPs loudly with rc 77 if they are missing):
-#   - the second database published with the debug feature and its operator claimed:
-#       spacetime publish -s local -p module --build-options='--features=debug_reducers' spacetime-instances
-#       spacetime call spacetime-instances claim_operator
-#   - map 36 world data loaded into it:  DB=spacetime-instances bash scripts/import-world.sh
+#   - the destination database published with the debug feature and its operator claimed:
+#       spacetime publish -s local -p module --build-options='--features=debug_reducers' <db>
+#       spacetime call <db> claim_operator
+#   - its world data loaded:  DB=<db> bash scripts/import-world.sh
+#     (instance boundary needs map 36 on spacetime-instances; continent needs map 1 on
+#      spacetime-world-1)
 #
 # NOTE: this test OWNS the gateway process for its duration — it kills and restarts it seven times
 # and leaves it running with GW_SHARD_MAP set (same precedent as test-playerbots.sh's restart step).
@@ -57,11 +67,46 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 source tools/wire-client/scenario-lib.sh
 
-IDB="${IDB:-spacetime-instances}"          # the instance shard (gateway/src/config.rs:63 convention)
-SHARD_MAP="${GW_SHARD_MAP:-36:*=spacetime-instances}"
+# ---------- which boundary (issue #70) ----------
+# The crash points are the transfer drive's, not the boundary's, so the whole matrix is the same run
+# either way — only the destination database, the destination map and HOW the crossing is driven
+# differ. Phase A proved the instance boundary; #70 asks for the same guarantee re-earned on the
+# continent one, which is a materially different hop: `dest_instance_id` is 0, so the two
+# instance-only steps become no-ops whose crash points must still fire (asserted below).
+BOUNDARY="${XCRASH_BOUNDARY:-instance}"
+case "$BOUNDARY" in
+  instance)
+    IDB="${IDB:-spacetime-instances}"      # the instance shard (gateway/src/config.rs:63 convention)
+    SHARD_MAP="${GW_SHARD_MAP:-36:*=spacetime-instances}"
+    DEST_MAP=36
+    # "Deadmines - Entering" → map 36. A real areatrigger, so this drives the crossing exactly as a
+    # player does.
+    DM_TRIGGER=78
+    ;;
+  continent)
+    IDB="${IDB:-spacetime-world-1}"
+    # THE `36:*` RULE STAYS, even though this boundary never touches map 36. Without it dungeon
+    # instances resolve to `spacetime-core`, whose `game_config.hosts_instances` is FALSE, and the
+    # gateway REFUSES TO START rather than degrade (issue #48's startup check — it fired on the
+    # first continent run and is why this line is not just "1:*=..."). So this boundary runs on
+    # THREE databases, which is also closer to production than the instance boundary's two.
+    SHARD_MAP="${GW_SHARD_MAP:-36:*=spacetime-instances, 1:*=spacetime-world-1}"
+    DEST_MAP=1
+    # There is NO map-0 → map-1 areatrigger in the dump, and no boat/zeppelin/taxi anywhere in this
+    # codebase (that is #69, and it is build rather than reuse). So the crossing is driven by a
+    # cross-map `debug_teleport`, which reaches `world::teleport_player` — the SAME function the
+    # areatrigger path ends in, and the same `MSG_MOVE_WORLDPORT_ACK` world entry drives the
+    # transfer. This tests the transfer drive on the continent boundary, which is what #70 asks for;
+    # it does NOT test a dock crossing, because none exists to test.
+    DEST_X=-813.994; DEST_Y=-4920.57; DEST_Z=19.4341   # Durotar, inside the imported slice
+    ;;
+  *)
+    echo "[xcrash] XCRASH_BOUNDARY='$BOUNDARY' is not 'instance' or 'continent'" >&2
+    exit 2
+    ;;
+esac
 GWLOG=/tmp/gw_xcrash.log
 PAD_X=-8930.0; PAD_Y=-250.0; PAD_Z=80.0    # the open-world staging pad (test-bot-deadmines.sh)
-DM_TRIGGER=78                              # "Deadmines - Entering" → map 36
 FAILED=0
 
 # Derive the step list from the production source (`transfer::ABORT_STEPS`) instead of restating it
@@ -200,8 +245,22 @@ bring_home() {
     done
   done
   # Only ever drop the copy on the shard that is NOT home, and only when home still holds one — so a
-  # bug here can never destroy the last durable copy of the fixture.
-  if [ "$holder" = "$DB" ] && [ "$(has_char "$IDB" "$guid")" != "0" ]; then
+  # bug here can never destroy the last durable copy of the fixture. `$guid` is always Ginger's,
+  # resolved by name on '$DB' and checked non-empty before the matrix starts, so this can never name
+  # another character — which matters now the destination can be `spacetime-world-1`, a database
+  # holding a real continent and a second fixture (Kaltest, guid 12).
+  #
+  # An UNREADABLE destination refuses rather than deletes: `db_count` answers -1 on a failed query,
+  # and -1 is `!= 0`, so the obvious form of this test would cascade-delete on a state it could not
+  # actually read. `has_char` returning -1 is exactly the shape hazard 7 keeps producing (a wrong
+  # column name reads as a failure whose stderr is swallowed).
+  _idb_copies=$(has_char "$IDB" "$guid")
+  if [ "$_idb_copies" = "-1" ]; then
+    echo "[xcrash] bring_home: could not read '$IDB' for guid $guid — refusing to stage rather than" \
+         "acting on a state I cannot read" >&2
+    return 1
+  fi
+  if [ "$holder" = "$DB" ] && [ "$_idb_copies" != "0" ]; then
     echo "[xcrash] staging: '$IDB' holds a STRANDED durable copy of $guid (issue #81's failure state)" \
          "— cascade-deleting it so this run starts single-copy"
     spacetime call "$IDB" -- debug_delete_character "$guid" >/dev/null 2>&1
@@ -296,8 +355,8 @@ if ! spacetime sql "$IDB" "SELECT COUNT(*) AS n FROM game_character" >/dev/null 
   echo "SKIP: claim_operator + import lines that provision it."
   exit 77
 fi
-if [ "$(db_count "$IDB" "SELECT COUNT(*) AS n FROM game_creature_spawn WHERE map_id = 36")" -lt 1 ]; then
-  echo "SKIP: '$IDB' holds no map-36 spawns — run: DB=$IDB bash scripts/import-world.sh"
+if [ "$(db_count "$IDB" "SELECT COUNT(*) AS n FROM game_creature_spawn WHERE map_id = $DEST_MAP")" -lt 1 ]; then
+  echo "SKIP: '$IDB' holds no map-$DEST_MAP spawns — run: DB=$IDB bash scripts/import-world.sh"
   exit 77
 fi
 
@@ -308,7 +367,7 @@ if [ -z "$GINGER" ]; then
   GINGER=$(char_guid Ginger)
 fi
 [ -n "$GINGER" ] || { echo "[xcrash] no Ginger character on '$DB'" >&2; exit 2; }
-echo "[xcrash] Ginger=$GINGER  world='$DB'  instances='$IDB'  shard-map='$SHARD_MAP'"
+echo "[xcrash] boundary=$BOUNDARY  Ginger=$GINGER  world='$DB'  destination='$IDB' (map $DEST_MAP)  shard-map='$SHARD_MAP'"
 
 # ---------- the matrix ----------
 declare -a MATRIX=()
@@ -350,7 +409,14 @@ for STEP in "${STEPS[@]}"; do
     pkill -x wire-client 2>/dev/null; MATRIX+=("HARNESS $STEP"); continue
   fi
   sleep 2
-  scall debug_enter_areatrigger "$GINGER" $DM_TRIGGER
+  if [ "$BOUNDARY" = instance ]; then
+    scall debug_enter_areatrigger "$GINGER" $DM_TRIGGER
+  else
+    # `debug_teleport` REFUSES without a live entity ("no live entity for guid N"), which is why the
+    # session above is held rather than dropped first — the same ordering `bring_home` learned the
+    # hard way on 2026-07-25.
+    scall debug_teleport "$GINGER" $DEST_MAP $DEST_X $DEST_Y $DEST_Z 0
+  fi
 
   # 4. the injected death. This IS the observation that the crash point was reached.
   if wait_for_gw_death 45; then
@@ -366,6 +432,23 @@ for STEP in "${STEPS[@]}"; do
   fi
   stay_stop
   pkill -x wire-client 2>/dev/null
+
+  # 4b. AC#2 (#70): a continent hop carries `dest_instance_id == 0`, so `ensure_instance` and
+  # `evict_instance_population` do no work. Their `abort_point`s sit OUTSIDE the
+  # `if escrow.dest_instance_id != 0` guards in `run_transfer_injected` (deliberately — see the
+  # comment there), so the crash points must still FIRE. The injection assertion above is what
+  # proves they fired; this is what proves the steps were no-ops rather than quietly mirroring an
+  # instance onto a continent shard. Asserted on every step, not just those two: no step of a
+  # continent hop may create one.
+  if [ "$BOUNDARY" = continent ]; then
+    _inst=$(db_count "$IDB" "SELECT COUNT(*) AS n FROM game_instance")
+    _bind=$(db_count "$IDB" "SELECT COUNT(*) AS n FROM game_instance_binding WHERE character_guid = $GINGER")
+    if [ "$_inst" = "0" ] && [ "$_bind" = "0" ]; then
+      good "instance-only steps were NO-OPS: '$IDB' mirrored no instance and bound none for $GINGER"
+    else
+      bad "a continent hop mirrored an instance on '$IDB' (game_instance=$_inst, bindings for $GINGER=$_bind) — dest_instance_id must be 0 on this boundary, so both instance steps should have done nothing"
+    fi
+  fi
 
   # 5. THE CRASH-POINT INVARIANT, read straight off both databases.
   HW=$(has_char "$DB" "$GINGER");  HI=$(has_char "$IDB" "$GINGER")
@@ -402,24 +485,24 @@ for STEP in "${STEPS[@]}"; do
   #    re-driven forward or rolled back is the protocol's business; a character that cannot log in
   #    after a restart is a FAILURE either way.
   gw_start "" || { bad "clean gateway would not restart after the injected crash"; MATRIX+=("HARNESS $STEP"); continue; }
-  if timeout 90 "$WC" TEST test123 Ginger logout >/tmp/xcrash_reentry_$STEP.log 2>&1; then
+  if timeout 90 "$WC" TEST test123 Ginger logout >/tmp/xcrash_reentry_${BOUNDARY}_$STEP.log 2>&1; then
     good "re-entry: a fresh wire session logged Ginger back into the world after the crash"
-  elif grep -q 'M1 OK — in world' "/tmp/xcrash_reentry_$STEP.log"; then
+  elif grep -q 'M1 OK — in world' "/tmp/xcrash_reentry_${BOUNDARY}_$STEP.log"; then
     # The assertion is "can she get back IN", and the wire client prints M1 OK the moment she is in
     # world — the `logout` verb is just how this probe ends. Recovery lands her in Deadmines, where a
     # Defias can put her in combat before the probe gets to CMSG_LOGOUT_REQUEST, and the server then
     # correctly answers FailureInCombat. Failing the step on that reports the game working as a crash
     # defect (it did once, on evict_instance_population). Assert the EFFECT, not the exit code.
-    good "re-entry: Ginger reached the world; the logout probe then failed ($(grep -o 'got [A-Za-z]*' "/tmp/xcrash_reentry_$STEP.log" | tail -1)) — not a re-entry failure"
+    good "re-entry: Ginger reached the world; the logout probe then failed ($(grep -o 'got [A-Za-z]*' "/tmp/xcrash_reentry_${BOUNDARY}_$STEP.log" | tail -1)) — not a re-entry failure"
   else
-    bad "re-entry: Ginger could NOT re-enter the world after a clean gateway restart (in-transit forever?) — see /tmp/xcrash_reentry_$STEP.log"
-    tail -5 "/tmp/xcrash_reentry_$STEP.log" >&2
+    bad "re-entry: Ginger could NOT re-enter the world after a clean gateway restart (in-transit forever?) — see /tmp/xcrash_reentry_${BOUNDARY}_$STEP.log"
+    tail -5 "/tmp/xcrash_reentry_${BOUNDARY}_$STEP.log" >&2
   fi
   # PRESERVE THE RECOVERY LOG. `gw_start` truncates $GWLOG, so the run that matters — the clean
   # gateway re-driving (or failing to re-drive) the abandoned transfer — is erased by the NEXT step
   # before anyone can read it. That is why #81 went three rounds on inference: the one artefact that
   # distinguishes "the resume was never driven" from "it was driven and failed" was thrown away.
-  cp "$GWLOG" "/tmp/xcrash_recovery_$STEP.log" 2>/dev/null
+  cp "$GWLOG" "/tmp/xcrash_recovery_${BOUNDARY}_$STEP.log" 2>/dev/null
   HW=$(has_char "$DB" "$GINGER"); HI=$(has_char "$IDB" "$GINGER")
   LW=$(live_on "$DB" "$GINGER");  LI=$(live_on "$IDB" "$GINGER")
   if [ $(( LW + LI )) -eq 1 ]; then
@@ -453,7 +536,7 @@ bring_home "$GINGER" || FAILED=1
 pkill -x wire-client 2>/dev/null
 
 echo
-echo "════════ transfer crash matrix ════════"
+echo "════════ transfer crash matrix — $BOUNDARY boundary ($DB ↔ $IDB) ════════"
 for r in "${MATRIX[@]}"; do printf "  %s\n" "$r"; done
 echo "───────────────────────────────────────"
 # A HARNESS row means the step never REACHED its crash point (staging failed, the gateway would not
