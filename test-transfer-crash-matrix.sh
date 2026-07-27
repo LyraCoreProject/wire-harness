@@ -94,10 +94,20 @@ DECLARED_N=$(grep -m1 -oP '^pub const ABORT_STEPS: \[&str; \K[0-9]+' "$TRANSFER_
 mapfile -t STEPS < <(sed -n '/^pub const ABORT_STEPS/,/^\];$/p' "$TRANSFER_RS" \
   | grep -v '^[[:space:]]*//' | grep -oP '"\K[^"]+(?=")')
 if [ -z "$DECLARED_N" ] || [ "${#STEPS[@]}" -eq 0 ] || [ "${#STEPS[@]}" -ne "$DECLARED_N" ]; then
+  # (the cross-check below runs against the FULL extraction — XCRASH_ONLY filters after it, so
+  # narrowing the run can never satisfy the drift guard by accident)
   echo "[xcrash] could not extract ABORT_STEPS out of $TRANSFER_RS cleanly — declared length=" \
        "'${DECLARED_N:-?}' extracted=${#STEPS[@]}. The array literal's shape" >&2
   echo "[xcrash] changed (rename/reformat?); update the sed/grep extraction above to match it." >&2
   exit 2
+fi
+# DEBUGGING ONLY: narrow the run to one crash point. A full matrix is ~13 minutes, which is a long
+# edit/observe cycle when you are chasing ONE step (#81 lives at `import_character_blob`). Never a
+# pass: a narrowed run reports only the steps it ran, and the summary says so.
+if [ -n "${XCRASH_ONLY:-}" ]; then
+  mapfile -t STEPS < <(printf '%s\n' "${STEPS[@]}" | grep -Fx "$XCRASH_ONLY")
+  [ "${#STEPS[@]}" -ge 1 ] || { echo "[xcrash] XCRASH_ONLY='$XCRASH_ONLY' names no step" >&2; exit 2; }
+  echo "[xcrash] XCRASH_ONLY=$XCRASH_ONLY — NARROWED RUN, not an acceptance run"
 fi
 
 # ---------- cross-database SQL ----------
@@ -163,6 +173,43 @@ wait_for_gw_death() { # $1=secs
 bring_home() {
   local guid=$1 holder=$DB
   [ "$(has_char "$DB" "$guid")" = "1" ] || holder=$IDB
+
+  # NORMALISE THE TWO-COPY START STATE (issue #81's leftovers). #81 settles the player but strands a
+  # durable copy on the other database under an escrow row the cross-database reaper correctly HOLDs
+  # forever. bring_home used to look only at '$DB' — one copy there satisfied it — so the run AFTER a
+  # #81 failure aborted all eight steps at staging and reported eight FAILs that measured nothing.
+  # The matrix could not recover from the very defect it exists to detect.
+  #
+  # This normalises; it does not hide. Every step's post-recovery assertion re-detects #81 from a
+  # clean start, which is the only place the finding is worth anything. Both clears are announced.
+  #
+  # Escrow first, then the copy: a fenced character REFUSES both login (the in-transit chokepoint)
+  # and `debug_delete_character` (CHAR_IN_TRANSIT), so a stale ledger row blocks its own cleanup.
+  # Raw SQL because no reducer clears a lone out-row by design — `finish_transfer` refuses without
+  # the arrival attestation and `release_transfer` refuses when an out-row exists, which is correct
+  # for the protocol and leaves the harness to wipe its own fixture (same precedent as the
+  # `game_world_entity`/`game_instance_binding` deletes below).
+  local _e
+  for _db in "$DB" "$IDB"; do
+    for _t in game_transfer_out game_transfer_in; do
+      _e=$(db_count "$_db" "SELECT COUNT(*) AS n FROM $_t WHERE transfer_id = $guid")
+      if [ "$_e" != "0" ] && [ "$_e" != "-1" ]; then
+        echo "[xcrash] staging: clearing $_e stale $_t row(s) for $guid on '$_db' (left by an earlier run)"
+        spacetime sql "$_db" "DELETE FROM $_t WHERE transfer_id = $guid" >/dev/null 2>&1
+      fi
+    done
+  done
+  # Only ever drop the copy on the shard that is NOT home, and only when home still holds one — so a
+  # bug here can never destroy the last durable copy of the fixture.
+  if [ "$holder" = "$DB" ] && [ "$(has_char "$IDB" "$guid")" != "0" ]; then
+    echo "[xcrash] staging: '$IDB' holds a STRANDED durable copy of $guid (issue #81's failure state)" \
+         "— cascade-deleting it so this run starts single-copy"
+    spacetime call "$IDB" -- debug_delete_character "$guid" >/dev/null 2>&1
+    if [ "$(has_char "$IDB" "$guid")" != "0" ]; then
+      echo "[xcrash] bring_home: could not clear the stranded copy on '$IDB' — refusing to run" >&2
+      return 1
+    fi
+  fi
   if [ "$holder" = "$IDB" ]; then
     # Cross-map teleport writes the DESTINATION into the character row and despawns the entity; the
     # next world entry is what actually drives the transfer back (`settle_transfer`).
@@ -285,7 +332,10 @@ for STEP in "${STEPS[@]}"; do
   STAGED_I=$(has_char "$IDB" "$GINGER")
   if [ "$STAGED_I" != "0" ]; then
     bad "staging: '$IDB' still holds $STAGED_I durable copy/copies of Ginger BEFORE the injection — every assertion below would be measured against a two-copy start state. Aborting this step rather than reporting against it."
-    MATRIX+=("FAIL $STEP"); continue
+    # HARNESS, not FAIL: the injection was never armed, so this step says NOTHING about its crash
+    # point (issue #91's rule, applied to the one abort path that still called itself a FAIL — which
+    # is how a run that measured nothing at all reported eight product failures).
+    MATRIX+=("HARNESS $STEP"); continue
   fi
   note "staged: Ginger on '$DB' ONLY, map 0, pad ($PAD_X $PAD_Y $PAD_Z)"
 
@@ -354,10 +404,22 @@ for STEP in "${STEPS[@]}"; do
   gw_start "" || { bad "clean gateway would not restart after the injected crash"; MATRIX+=("HARNESS $STEP"); continue; }
   if timeout 90 "$WC" TEST test123 Ginger logout >/tmp/xcrash_reentry_$STEP.log 2>&1; then
     good "re-entry: a fresh wire session logged Ginger back into the world after the crash"
+  elif grep -q 'M1 OK — in world' "/tmp/xcrash_reentry_$STEP.log"; then
+    # The assertion is "can she get back IN", and the wire client prints M1 OK the moment she is in
+    # world — the `logout` verb is just how this probe ends. Recovery lands her in Deadmines, where a
+    # Defias can put her in combat before the probe gets to CMSG_LOGOUT_REQUEST, and the server then
+    # correctly answers FailureInCombat. Failing the step on that reports the game working as a crash
+    # defect (it did once, on evict_instance_population). Assert the EFFECT, not the exit code.
+    good "re-entry: Ginger reached the world; the logout probe then failed ($(grep -o 'got [A-Za-z]*' "/tmp/xcrash_reentry_$STEP.log" | tail -1)) — not a re-entry failure"
   else
     bad "re-entry: Ginger could NOT re-enter the world after a clean gateway restart (in-transit forever?) — see /tmp/xcrash_reentry_$STEP.log"
     tail -5 "/tmp/xcrash_reentry_$STEP.log" >&2
   fi
+  # PRESERVE THE RECOVERY LOG. `gw_start` truncates $GWLOG, so the run that matters — the clean
+  # gateway re-driving (or failing to re-drive) the abandoned transfer — is erased by the NEXT step
+  # before anyone can read it. That is why #81 went three rounds on inference: the one artefact that
+  # distinguishes "the resume was never driven" from "it was driven and failed" was thrown away.
+  cp "$GWLOG" "/tmp/xcrash_recovery_$STEP.log" 2>/dev/null
   HW=$(has_char "$DB" "$GINGER"); HI=$(has_char "$IDB" "$GINGER")
   LW=$(live_on "$DB" "$GINGER");  LI=$(live_on "$IDB" "$GINGER")
   if [ $(( LW + LI )) -eq 1 ]; then
