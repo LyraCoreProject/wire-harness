@@ -457,6 +457,19 @@ impl WireClient {
     /// Find a character by name, or create a Human/Male of `class` with that name. Returns
     /// its guid. Rerunnable: a name-in-use create just falls back to the existing char.
     pub fn create_or_find_char(&mut self, name: &str, class: Class) -> Result<u64> {
+        self.create_or_find_char_as(name, class, Race::Human)
+    }
+
+    /// [`create_or_find_char`](Self::create_or_find_char) with the race chosen by the caller.
+    ///
+    /// The race decides which DATABASE the character is born on, which is why this exists. A new
+    /// character is placed at its race's `game_start_position`, and those straddle the continent
+    /// split: Human is Elwynn on map 0 (`spacetime-core`), Orc and Troll are the Valley of Trials on
+    /// map 1 (`spacetime-world-1`). So a benchmark that wants to load the KALIMDOR writer cannot use
+    /// the default — 200 Humans created against a world-1 gateway are all born on map 0 and every
+    /// one of them immediately transfers to core, measuring the shard it was trying to leave alone
+    /// (work-item #71).
+    pub fn create_or_find_char_as(&mut self, name: &str, class: Class, race: Race) -> Result<u64> {
         if let Some((g, _, _)) =
             self.char_enum()?.into_iter().find(|(_, n, _)| n.eq_ignore_ascii_case(name))
         {
@@ -464,7 +477,7 @@ impl WireClient {
         }
         self.send(&CMSG_CHAR_CREATE {
             name: name.to_string(),
-            race: Race::Human,
+            race,
             class,
             gender: Gender::Male,
             skin_color: 0,
