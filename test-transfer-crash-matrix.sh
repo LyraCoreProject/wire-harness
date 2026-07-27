@@ -245,8 +245,22 @@ bring_home() {
     done
   done
   # Only ever drop the copy on the shard that is NOT home, and only when home still holds one — so a
-  # bug here can never destroy the last durable copy of the fixture.
-  if [ "$holder" = "$DB" ] && [ "$(has_char "$IDB" "$guid")" != "0" ]; then
+  # bug here can never destroy the last durable copy of the fixture. `$guid` is always Ginger's,
+  # resolved by name on '$DB' and checked non-empty before the matrix starts, so this can never name
+  # another character — which matters now the destination can be `spacetime-world-1`, a database
+  # holding a real continent and a second fixture (Kaltest, guid 12).
+  #
+  # An UNREADABLE destination refuses rather than deletes: `db_count` answers -1 on a failed query,
+  # and -1 is `!= 0`, so the obvious form of this test would cascade-delete on a state it could not
+  # actually read. `has_char` returning -1 is exactly the shape hazard 7 keeps producing (a wrong
+  # column name reads as a failure whose stderr is swallowed).
+  _idb_copies=$(has_char "$IDB" "$guid")
+  if [ "$_idb_copies" = "-1" ]; then
+    echo "[xcrash] bring_home: could not read '$IDB' for guid $guid — refusing to stage rather than" \
+         "acting on a state I cannot read" >&2
+    return 1
+  fi
+  if [ "$holder" = "$DB" ] && [ "$_idb_copies" != "0" ]; then
     echo "[xcrash] staging: '$IDB' holds a STRANDED durable copy of $guid (issue #81's failure state)" \
          "— cascade-deleting it so this run starts single-copy"
     spacetime call "$IDB" -- debug_delete_character "$guid" >/dev/null 2>&1
