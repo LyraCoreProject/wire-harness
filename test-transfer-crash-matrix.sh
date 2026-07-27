@@ -203,11 +203,39 @@ bring_home() {
   # matrix runs against an unknown starting position. test-bot-deadmines.sh is the precedent for the
   # same pad, and it stages no instance column at all.
   sqlq "UPDATE game_character SET x = $PAD_X, y = $PAD_Y, z = $PAD_Z, map_id = 0, pending_instance_id = 0 WHERE guid = $guid" >/dev/null
+  # Clear the STALE LIVE ENTITY, on every database (issue #91). This is the one that actually decides
+  # routing: `Coordinator::character_location` (gateway/src/stdb/reads.rs) prefers `game_world_entity`
+  # over the durable row —
+  #     if let Some(e) = db.game_world_entity().guid().find(&guid) { return Some((e.map_id, e.instance_id)); }
+  # — and a step whose INJECTED ABORT killed the gateway mid-session leaves that row behind, still
+  # carrying the instance location. Staging the durable row to map 0 while that row survives means the
+  # next login resolves to the OLD location, drives a cross-database transfer on world entry, and the
+  # armed injector fires on it — killing the gateway before the test has driven its own portal. Every
+  # step then failed at staging with "never went live", and the eight FAILs said nothing about the
+  # crash points they were supposed to exercise. Both databases, because the stale row can be on
+  # either side of the boundary depending on where the abort landed.
+  for _db in "$DB" "$IDB"; do
+    spacetime sql "$_db" "DELETE FROM game_world_entity WHERE guid = $guid" >/dev/null 2>&1
+  done
   # ASSERT the write landed. A silently-rejected UPDATE is exactly how the bug above hid.
   if [ "$(db_count "$DB" "SELECT COUNT(*) AS n FROM game_character WHERE guid = $guid AND map_id = 0")" != "1" ]; then
     echo "[xcrash] the staging UPDATE did not take — Ginger is not on map 0 on '$DB' (rejected SQL?)" >&2
     return 1
   fi
+  # ASSERT WHAT ROUTING WILL ANSWER, not merely what we just wrote (issue #91). The pre-#91 assertion
+  # checked `game_character.map_id = 0` — the very row the UPDATE above had just set — so it passed
+  # against a character that was still going to transfer on its next world entry. Assert the same
+  # thing `character_location` reads: no live entity anywhere, on any database, for this guid.
+  local _stale
+  for _db in "$DB" "$IDB"; do
+    _stale=$(db_count "$_db" "SELECT COUNT(*) AS n FROM game_world_entity WHERE guid = $guid")
+    if [ "$_stale" != "0" ]; then
+      echo "[xcrash] staging left a live game_world_entity row for $guid on '$_db' ($_stale) —" \
+           "character_location prefers it over the durable row, so the next login would transfer" \
+           "instead of testing the crash point (issue #91)" >&2
+      return 1
+    fi
+  done
 }
 
 # ---------- preflight ----------
@@ -246,8 +274,8 @@ for STEP in "${STEPS[@]}"; do
   good() { echo "[xcrash][$STEP] ASSERT OK: $*"; }
 
   # 1. clean gateway → known starting state on the world database.
-  gw_start "" || { bad "clean gateway would not start"; MATRIX+=("FAIL $STEP"); continue; }
-  bring_home "$GINGER" || { bad "could not stage Ginger on '$DB'"; MATRIX+=("FAIL $STEP"); continue; }
+  gw_start "" || { bad "clean gateway would not start"; MATRIX+=("HARNESS $STEP"); continue; }
+  bring_home "$GINGER" || { bad "could not stage Ginger on '$DB'"; MATRIX+=("HARNESS $STEP"); continue; }
   spacetime call "$IDB" -- release_transfer "$GINGER" >/dev/null 2>&1 # clear any fence a previous step left
   # ...and PROVE the instance shard is empty of her before arming anything. `bring_home` only
   # guarantees a copy on '$DB'; it never looks at '$IDB'. A copy left there by an earlier step makes
@@ -262,14 +290,14 @@ for STEP in "${STEPS[@]}"; do
   note "staged: Ginger on '$DB' ONLY, map 0, pad ($PAD_X $PAD_Y $PAD_Z)"
 
   # 2. restart WITH the injection armed.
-  gw_start "$STEP" || { bad "injected gateway would not start"; MATRIX+=("FAIL $STEP"); continue; }
+  gw_start "$STEP" || { bad "injected gateway would not start"; MATRIX+=("HARNESS $STEP"); continue; }
 
   # 3. drive the portal. A HELD session is required: the transfer runs inside the client's loading
   #    screen (the WORLDPORT_ACK handler), and `stay` drains with the decoding recv() that answers
   #    SMSG_NEW_WORLD. Deadline well past the whole window — `stay` exits rc 0 on timeout, silently.
   if ! stay_start TEST test123 Ginger 180; then
     bad "Ginger never went live before the portal — cannot attribute what follows to the injection"
-    pkill -x wire-client 2>/dev/null; MATRIX+=("FAIL $STEP"); continue
+    pkill -x wire-client 2>/dev/null; MATRIX+=("HARNESS $STEP"); continue
   fi
   sleep 2
   scall debug_enter_areatrigger "$GINGER" $DM_TRIGGER
@@ -323,7 +351,7 @@ for STEP in "${STEPS[@]}"; do
   # 6. recovery: a clean gateway, and Ginger must get back in-world. Whether the transfer is
   #    re-driven forward or rolled back is the protocol's business; a character that cannot log in
   #    after a restart is a FAILURE either way.
-  gw_start "" || { bad "clean gateway would not restart after the injected crash"; MATRIX+=("FAIL $STEP"); continue; }
+  gw_start "" || { bad "clean gateway would not restart after the injected crash"; MATRIX+=("HARNESS $STEP"); continue; }
   if timeout 90 "$WC" TEST test123 Ginger logout >/tmp/xcrash_reentry_$STEP.log 2>&1; then
     good "re-entry: a fresh wire session logged Ginger back into the world after the crash"
   else
@@ -366,6 +394,18 @@ echo
 echo "════════ transfer crash matrix ════════"
 for r in "${MATRIX[@]}"; do printf "  %s\n" "$r"; done
 echo "───────────────────────────────────────"
+# A HARNESS row means the step never REACHED its crash point (staging failed, the gateway would not
+# start, the character never went live) — a different claim from "the crash point did not hold", and
+# reporting them identically is how eight meaningless FAILs once read as a result (issue #91). Never
+# claim a pass while any step was skipped: an unreached crash point is unknown, not green.
+_harness=0
+for r in "${MATRIX[@]}"; do case "$r" in HARNESS\ *) _harness=$((_harness+1));; esac; done
+if [ "$_harness" -ne 0 ]; then
+  echo "[xcrash] HARNESS BROKEN — $_harness of ${#STEPS[@]} step(s) never reached their crash point."
+  echo "[xcrash] Those steps are UNKNOWN, not failed. Fix the harness and re-run before reading"
+  echo "[xcrash] anything into the rest of this table."
+  exit 2
+fi
 if [ "$FAILED" -eq 0 ]; then
   echo "[xcrash] PASS — all ${#STEPS[@]} crash points hold ZERO-LOSS + NO-DUPE and recover"
   exit 0
