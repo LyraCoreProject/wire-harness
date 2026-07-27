@@ -189,6 +189,11 @@ struct Cfg {
     logon: String,
     world: Option<String>,
     account_prefix: String,
+    /// First account index this run uses, so two concurrent ramps can drive DISJOINT account sets
+    /// against different shards. Without it both ramps start at 0000 and fight over the same
+    /// characters, which measures nothing (#71: whether two writers are independent is the question
+    /// that decides whether sharding scales at all).
+    account_start: usize,
     password: String,
     char_prefix: String,
     center: [f32; 3],
@@ -255,8 +260,11 @@ impl Shared {
 // ---------------------------------------------------------------------------------------------
 
 fn run_player(idx: usize, cfg: Arc<Cfg>, sh: Arc<Shared>) {
-    let account = format!("{}{:04}", cfg.account_prefix, idx);
-    let char_name = char_name_for(&cfg.char_prefix, idx);
+    // `idx` stays 0-based for the spatial layout (golden-angle spread) so two ramps look alike;
+    // only the IDENTITY is offset.
+    let acct_idx = cfg.account_start + idx;
+    let account = format!("{}{:04}", cfg.account_prefix, acct_idx);
+    let char_name = char_name_for(&cfg.char_prefix, acct_idx);
     let mut c = match connect(&cfg, &account, &char_name) {
         Ok(c) => c,
         Err(e) => {
@@ -624,6 +632,7 @@ fn main() -> Result<()> {
         logon: args.str("logon", wire_client::DEFAULT_LOGON_ADDR),
         world: args.opt("world"),
         account_prefix: args.str("account-prefix", "BENCH"),
+        account_start: args.num::<usize>("account-start", 0)?,
         password: args.str("password", "benchpass"),
         char_prefix: args.str("char-prefix", "Bench"),
         center: args.vec3("center", [-8920.0, -180.0, 82.0])?,
