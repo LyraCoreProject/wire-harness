@@ -47,8 +47,8 @@ use report::{
 use wire_client::WireClient;
 use wow_world_messages::vanilla::opcodes::ServerOpcodeMessage as Smsg;
 use wow_world_messages::vanilla::{
-    Class, MovementInfo, MovementInfo_MovementFlags, Vector3d, CMSG_ATTACKSTOP, CMSG_ATTACKSWING,
-    MSG_MOVE_HEARTBEAT_Client,
+    Class, MovementInfo, MovementInfo_MovementFlags, Race, Vector3d, CMSG_ATTACKSTOP,
+    CMSG_ATTACKSWING, MSG_MOVE_HEARTBEAT_Client,
 };
 use wow_world_messages::Guid;
 
@@ -195,6 +195,12 @@ struct Cfg {
     spread: f32,
     heartbeat_ms: u64,
     combat_pct: usize,
+    /// The race new characters are created as, which decides WHICH DATABASE they are born on:
+    /// `game_start_position` puts Human on map 0 (`spacetime-core`) and Orc/Troll on map 1
+    /// (`spacetime-world-1`). Benchmarking a continent shard needs a race that starts there, or
+    /// every synthetic player is born on the default shard and transfers off the one under test
+    /// (#71).
+    race: Race,
 }
 
 #[derive(Default)]
@@ -408,7 +414,7 @@ fn connect(cfg: &Cfg, account: &str, char_name: &str) -> Result<WireClient> {
     let (k, realm_world) = wire_client::logon_at(&cfg.logon, account, &cfg.password)?;
     let world = cfg.world.clone().unwrap_or(realm_world);
     let mut c = WireClient::connect_world(&world, account, k)?;
-    let guid = c.create_or_find_char(char_name, Class::Warrior)?;
+    let guid = c.create_or_find_char_as(char_name, Class::Warrior, cfg.race)?;
     c.player_login(guid)?;
     c.set_recv_timeout(Duration::from_millis(DRAIN_POLL_MS))?;
     Ok(c)
@@ -624,6 +630,16 @@ fn main() -> Result<()> {
         spread: args.num::<f32>("spread", 40.0)?,
         heartbeat_ms: args.num::<u64>("heartbeat-ms", 500)?,
         combat_pct: args.num::<usize>("combat-pct", 25)?,
+        race: match args.str("race", "human").to_ascii_lowercase().as_str() {
+            "human" => Race::Human,
+            "orc" => Race::Orc,
+            "troll" => Race::Troll,
+            other => anyhow::bail!(
+                "--race {other} is not one this benchmark knows. Use human (map 0, spacetime-core) \
+                 or orc/troll (map 1, spacetime-world-1) — the race decides which database the \
+                 synthetic players are born on."
+            ),
+        },
     });
 
     // Fail fast on an unreachable metrics endpoint — a whole ramp that produces no server-side

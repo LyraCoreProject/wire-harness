@@ -87,6 +87,22 @@ pub fn scrape(url: &str) -> Result<Snapshot> {
 }
 
 /// Split a sample key into `(metric_name, "{labels}" or "")`.
+/// The counter families this benchmark deltas, and therefore the only ones where a negative delta
+/// means anything. Every figure in the report comes from one of these; anything else in the scrape
+/// is either a gauge or unread. Keep this in step with `report.rs`/`main.rs` — a family added there
+/// and not here loses its reset protection, which is a quieter failure than the false alarms this
+/// list exists to stop, so it is worth checking when a new metric is read.
+pub const MONOTONIC_FAMILIES: &[&str] = &[
+    "spacetime_txn_cpu_time_sec_sum",
+    "spacetime_num_txns_total",
+    "spacetime_num_rows_inserted_total",
+    "spacetime_num_rows_deleted_total",
+    "spacetime_num_rows_scanned_total",
+    "spacetime_num_bytes_sent_to_clients_total",
+    "spacetime_reducer_wait_time_sec_sum",
+    "spacetime_reducer_wait_time_sec_count",
+];
+
 fn split_key(key: &str) -> (&str, &str) {
     match key.find('{') {
         Some(i) => (&key[..i], &key[i..]),
@@ -143,17 +159,26 @@ impl Snapshot {
         self.matching(name, filters).next().is_some()
     }
 
-    /// On a DELTA snapshot: the first sample that went BACKWARDS, if any. Every metric this
-    /// benchmark reads is a monotonically-increasing counter, so a negative delta can only mean the
-    /// counters were reset underneath the measured window (node restart, module republish) — in
-    /// which case every rate and the occupancy figure for that window are garbage and must be
-    /// flagged rather than reported.
+    /// On a DELTA snapshot: the first sample that went BACKWARDS, if any — restricted to
+    /// [`MONOTONIC_FAMILIES`], the counters this benchmark actually deltas. For those, a negative
+    /// delta can only mean the counters were reset underneath the measured window (node restart,
+    /// module republish), in which case every rate and the occupancy figure for that window are
+    /// garbage and must be flagged rather than reported.
+    ///
+    /// THE RESTRICTION IS THE WHOLE POINT. This used to scan every sample in the snapshot, and the
+    /// scrape also carries GAUGES — `spacetime_num_table_rows` and
+    /// `spacetime_data_size_bytes_used_by_rows` — which go DOWN whenever rows are deleted. The
+    /// module reaps every `game_*_event` table once a second and deletes creature splines
+    /// continuously, so a healthy server produces negative gauge deltas in essentially every window.
+    /// On the first real ramp that voided rungs 50 and 100 (on `game_creature_move_event` shrinking
+    /// by 24 rows, and `game_creature_spline` by 240 bytes) — i.e. it reported the server working
+    /// correctly as a measurement failure, and would have voided the entire benchmark this way.
     pub fn first_negative(&self, filters: &[&str]) -> Option<(&String, f64)> {
         self.0
             .iter()
             .filter(|(k, _)| {
-                let (_, labels) = split_key(k);
-                filters.iter().all(|f| labels.contains(f))
+                let (name, labels) = split_key(k);
+                MONOTONIC_FAMILIES.contains(&name) && filters.iter().all(|f| labels.contains(f))
             })
             .find(|(_, v)| **v < 0.0)
             .map(|(k, v)| (k, *v))
@@ -324,6 +349,42 @@ spacetime_num_rows_inserted_total{db="abc",table_name="game_movement_event",txn_
         assert_eq!(v, -388.0);
         // A well-behaved window has no negative sample at all.
         assert!(before.delta(&before).first_negative(&[]).is_none());
+    }
+
+    /// A GAUGE going backwards is the server working, not a counter reset.
+    ///
+    /// `spacetime_num_table_rows` and `spacetime_data_size_bytes_used_by_rows` shrink whenever rows
+    /// are deleted, and this module reaps every `game_*_event` table once a second and deletes
+    /// creature splines continuously. Scanning them for a "reset" voided rungs 50, 100 AND 150 of
+    /// the first real capacity ramp — three for three on a perfectly healthy node — which would have
+    /// made every server-side number in the benchmark unusable, and the benchmark is the entire
+    /// evidence base for the Phase C gate (#71).
+    #[test]
+    fn a_shrinking_gauge_is_not_a_counter_reset() {
+        let before = parse(
+            r#"spacetime_num_table_rows{db="abc",table_name="game_creature_move_event"} 240
+spacetime_data_size_bytes_used_by_rows{db="abc",table_name="game_creature_spline"} 4096
+spacetime_num_txns_total{db="abc",reducer="movement_update"} 400"#,
+        );
+        // The reaper ran: both gauges fall. The real counter keeps climbing.
+        let after = parse(
+            r#"spacetime_num_table_rows{db="abc",table_name="game_creature_move_event"} 216
+spacetime_data_size_bytes_used_by_rows{db="abc",table_name="game_creature_spline"} 3856
+spacetime_num_txns_total{db="abc",reducer="movement_update"} 700"#,
+        );
+        assert!(
+            before.delta(&after).first_negative(&[]).is_none(),
+            "a shrinking gauge was reported as a counter reset — that voids the stage's server-side \
+             numbers on a healthy server, which is what it did to three consecutive rungs of the \
+             first real ramp"
+        );
+        // …and a genuine reset of a real counter is still caught.
+        let restarted = parse(r#"spacetime_num_txns_total{db="abc",reducer="movement_update"} 12"#);
+        assert!(
+            before.delta(&restarted).first_negative(&[]).is_some(),
+            "a real counter going backwards must still be caught — that is a node restart or a \
+             republish underneath the window, and every rate in it is garbage"
+        );
     }
 
     #[test]
