@@ -21,7 +21,38 @@ PAD_X=-8900; PAD_Y=-210; PAD_Z=82
 FAILED=0
 
 # Script-managed fixture faction_template 50901 -> parent 50900 (idempotent).
+#
+# CATALOGUE TABLE — REMOVE WHAT WE CREATE (issue #88). `game_faction_template` is in the
+# `dbc_reference` fingerprint family, so a row left behind makes THIS shard disagree with its
+# siblings permanently, and `scripts/check-catalogue-parity.sh` reports the whole family off by one.
+# That is how this was found: the live parity check was off by exactly one row, and the row was 50901.
+#
+# Seeding it from `init` instead (the #85 remedy) would be WRONG here — it is test-only data, and
+# that route puts it in every production database forever. So the rule for a script-created
+# catalogue row is: track whether THIS run created it, and delete it on every exit path.
+# `STAGED_FACTION_TEMPLATE` mirrors `scenario-lib.sh`'s `STAGED_HOSTILITY` idiom, which already got
+# this right — it stages only on a node that lacks the real row, and removes only what it inserted.
+STAGED_FACTION_TEMPLATE=0
+cleanup_fixture() {
+  if [ "$STAGED_FACTION_TEMPLATE" = "1" ]; then
+    sqlq "DELETE FROM game_faction_template WHERE id = 50901" >/dev/null
+    # Verify the EFFECT, not the call (playbook §9): a swallowed failure here re-creates exactly the
+    # orphan this exists to prevent, and the next parity check would be the thing that notices.
+    local left
+    left=$(sql1 "SELECT COUNT(*) AS n FROM game_faction_template WHERE id = 50901")
+    if [ "${left:-1}" != "0" ]; then
+      echo "[vendor-reaction] TEARDOWN FAIL: fixture faction_template 50901 survived deletion —" \
+           "this shard now disagrees with its siblings; run scripts/check-catalogue-parity.sh" >&2
+    fi
+  fi
+}
+# EVERY exit path, including the failure ones and an interrupted run — the issue's AC says so
+# explicitly, and a test that only cleans up when it passes leaves debris exactly when someone is
+# already debugging.
+trap cleanup_fixture EXIT INT TERM
+
 if [ "$(sql1 "SELECT COUNT(*) AS n FROM game_faction_template WHERE id = 50901")" = "0" ]; then
+  STAGED_FACTION_TEMPLATE=1
   sqlq "INSERT INTO game_faction_template (id, faction, faction_group, friend_group, enemy_group, enemy_0, enemy_1, enemy_2, enemy_3, friend_0, friend_1, friend_2, friend_3) VALUES (50901, 50900, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)" >/dev/null
 fi
 
