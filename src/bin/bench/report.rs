@@ -390,6 +390,23 @@ impl fmt::Display for Report {
                 s.client.frames_received,
                 s.client.harness_backpressure_events
             )?;
+            // ZERO PEER MOVES WITH A CROWD IS A MEASUREMENT FAILURE, NOT A MEASUREMENT.
+            // Every connected player heartbeats, so with more than one player in the world the
+            // server should relay SOMETHING; a flat zero means the run observed nothing and its
+            // movement latency row (0/0/0ms) is empty rather than fast. Reported as a bare `0` it
+            // reads like data — the same trap the counter-reset VOID guard exists to stop.
+            // Seen twice on 2026-07-28 with IDENTICAL client behaviour (12,129 heartbeats sent in
+            // both the zero run and the 8,550-sample run), ~13.7k fewer frames delivered and no
+            // error logged, so it is an intermittent SERVER-side delivery race, not a harness
+            // artifact. Do not read a rung carrying this line.
+            if s.client.peer_moves_observed == 0 && s.players_connected > 1 {
+                writeln!(
+                    f,
+                    "⚠ SUSPECT: {} players connected and heartbeating, but ZERO peer moves \
+                     observed — this rung's movement latency is UNMEASURED, not fast. Re-run it.",
+                    s.players_connected
+                )?;
+            }
             let w = &s.harness.wakeup_lag_ms;
             writeln!(
                 f,
