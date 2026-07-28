@@ -48,9 +48,9 @@
 # defect this matrix is what found). Treat a change to it as a change to the instrument Phase B's
 # crash guarantees rest on.
 #
-# KNOWN GAP (#100): the gateway is started WITHOUT `GW_REALM_CORE`, so `realm_core()` falls back to
-# the default shard and the character→shard index read here is that shard's own copy. Production
-# runs four databases. Every result below is from the two-database shape.
+# TOPOLOGY: the gateway runs with `GW_REALM_CORE` (#100), so the character→shard index this exercises
+# is realm-core's — the one production reads — rather than the default shard's own copy. The instance
+# boundary therefore runs three databases and the continent boundary four.
 #
 # Prereqs (this script SKIPs loudly with rc 77 if they are missing):
 #   - the destination database published with the debug feature and its operator claimed:
@@ -105,6 +105,7 @@ case "$BOUNDARY" in
     exit 2
     ;;
 esac
+REALM_CORE="${GW_REALM_CORE:-realm-core}"   # issue #100: the matrix runs the PRODUCTION topology
 GWLOG=/tmp/gw_xcrash.log
 PAD_X=-8930.0; PAD_Y=-250.0; PAD_Z=80.0    # the open-world staging pad (test-bot-deadmines.sh)
 FAILED=0
@@ -193,7 +194,14 @@ gw_start() { # $1 = step to abort after ("" = a clean gateway)
   # portable way to say "expand only if non-empty".
   local -a inject=()
   [ -n "${1:-}" ] && inject=(GW_TRANSFER_ABORT_AFTER="$1")
-  setsid nohup env GW_AOI=1 GW_SHARD_MAP="$SHARD_MAP" GW_COORDINATOR_TOKEN="$TOKEN" \
+  # GW_REALM_CORE IS PART OF THE PRODUCTION SHAPE (issue #100). Without it `realm_core()` falls back
+  # to the DEFAULT shard, so the character→shard index every routing decision consults is
+  # spacetime-core's own copy rather than realm-core's — i.e. the matrix was validating a topology
+  # the server does not run in, and #81 (a routing defect found BY this matrix) lived in exactly that
+  # code. Also makes `publish_shard_index`, a step the matrix injects a crash after, write to a real
+  # target instead of a no-op.
+  setsid nohup env GW_AOI=1 GW_SHARD_MAP="$SHARD_MAP" GW_REALM_CORE="$REALM_CORE" \
+    GW_COORDINATOR_TOKEN="$TOKEN" \
     RUST_LOG=info,gateway::world=debug ${inject[@]+"${inject[@]}"} \
     ./target/debug/gateway </dev/null >"$GWLOG" 2>&1 &
   local i
