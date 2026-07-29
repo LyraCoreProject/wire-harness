@@ -64,13 +64,26 @@ fn main() -> Result<()> {
     };
     let _ = std::fs::remove_file(&target_file);
     eprintln!("[wire] M2 ready — draining socket, waiting for a target guid in {target_file}…");
+    // A read timeout here is NOT terminal, and `?` made it fatal: the interrupt pad can be
+    // completely quiet while the orchestrator walks a mob into melee range, so the socket rides its
+    // read timeout and the client died before the target guid was ever written — reported as
+    // "no interrupt seen". The identical fix already lives in `drain_until_file`; this loop predates
+    // it. Bounded so a target that genuinely never arrives still fails loudly instead of hanging.
+    let target_deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
     let mob = loop {
-        c.recv()?; // keep the socket drained so the gateway doesn't backpressure + drop us
+        match c.recv() {
+            Ok(_) => {}                                             // drained; gateway stays happy
+            Err(e) if wire_client::is_read_timeout(&e) => {}        // quiet pad — keep waiting
+            Err(e) => return Err(e),                                // real stream break
+        }
         if let Ok(s) = std::fs::read_to_string(&target_file) {
             if let Ok(g) = s.trim().parse::<u64>() {
                 let _ = std::fs::remove_file(&target_file);
                 break g;
             }
+        }
+        if std::time::Instant::now() > target_deadline {
+            bail!("M2: no target guid appeared in {target_file} within 90s");
         }
     };
     println!("[wire] M2 — target {mob:#x}; casting spell {spell_id}…");
@@ -97,8 +110,11 @@ fn main() -> Result<()> {
 
     // Pushback-mode flake guard (2026-07-16): one 1.7s cast window vs a ~2s swing cadence catches
     // a swing MOST runs, but a whiffed swing (miss/dodge — no damage, no pushback) makes a single
-    // window flaky. Re-cast up to 2 more windows until a DELAYED slide lands; each extra cast is a
-    // fresh full window (the prior cast completed — GO seen — so the recast is clean).
+    // window flaky. Re-cast until a DELAYED slide lands; each extra cast is a fresh full window (the
+    // prior cast completed — GO seen — so the recast is clean).
+    // 270: 5 retries, not 2. Under the full suite's commit stream the mob's swing schedule slips, so
+    // two extra windows can pass with no swing landing inside a cast at all — the run then reports
+    // "no pushback" for a mechanic that works (it passes standalone every time).
     let mut pushback_attempts: u32 = 0;
 
     // The completion fires ~cast_time later; read on a wall-clock deadline (the busy world
@@ -111,6 +127,11 @@ fn main() -> Result<()> {
     while std::time::Instant::now() < deadline {
         let m = match c.recv() {
             Ok(m) => m,
+            // A read timeout means "nothing yet", not "give up": this loop is deliberately bounded
+            // by the WALL CLOCK above, and breaking on the first quiet gap threw that budget away.
+            // Under full-suite load the interrupt arrived after such a gap, so the test reported a
+            // missing packet that was simply late (the 270 flake family).
+            Err(e) if wire_client::is_read_timeout(&e) => continue,
             Err(_) => break,
         };
         match m {
@@ -166,7 +187,7 @@ fn main() -> Result<()> {
         }
         // Pushback-mode retry: the cast completed (GO) with no DELAYED slide — the mob whiffed the
         // window. Open a fresh window (up to 3 total) instead of failing on swing-timing luck.
-        if expect_interrupt && delayed_count == 0 && go_spell == Some(spell_id) && pushback_attempts < 2 {
+        if expect_interrupt && delayed_count == 0 && go_spell == Some(spell_id) && pushback_attempts < 5 {
             pushback_attempts += 1;
             go_spell = None;
             println!("[wire] pushback window {pushback_attempts} saw no DELAYED — re-casting…");

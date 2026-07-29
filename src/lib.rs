@@ -741,3 +741,15 @@ pub fn create_object_guid(o: &wow_world_messages::vanilla::Object) -> Option<u64
         _ => None,
     }
 }
+
+/// Is this `recv()` error just the socket read timeout — "nothing arrived in the last window" —
+/// rather than a broken stream?
+///
+/// A hand-rolled drain loop that reads on a WALL-CLOCK deadline must keep going through these, or
+/// the first quiet gap ends it early: `test-cast-interrupt.sh` failed under full-suite load for
+/// exactly that reason, breaking out of a 12s deadline within a second and reporting "no interrupt"
+/// for a packet that had not been sent yet. Deadline-based helpers (`recv_for`/`recv_raw_for`)
+/// already handle this internally; this is for the loops that don't.
+pub fn is_read_timeout(e: &anyhow::Error) -> bool {
+    e.to_string().contains("socket read timeout")
+}

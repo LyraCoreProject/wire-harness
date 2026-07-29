@@ -104,11 +104,10 @@ done
 assert_lt "fight: the attacker took bot swing damage (server-side combat events)" "${WOLF_HP1:-999}" "${WOLF_HP0:-0}"
 
 # 5. gateway restart survival (danger-zones §3 recipe) — rows durable, still relayed after
-TOKEN=$(grep -oP 'spacetimedb_token = "\K[^"]+' ~/.config/spacetime/cli.toml)
-pkill -x gateway; sleep 1
-setsid nohup env GW_AOI=1 GW_COORDINATOR_TOKEN="$TOKEN" RUST_LOG=info,gateway::world=debug \
-  ./target/debug/gateway </dev/null >/tmp/gw.log 2>&1 &
-sleep 4
+# Restart it AS IT WAS RUNNING (scenario-lib): the old hardcoded relaunch invented a
+# single-database topology, which #48's guard refuses on a sharded realm — taking the gateway, and
+# every test after this one, down with it.
+restart_gateway /tmp/gw.log
 assert_ge "restart: gateway back up (world listening)" "$(grep -c 'world listening' /tmp/gw.log)" 1
 assert_eq "restart: bot registry rows survived" "$(sql1 "SELECT COUNT(*) AS n FROM pkg_playerbots_bot")" "4"
 assert_eq "restart: bot entity survived" "$(sql1 "SELECT COUNT(*) AS n FROM game_world_entity WHERE guid = $BOT")" "1"

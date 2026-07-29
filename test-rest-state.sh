@@ -9,7 +9,11 @@ cd "$(dirname "$0")/../.."
 source tools/wire-client/scenario-lib.sh
 scenario_preflight rest-state
 
-G=9
+# Resolve by NAME, never a hardcoded guid: the fixture's guid changes whenever the character is
+# re-created (Ginger has been 3, 9 and 13). A stale hardcode does not fail loudly — every SQL read
+# returns NO ROWS, so each assertion reports `got ''` and reads like a product regression.
+G=$(char_guid Ginger)
+[ -n "$G" ] || { echo "[rest-state] no Ginger character on spacetime-core" >&2; exit 1; }
 INN_X=-9464; INN_Y=42 # Lion's Pride Inn fixture (Goldshire) — REST_TRIGGERS in module/src/rest.rs
 FAR_X=-8930; FAR_Y=-160 # open field, outside any rest trigger
 FAILED=0
@@ -44,7 +48,10 @@ stay_stop
 # without a relog. 16777216 = 0x01000000 (byte3 = RESTED, facial-hair byte 0). Starts NOT resting.
 sqlq "UPDATE game_character SET resting = false, rested_since_micros = 0 WHERE guid = $G" >/dev/null
 OUT=$(mktemp)
-timeout 30 "$WC" TEST test123 Ginger values-watch "$G" 194 20 >"$OUT" 2>&1 &
+# The EXPECTED VALUE (4th arg) is load-bearing: this watcher's own login relays field 194 carrying
+# the pre-crossing NORMAL byte, and without it the watch passed on that and stopped before the
+# RESTED flip it exists to prove.
+timeout 30 "$WC" TEST test123 Ginger values-watch "$G" 194 20 16777216 >"$OUT" 2>&1 &
 WPID=$!
 sleep 6
 scall debug_check_rest_at $G 0 "$INN_X" "$INN_Y"

@@ -400,9 +400,15 @@ fn values_watch(
     _mcx: &ModeCtx<'_>,
 ) -> Result<()> {
     use std::time::{Duration, Instant};
-    let guid: u64 = args.next().and_then(|s| s.parse().ok()).expect("usage: values-watch <guid> <field_index> [secs]");
+    let guid: u64 = args.next().and_then(|s| s.parse().ok()).expect("usage: values-watch <guid> <field_index> [secs] [expect_value]");
     let field: u16 = args.next().and_then(|s| s.parse().ok()).expect("field_index");
     let secs: u64 = args.next().and_then(|s| s.parse().ok()).unwrap_or(15);
+    // Optional EXPECTED VALUE. Without it this passes on the first sighting of the field — which is
+    // this watcher's OWN login snapshot, since entering the world writes the entity row and relays
+    // its fields. A caller testing a live TRANSITION (rest-state's inn crossing: 0x02000000 NORMAL →
+    // 0x01000000 RESTED) therefore passed on the pre-transition value and stopped watching before the
+    // one it was waiting for. Given a value, keep watching until THAT value arrives.
+    let expect: Option<u32> = args.next().and_then(|s| s.parse().ok());
     c.set_recv_timeout(Duration::from_millis(300))?;
     let t0 = Instant::now();
     while t0.elapsed() < Duration::from_secs(secs) {
@@ -413,7 +419,7 @@ fn values_watch(
                 }
                 for &(idx, v) in &u.fields {
                     println!("[values] guid={guid:#x} field {idx} = {v} ({v:#x})");
-                    if idx == field {
+                    if idx == field && expect.is_none_or(|want| want == v) {
                         println!("[wire] VALUES-WATCH PASS \u{2713} field {field} arrived");
                         return Ok(());
                     }
@@ -421,7 +427,13 @@ fn values_watch(
             }
         }
     }
-    bail!("values-watch: no VALUES update carried field {field} for {guid:#x} within {secs}s");
+    match expect {
+        Some(want) => bail!(
+            "values-watch: no VALUES update carried field {field} = {want} ({want:#x}) for \
+             {guid:#x} within {secs}s"
+        ),
+        None => bail!("values-watch: no VALUES update carried field {field} for {guid:#x} within {secs}s"),
+    }
 }
 
 // ---- walkmelee <mob_guid> <mx> <my> <mz>: prove the walk_to helper closes real distance

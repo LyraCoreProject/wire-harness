@@ -9,7 +9,11 @@ cd "$(dirname "$0")/../.."
 source tools/wire-client/scenario-lib.sh
 scenario_preflight pet-control
 
-GINGER=9 # class 9 = Warlock (the cast-flow test's char)
+# Ginger is the shared warlock fixture (CLASS 9) — which is where the old hardcoded `GINGER=9` came
+# from: the class id was written into the GUID. Resolve by name like test-cast-flow.sh does; the guid
+# has been 3, 9 and 13, and a stale one makes every step fail against a character that doesn't exist.
+GINGER=$(char_guid Ginger)
+[ -n "$GINGER" ] || { echo "[pet-control] no Ginger character on spacetime-core" >&2; exit 1; }
 WOLF_ENTRY=51000
 PAD_X=-9235; PAD_Y=-465; PAD_Z=92 # empty pad
 # packed CMSG_PET_ACTION.data (flag<<24 | id): command flag 0x07, react flag 0x06

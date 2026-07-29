@@ -59,11 +59,16 @@ if [ -f "$DEATH_READY" ]; then
   purge_creatures_near "$PAD_X" "$PAD_Y" 30 "$WOLF" # keep the fixture wolf; clear real strays
   scall debug_engage "$WOLF" "$GINGER" # the wolf lands the real killing blow
   DEAD=""
-  # 270: 45s (was 30s) — absorbs a congestion-slowed melee tick + the OOC-regen amplifier (a delayed
-  # first swing lets Ginger regen off 1 HP before enter_combat stops it, needing more 1-3dmg swings).
-  for _ in $(seq 1 45); do
+  # 270: 90s (was 45s, was 30s) — absorbs a congestion-slowed melee tick + the OOC-regen amplifier (a
+  # delayed first swing lets Ginger regen off 1 HP before enter_combat stops it, needing more 1-3dmg
+  # swings). RE-STAMP the 1 HP each iteration rather than only at the start: that regen race is the
+  # actual failure mode, and widening the window alone makes it WORSE (more time to regen out of
+  # one-shot range). Staging the precondition every second is the deterministic fix the flake family
+  # asks for; the assertion still proves the WOLF landed the killing blow.
+  for _ in $(seq 1 90); do
     DEAD=$(sqlq "SELECT dead FROM game_world_entity WHERE guid = $GINGER" | grep -c true)
     [ "$DEAD" = "1" ] && break
+    scall debug_set_health "$GINGER" 1
     sleep 1
   done
   assert_eq "death: entity died to the mob's swing" "$DEAD" "1"
@@ -74,7 +79,9 @@ fi
 
 # after release: the corpse row must exist while the wire client waits out the 30s delay
 CORPSE_SEEN=0
-for _ in $(seq 1 15); do
+# 270: 40 not 15 — waiting on `tick_melee` to land a killing swing, which is a scheduled reducer
+# and the first thing to slip when the suite's commit stream is busy.
+for _ in $(seq 1 40); do
   CORPSE_SEEN=$(sql1 "SELECT COUNT(*) AS n FROM game_corpse WHERE guid = $CORPSE")
   [ "${CORPSE_SEEN:-0}" -ge 1 ] && break
   sleep 1

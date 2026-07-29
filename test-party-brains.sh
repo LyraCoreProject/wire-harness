@@ -77,7 +77,8 @@ echo "[orch] wolves: $W1 $W2"
 # No baselines (266): cast events reap on a 1s TTL, so anything visible IS fresh — and a stale
 # baseline that reaping later drops BELOW made real casts read as "no change".
 TAUNTED=0; DPS_CASTS=0; TANK_TOP=0; ONTANK_SEEN=0
-for i in $(seq 1 20); do
+# 270: 45 not 20 — the bot sense/brain tick that arms an assist row slides under suite load.
+for i in $(seq 1 45); do
   # keeper: the party stays alive through the pack (bots are L1) AND the wolves stay alive
   # through the party (a Fireball rotation one-shots half a wolf — the asserts need live,
   # swinging wolves, not corpses)

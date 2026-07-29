@@ -67,6 +67,17 @@ scall debug_set_level "$DFS" 2
 sqlq "UPDATE game_character SET rested_xp = 0 WHERE guid = $GINGER" >/dev/null
 sqlq "UPDATE game_character SET rested_xp = 0 WHERE guid = $DFS" >/dev/null
 scall debug_set_xp_rate 1.0
+# …and the OTHER multiplier. The GM `.xprate` dot-command (module/src/gm.rs) writes a WORLD
+# singleton that `grant_xp` applies on top of `game_config.xp_rate`, so an operator playtesting at
+# `.xprate 3` triples every award realm-wide — including this test's, which then reads 75 where it
+# wants 25 and looks exactly like an XP-split bug. Scale the expectations to whatever the realm is
+# actually set to rather than overwriting an operator's live setting (it is not this test's to
+# clobber, and a mid-run abort would leave it clobbered).
+XPBP=$(sql1 "SELECT value FROM game_world_config WHERE key = 'xprate'"); XPBP=${XPBP:-10000}
+[ "$XPBP" = "10000" ] || echo "[orch] note: GM .xprate is ${XPBP}bp ($((XPBP/100))% ) — scaling XP expectations"
+# The module multiplies at grant time, AFTER the group split, with integer truncation — mirror that
+# order here or the rounding disagrees.
+xps(){ echo $(( $1 * XPBP / 10000 )); }
 scall debug_grant_quest "$GINGER" $QUEST
 scall debug_grant_quest "$DFS" $QUEST
 XP_G0=$(sql1 "SELECT xp FROM game_world_entity WHERE guid = $GINGER")
@@ -78,8 +89,8 @@ sleep 1
 XP_G1=$(sql1 "SELECT xp FROM game_world_entity WHERE guid = $GINGER")
 XP_D1=$(sql1 "SELECT xp FROM game_world_entity WHERE guid = $DFS")
 # wolf L1 at player L2: base 5*1+45 = 50, split 2 ways -> 25 each
-assert_eq "xp split: leader got 25 (50 base / 2 members)" "$(( ${XP_G1:-0} - ${XP_G0:-0} ))" "25"
-assert_eq "xp split: member got 25 (in range)" "$(( ${XP_D1:-0} - ${XP_D0:-0} ))" "25"
+assert_eq "xp split: leader got $(xps 25) (50 base / 2 members, .xprate ${XPBP}bp)" "$(( ${XP_G1:-0} - ${XP_G0:-0} ))" "$(xps 25)"
+assert_eq "xp split: member got $(xps 25) (in range)" "$(( ${XP_D1:-0} - ${XP_D0:-0} ))" "$(xps 25)"
 Q_G=$(sqlq "SELECT counts FROM game_character_quest WHERE character_guid = $GINGER AND quest_entry = $QUEST" | grep -oE '[0-9]+' | head -1)
 Q_D=$(sqlq "SELECT counts FROM game_character_quest WHERE character_guid = $DFS AND quest_entry = $QUEST" | grep -oE '[0-9]+' | head -1)
 assert_eq "quest credit: leader's kill count advanced" "${Q_G:-0}" "1"
@@ -93,7 +104,7 @@ sleep 1
 XP_G2=$(sql1 "SELECT xp FROM game_world_entity WHERE guid = $GINGER")
 XP_D2=$(sql1 "SELECT xp FROM game_world_entity WHERE guid = $DFS")
 assert_eq "range gate: out-of-range member gained nothing" "$(( ${XP_D2:-0} - ${XP_D1:-0} ))" "0"
-assert_eq "range gate: leader took the full 50 solo" "$(( ${XP_G2:-0} - ${XP_G1:-0} ))" "50"
+assert_eq "range gate: leader took the full $(xps 50) solo" "$(( ${XP_G2:-0} - ${XP_G1:-0} ))" "$(xps 50)"
 Q_D2=$(sqlq "SELECT counts FROM game_character_quest WHERE character_guid = $DFS AND quest_entry = $QUEST" | grep -oE '[0-9]+' | head -1)
 assert_eq "range gate: out-of-range member got no quest credit" "${Q_D2:-0}" "1"
 

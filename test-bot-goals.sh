@@ -72,8 +72,12 @@ scall debug_spawn_at_feet "$BOT" $WOLF_ELDER 34
 # before GRIND gets picked — the known suite-load timing family (270).
 wait_for_sql_ge 90 "SELECT COUNT(*) AS n FROM pkg_playerbots_goal WHERE kind = 0 AND state = 0" 1 \
   && step_ok "selection: next goal is GRIND $WOLF_ELDER" || step_fail "selection: no GRIND goal within 90s"
-wait_for_sql_ge 45 "SELECT progress FROM pkg_playerbots_goal WHERE kind = 0 AND state = 0" 1 \
-  && step_ok "grind: a kill advanced progress (on_kill credit)" || step_fail "grind: no kill credit within 45s"
+# 90s, matching the selection wait above it and the post-death resume below. 45s covered the KILL
+# but not the work in front of it: the bot has to finish selecting the goal, walk the 25-34yd out to
+# an elder that was deliberately staged outside its aggro radius, and win an L8 fight — and the two
+# assertions on either side of this one already budget 90s for exactly that reasoning (266/270).
+wait_for_sql_ge 90 "SELECT progress FROM pkg_playerbots_goal WHERE kind = 0 AND state = 0" 1 \
+  && step_ok "grind: a kill advanced progress (on_kill credit)" || step_fail "grind: no kill credit within 90s"
 
 scall debug_set_health "$BOT" 0
 D0=$(sql1 "SELECT dead FROM game_world_entity WHERE guid = $BOT" | head -1)
@@ -88,8 +92,12 @@ done
 [ "$REVIVED" = 1 ] && step_ok "recovery: released + spirit-ressed (alive again, sql-observed)" || step_fail "recovery: still dead after 15s"
 STILL=$(sql1 "SELECT COUNT(*) AS n FROM pkg_playerbots_goal WHERE kind = 0 AND state = 0")
 assert_ge "recovery: the GRIND goal survived the death (resumes)" "${STILL:-0}" 1
-wait_for_sql_ge 90 "SELECT COUNT(*) AS n FROM pkg_playerbots_goal WHERE kind = 0 AND state = 1" 1 \
-  && step_ok "resume: the grind completed after the death (3 kills, state done)" || step_fail "resume: grind never completed within 90s"
+# 180s: this step is the most expensive assertion in the file and had the SAME budget as the single
+# kill above it — it needs a corpse run plus THREE real L8 fights (the bot flees at 15% and re-engages,
+# so a fight is several approach/flee cycles). Observed completing in ~100-140s and failing at 90 in
+# about half of the runs; the window was the flake, not the behaviour.
+wait_for_sql_ge 180 "SELECT COUNT(*) AS n FROM pkg_playerbots_goal WHERE kind = 0 AND state = 1" 1 \
+  && step_ok "resume: the grind completed after the death (3 kills, state done)" || step_fail "resume: grind never completed within 180s"
 
 # ---- 4. the decision trail ----
 assert_ge "history: >= 2 finished goal rows kept (the sql-visible mind)" "$(sql1 "SELECT COUNT(*) AS n FROM pkg_playerbots_goal WHERE state = 1")" 2

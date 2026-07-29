@@ -22,6 +22,10 @@ casts_by() { sql1 "SELECT COUNT(*) AS n FROM game_spell_cast_event WHERE caster_
 # ---- staging ----
 scall debug_seed_scenario_fixtures || true
 scall playerbots_despawn_all || true
+# A crashed or failed prior run leaves Ginger in a party with now-despawned bots, and the invite
+# below then fails with GroupFull — which fails the party assert AND every party-scoped rotation
+# assertion after it (tank peel, healer heal, blessing sweep), none of which are about grouping.
+leave_any_group "$GINGER"
 purge_entry_rows $WOLF
 sqlq "DELETE FROM game_melee_attack" >/dev/null
 sqlq "DELETE FROM game_group_member WHERE character_guid = $GINGER" >/dev/null
@@ -98,11 +102,19 @@ wait_for_sql_ge 20 "SELECT COUNT(*) AS n FROM game_aura WHERE spell_id = 19740" 
   && step_ok "healer rotation: blessing sweep converged (>=3 members buffed)" || step_fail "healer rotation: blessing sweep never converged"
 
 # ---- 3. live rotation patch: swap the dps nuke to Fireball, watch behavior change ----
-ROW=$(sqlq "SELECT id FROM pkg_playerbots_rotation WHERE spell_id = 20271" | grep -oE '[0-9]+' | head -1)
+# Scope to the PALADIN DPS row (class 2, role 2). Judgement 20271 is seeded for BOTH the paladin
+# tank (COND_ALWAYS) and the paladin dps (COND_TANK_ENGAGED), and the unscoped query returned them
+# in id order — so this patched the TANK's row and then waited for the DPS bot to cast the swapped
+# spell, which it never had a reason to. The assertion below is about the dps; the patch must be too.
+ROW=$(sqlq "SELECT id FROM pkg_playerbots_rotation WHERE spell_id = 20271 AND class = 2 AND role = 2" | grep -oE '[0-9]+' | head -1)
+[ -n "$ROW" ] || { echo "[class-roles] no paladin-dps Judgement rotation row to patch" >&2; exit 1; }
 sqlq "UPDATE pkg_playerbots_rotation SET spell_id = 133 WHERE id = $ROW" >/dev/null
 FB0=$(casts_by "$DPS" 133); FB0=${FB0:-0}
 PATCHED=0
-for i in $(seq 1 15); do
+# 270: 40 not 15. Every iteration re-stamps health and sleeps 1s, so this is a ~15s window on a
+# rotation tick that has to notice the patched row, pick it, and pass the cast gates. It holds alone
+# and misses under the full suite's commit stream — a deadline, not a behaviour.
+for i in $(seq 1 40); do
   for W in $WOLVES; do scall debug_set_health "$W" 10000; done
   scall debug_set_health "$DPS" 10000
   sleep 1

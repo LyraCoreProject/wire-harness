@@ -15,13 +15,17 @@ WC=./target/debug/wire-client
 # unchanged because the parameter defaults to $DB when omitted.
 sqlq() { spacetime sql "${2:-$DB}" "$1" 2>/dev/null; } # $1=query $2=database (optional)
 scall() { spacetime call "$DB" -- "$@" >/dev/null 2>&1; }
+# …the same call against a NAMED database. A character inside a routed instance (or on a continent
+# shard) is not on $DB any more, and a debug reducer fired at $DB then fails with "no live entity"
+# — silently, since scall swallows output. $1=database, rest = reducer + args.
+scall_on() { local _db=$1; shift; spacetime call "$_db" -- "$@" >/dev/null 2>&1; }
 # `${2:-}` not `$2`: callers that omit the database are the common case, and this library is sourced
 # by scripts running under `set -u` (test-transfer-crash-matrix.sh does) where a bare `$2` on a
 # one-argument call is a fatal unbound-variable error. Empty then falls through sqlq's own `${2:-$DB}`
 # back to the global, so a caller passing nothing behaves exactly as it did before issue #70.
 char_guid() { sqlq "SELECT guid FROM game_character WHERE name = '$1'" "${2:-}" | grep -oE '[0-9]+' | tail -1; } # $1=name $2=database (optional)
 # first numeric column of the first data row
-sql1() { sqlq "$1" | sed -n 3p | awk -F'|' '{gsub(/ /,"",$1); print $1}'; }
+sql1() { sqlq "$1" "${2:-}" | sed -n 3p | awk -F'|' '{gsub(/ /,"",$1); print $1}'; } # $1=query $2=database (optional)
 
 # Wait for the char row's money to go QUIET (two consecutive 1s-apart equal reads). The gateway's
 # logout persist is ASYNC (~1-3s; danger-zones §2): an offline write (debug_set_money) or a delta
@@ -77,6 +81,81 @@ purge_creatures_near() { # $1=x $2=y $3=radius [$4... = guids to KEEP (fixtures:
     sqlq "DELETE FROM game_melee_attack WHERE attacker_guid = $g" >/dev/null 2>&1
     sqlq "DELETE FROM game_world_entity WHERE guid = $g" >/dev/null 2>&1
   done
+}
+
+# Drop $1 out of any party left behind by a crashed or failed prior run.
+#
+# Party state is REALM-CORE authoritative (#22/#50): the world shard's `game_group*` rows are a
+# gateway-maintained MIRROR, so deleting them locally — which several tests did — leaves the real
+# membership standing. The next invite then fails with `GroupFull` while $DB looks empty, and every
+# party-dependent assertion after it fails for a reason that has nothing to do with what it tests.
+# Uses the product's own LEAVE op (realm_op::LEAVE = 3) so the disband/mirror-sync rules run; the
+# local delete is the single-database fallback. Both are best-effort — "not in a group" is success.
+leave_any_group() { # $1=character guid
+  spacetime call "${REALM_CORE_DB:-realm-core}" -- realm_group_op 3 "$1" 0 0 0 >/dev/null 2>&1
+  sqlq "DELETE FROM game_group_member WHERE character_guid = $1" >/dev/null 2>&1
+  return 0
+}
+
+# Restart the gateway WITH ITS OWN ENVIRONMENT. $1 = log path (default /tmp/gw.log).
+#
+# A test that relaunches the gateway from a hardcoded command silently redefines the realm's
+# topology for every test after it. test-playerbots.sh did exactly that — `GW_AOI=1` and nothing
+# else, against a stack running four databases — and on a realm whose default shard has
+# `hosts_instances = false` (correct for that topology) #48's guard REFUSED to start it. The gateway
+# stayed down and the next twelve tests failed on "Connection refused", reported as twelve product
+# regressions. Read the launch env off the live process instead, so a restart is a restart.
+restart_gateway() {
+  local log="${1:-/tmp/gw.log}" pid bin i
+  pid=$(pgrep -x gateway | head -1)
+  [ -n "$pid" ] || { echo "[lib] restart_gateway: no gateway running" >&2; return 1; }
+  # `/proc/PID/exe` resolves to "<path> (deleted)" when the binary has been REBUILT under the
+  # running process — which any `cargo build`/`cargo test` between the launch and here does. Strip
+  # the marker and relaunch the path (the fresh binary at the same location is what we want); fall
+  # back to argv[0] if that somehow does not exist.
+  bin=$(readlink -f "/proc/$pid/exe" 2>/dev/null)
+  bin=${bin% (deleted)}
+  if [ ! -x "$bin" ]; then
+    bin=$(tr '\0' '\n' < "/proc/$pid/cmdline" | head -1)
+  fi
+  [ -x "$bin" ] || { echo "[lib] restart_gateway: cannot locate the gateway binary ($bin)" >&2; return 1; }
+  local envs=()
+  while IFS= read -r line; do envs+=("$line"); done < <(tr '\0' '\n' < "/proc/$pid/environ" | grep -E '^(GW_[A-Z_]*|RUST_LOG)=')
+  pkill -x gateway; sleep 1
+  setsid nohup env "${envs[@]}" "$bin" </dev/null >"$log" 2>&1 &
+  for i in $(seq 1 30); do
+    grep -q "world listening" "$log" 2>/dev/null && { sleep 1; return 0; }
+    sleep 1
+  done
+  echo "[lib] restart_gateway: no 'world listening' within 30s (log: $log)" >&2
+  return 1
+}
+
+# Dissolve EVERY party in the realm. The suite's isolation step (267): party assertions count
+# `game_group`/`game_group_member` GLOBALLY, so one surviving party from an earlier test makes the
+# next one read "2 groups / 6 members" and fail for a reason that has nothing to do with it.
+#
+# They survive for a structural reason worth knowing: party state is authoritative on REALM-CORE
+# (#22/#54), and a bot character is deleted on the WORLD SHARD — where the `character_owned!` sweep
+# runs. A module cannot reach another database, so nothing sweeps the departed member's realm-core
+# row, and the gateway's next mirror push writes the ghost party back onto the shard. Every bot
+# party test therefore leaks one party, permanently. (In production that is a deleted character
+# still listed in someone's party — worth an issue; here it is the suite's dominant flake source.)
+#
+# Drives the product's own ops: LEAVE each member on realm-core (disband happens on the last one),
+# then push an EMPTY roster to each world shard's mirror, which is the documented disband case.
+reset_party_state() {
+  local rc="${REALM_CORE_DB:-realm-core}" g
+  for g in $(spacetime sql "$rc" "SELECT character_guid FROM game_group_member" 2>/dev/null | sed -n '3,$p' | grep -oE '[0-9]+'); do
+    spacetime call "$rc" -- realm_group_op 3 "$g" 0 0 0 >/dev/null 2>&1
+  done
+  # `group_id`, not `id` (module/src/group.rs) — a wrong column name makes `spacetime sql` return an
+  # ERROR that reads as "no rows" once stderr is swallowed, so the loop silently cleared nothing
+  # (danger-zones §2, and it bit again here).
+  for g in $(sqlq "SELECT group_id FROM game_group" | sed -n '3,$p' | grep -oE '[0-9]+'); do
+    spacetime call "$DB" -- sync_group_mirror "$g" 0 0 2 0 '[]' >/dev/null 2>&1
+  done
+  return 0
 }
 
 FAILED=0

@@ -50,6 +50,11 @@ run_test() { # $1 = test name (fn t_$1 must exist)
   local name=$1
   if [ -n "${WS_ONLY:-}" ] && ! grep -qw "$name" <<<"$WS_ONLY"; then return 0; fi
   SKIP_REASON=""
+  # ISOLATION (267): no test may inherit a party from the one before it — see reset_party_state's
+  # header for why they leak in the first place (realm-core owns the roster; the sweep runs on the
+  # world shard and cannot reach it). Four suite failures in the 2026-07-28 run were this and
+  # nothing else, each reported as a party bug in a test that had not formed a party yet.
+  reset_party_state
   local log="$LOGDIR/$name.log"
   echo "── [$name] running…"
   ( "t_$name" ) >"$log" 2>&1

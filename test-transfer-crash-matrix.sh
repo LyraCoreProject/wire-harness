@@ -186,6 +186,29 @@ live_on() { # 1 if the character is durable AND unfenced on $1, else 0
 
 # ---------- gateway lifecycle ----------
 TOKEN=$(grep -oP 'spacetimedb_token = "\K[^"]+' ~/.config/spacetime/cli.toml || true)
+
+# This test OWNS the gateway (see the header) and restarts it seven times with its OWN two-database
+# topology + fault injector. Capture whatever was running BEFORE, and put it back on the way out —
+# otherwise every suite run silently leaves the realm on the matrix's topology and binary, and the
+# next thing anyone measures (a bench, a manual login, the next suite run's first test) is measuring
+# a configuration nobody chose. Same failure the playerbots restart caused mid-suite, just at the end.
+_ORIG_PID=$(pgrep -x gateway | head -1)
+if [ -n "${_ORIG_PID:-}" ]; then
+  _ORIG_BIN=$(readlink -f "/proc/$_ORIG_PID/exe" 2>/dev/null); _ORIG_BIN=${_ORIG_BIN% (deleted)}
+  mapfile -t _ORIG_ENV < <(tr '\0' '\n' < "/proc/$_ORIG_PID/environ" 2>/dev/null | grep -E '^(GW_[A-Z_]*|RUST_LOG)=')
+fi
+restore_original_gateway() {
+  [ -n "${_ORIG_BIN:-}" ] && [ -x "${_ORIG_BIN:-}" ] || return 0
+  pkill -x gateway 2>/dev/null; sleep 1
+  setsid nohup env "${_ORIG_ENV[@]}" "$_ORIG_BIN" </dev/null >/tmp/gw_restored.log 2>&1 &
+  local i
+  for i in $(seq 1 25); do
+    grep -q 'world listening' /tmp/gw_restored.log 2>/dev/null && { echo "[xcrash] restored the pre-matrix gateway ($_ORIG_BIN)"; return 0; }
+    sleep 1
+  done
+  echo "[xcrash] WARNING: could not restore the pre-matrix gateway — the realm is still on the matrix's topology" >&2
+}
+trap restore_original_gateway EXIT
 gw_start() { # $1 = step to abort after ("" = a clean gateway)
   pkill -x gateway 2>/dev/null   # -x, never -f: `-f` self-matches the launching shell (danger-zones §3)
   sleep 1
