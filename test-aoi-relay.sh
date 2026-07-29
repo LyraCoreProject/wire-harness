@@ -64,6 +64,17 @@ sleep 1
 echo "burst $NX $NY $NZ" > "$CMD_MOV"
 wait $CMDPID
 
+# 3c. THE OBSERVER MOVES, and the relay must survive it (109). Every assertion above moves the
+# PEER; the observer's own AOI recenter was untested, and it silently resubscribed a SHORTER query
+# set — dropping game_entity_motion, so peer movement died permanently ~7s into any session where
+# the player walked. The observer walks 60yd (past a 50yd cell boundary) and must STILL receive the
+# mover's heartbeats. Pre-fix this step fails and every step around it passes.
+obs_cmd "walk $OX $OY $OZ"
+obs_cmd expect-move & CMDPID=$!
+sleep 1
+echo "burst $NX $NY $NZ" > "$CMD_MOV"
+wait $CMDPID
+
 # 4. peer DISCONNECT -> DESTROY + row despawn (the peer is in-scope, so the entity delete relays)
 obs_cmd expect-destroy & CMDPID=$!
 sleep 1

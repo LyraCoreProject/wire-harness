@@ -152,6 +152,36 @@ fn aoi_observer(
             return Ok(());
         }
         let window = std::time::Duration::from_secs(30);
+        // "walk <x> <y> <z>" (109): the OBSERVER walks +60yd in x from that point — past a 50yd
+        // GRID_CELL_SIZE boundary, so the gateway's AreaOfInterestTracker recenters its box. Every
+        // other command here moves the PEER, which never exercises the observer's own recenter;
+        // that gap is exactly how a recenter that silently dropped the motion subscription shipped.
+        if let Some(rest) = cmd.strip_prefix("walk ") {
+            use wow_world_messages::vanilla::{
+                MovementInfo, MovementInfo_MovementFlags, Vector3d, MSG_MOVE_HEARTBEAT_Client,
+            };
+            let p: Vec<f32> = rest.split_whitespace().filter_map(|t| t.parse().ok()).collect();
+            if p.len() != 3 {
+                std::fs::write(&ack_file, "FAIL walk (need <x> <y> <z>)").ok();
+                bail!("aoi-observer: walk needs <x> <y> <z>, got {rest:?}");
+            }
+            for i in 0..12u32 {
+                c.send(&MSG_MOVE_HEARTBEAT_Client {
+                    info: MovementInfo {
+                        flags: MovementInfo_MovementFlags::empty(),
+                        timestamp: i * 300,
+                        position: Vector3d { x: p[0] + (i as f32) * 5.0, y: p[1], z: p[2] },
+                        orientation: 0.0,
+                        fall_time: 0.0,
+                    },
+                })?;
+                std::thread::sleep(std::time::Duration::from_millis(150));
+                let _ = c.recv();
+            }
+            println!("[aoi] walked 60yd in +x from ({}, {}, {}) — box recentered", p[0], p[1], p[2]);
+            std::fs::write(&ack_file, "OK walk").ok();
+            continue;
+        }
         // a command may carry an explicit guid ("expect-seen 42") overriding the launch peer —
         // used when the interesting guid (a freshly spawned bot) isn't known at observer start
         let (cmd, peer) = match cmd.split_once(' ') {
