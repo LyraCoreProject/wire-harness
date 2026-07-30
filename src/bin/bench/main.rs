@@ -68,6 +68,146 @@ const LATENCY_FLUSH_BATCH: usize = 64;
 /// concerned, which is not the workload this benchmark claims to measure.
 const MOVE_FLAG_FORWARD: MovementInfo_MovementFlags =
     MovementInfo_MovementFlags::new(0x1, None, None, None, None);
+/// No movement flags at all — a player standing still. Only used when the leash leaves no room to
+/// walk (see `WalkPath::for_player`), because carrying `FORWARD` while not moving is exactly the
+/// inconsistency work-item #288 exists to remove.
+const MOVE_FLAG_NONE: MovementInfo_MovementFlags =
+    MovementInfo_MovementFlags::new(0x0, None, None, None, None);
+
+/// Vanilla's default run speed, yards/second. **This is not a cosmetic choice.** A 1.12.1 client
+/// dead-reckons a peer that carries `MOVEMENT_FLAG_FORWARD` forward along its heading at its run
+/// speed between packets, so the speed this harness actually walks at MUST equal the speed the
+/// flags it sets imply. It did not until #288: the crowd walked a 3yd circle at ~2 yd/s while
+/// flagged FORWARD, so every observing client extrapolated each peer ~3.5 yd ahead and the next
+/// heartbeat snapped it back — twice a second, for every peer in view. That made every qualitative
+/// load test report "peers are jittery" no matter how perfectly the relay was delivering.
+const RUN_SPEED_YDS: f32 = 7.0;
+
+/// Radius of the arc each synthetic player walks around its own point in the crowd.
+///
+/// Two competing constraints pick this number:
+/// - **Big enough that the arc is nearly straight over one heartbeat.** A client extrapolating
+///   along the tangent lands `(v·dt)² / 2R` off the true arc; at 7 yd/s, R = 20 yd, that is 5 cm
+///   at a 200ms cadence and 31 cm at 500ms — under the client's own interpolation tolerance,
+///   versus the ~2.5 yd snap the old model produced.
+/// - **Small enough to leash the crowd.** The walk must not carry players outside `--spread`, or a
+///   rung stops measuring the crowd density it says it does. `WalkPath::for_player` shrinks the
+///   placement disc by exactly this radius so `base_radius + arc_radius <= spread` always holds.
+///
+/// A *straight* line would make dead reckoning exact, but a constant heading is also perfectly
+/// coalescible (`gateway/src/world/coalesce.rs` forwards on any heading change), so a straight-line
+/// crowd would offer the writer a load no real crowd offers. An arc keeps the heading drifting.
+const WALK_ARC_RADIUS_YDS: f32 = 20.0;
+
+/// Golden angle, radians — successive players are placed (and phase-offset along their arcs) by
+/// this, so no two line up and the crowd never rotates as a rigid body.
+const GOLDEN_ANGLE: f32 = 2.399_963_2;
+
+/// Default per-player heartbeat cadence, ms. Raised from 500 to 200 by #288: the shorter the gap
+/// between corrections, the less far a peer's dead reckoning can drift from the truth. See
+/// `--heartbeat-ms` in `USAGE` for how to reproduce a pre-#288 run.
+const DEFAULT_HEARTBEAT_MS: u64 = 200;
+
+/// The path one synthetic player walks: a circle of `radius` around `base`, travelled at
+/// `speed_yds` yards per second, sampled once per heartbeat.
+///
+/// Pure geometry — no socket, no clock, no config — so the exact bytes a player puts on the wire
+/// can be unit-tested (`emitted_movement_is_self_consistent_at_the_flagged_run_speed`). Everything
+/// about a heartbeat except the timestamp comes out of `heartbeat()`, INCLUDING the movement
+/// flags, so "the flags say running" and "the positions say 7 yd/s" cannot drift apart in one
+/// place while staying right in the other.
+#[derive(Clone, Copy, Debug)]
+struct WalkPath {
+    base: [f32; 2],
+    z: f32,
+    radius: f32,
+    /// Where on the circle heartbeat 0 sits, radians.
+    phase: f32,
+    /// Radians advanced per heartbeat = `speed_yds * heartbeat_secs / radius`. Zero for a player
+    /// with no room to walk.
+    step: f32,
+    speed_yds: f32,
+}
+
+impl WalkPath {
+    /// The arc for player `idx` of a crowd of radius `spread` centred on `center`, heartbeating
+    /// every `heartbeat`.
+    ///
+    /// The placement disc is shrunk by the arc radius, so a player's FURTHEST point on its arc is
+    /// still exactly on the `spread` boundary and never outside it.
+    fn for_player(idx: usize, center: [f32; 3], spread: f32, heartbeat: Duration) -> Self {
+        let spread = spread.max(0.0);
+        let radius = WALK_ARC_RADIUS_YDS.min(spread);
+        // Golden-angle placement over the remaining disc, so successive players never line up and
+        // every player sits inside everyone else's AOI box (unchanged from before #288 except for
+        // the arc-radius budget subtracted from the disc).
+        let ang = idx as f32 * GOLDEN_ANGLE;
+        let base_radius = (spread - radius) * (((idx % 23) as f32 + 0.5) / 23.0).sqrt();
+        let base = [center[0] + base_radius * ang.cos(), center[1] + base_radius * ang.sin()];
+        // A player with no room to walk (a degenerate `--spread 0`) stands still — and says so in
+        // its flags, rather than claiming to run while its position never changes.
+        let (step, speed_yds) = if radius > 0.0 {
+            let per_hb = RUN_SPEED_YDS * heartbeat.as_secs_f32();
+            (per_hb / radius, RUN_SPEED_YDS)
+        } else {
+            (0.0, 0.0)
+        };
+        Self { base, z: center[2], radius, phase: ang, step, speed_yds }
+    }
+
+    /// RAID FORMATION: the same golden-angle placement, but the player STANDS — no arc, no
+    /// movement flags, facing inward at the thing in the middle.
+    ///
+    /// A crowd fighting a boss does not run in circles, and a harness that makes it do so is
+    /// modelling the wrong thing twice over: it looks absurd to anyone watching, and it spends the
+    /// writer's budget on movement when the load under test is casting. The full `spread` is
+    /// available for placement here because no arc radius has to be reserved.
+    fn standing(idx: usize, center: [f32; 3], spread: f32) -> Self {
+        let spread = spread.max(0.0);
+        let ang = idx as f32 * GOLDEN_ANGLE;
+        let base_radius = spread * (((idx % 23) as f32 + 0.5) / 23.0).sqrt();
+        let base = [center[0] + base_radius * ang.cos(), center[1] + base_radius * ang.sin()];
+        // Face the centre: the player is standing at `ang` on the disc, so inward is `ang + π`.
+        Self {
+            base,
+            z: center[2],
+            radius: 0.0,
+            phase: (ang + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU),
+            step: 0.0,
+            speed_yds: 0.0,
+        }
+    }
+
+    /// The complete `MovementInfo` for heartbeat number `hb`, stamped `timestamp`.
+    fn heartbeat(&self, hb: u32, timestamp: u32) -> MovementInfo {
+        let phi = self.phase + self.step * hb as f32;
+        // A stationary player reports its fixed spot and its fixed facing. Reusing the arc formula
+        // with radius 0 would work for the position but would rotate the FACING every heartbeat —
+        // a crowd of players spinning on the spot, which is its own kind of wrong.
+        let (position, orientation) = if self.radius > 0.0 {
+            (
+                Vector3d {
+                    x: self.base[0] + self.radius * phi.cos(),
+                    y: self.base[1] + self.radius * phi.sin(),
+                    z: self.z,
+                },
+                // Facing = the tangent, i.e. the direction the next heartbeat actually travels in.
+                // A client dead-reckons along THIS, so it has to be the true heading of travel or
+                // the extrapolation is wrong however good the speed is.
+                (phi + std::f32::consts::FRAC_PI_2).rem_euclid(std::f32::consts::TAU),
+            )
+        } else {
+            (Vector3d { x: self.base[0], y: self.base[1], z: self.z }, self.phase)
+        };
+        MovementInfo {
+            flags: if self.speed_yds > 0.0 { MOVE_FLAG_FORWARD } else { MOVE_FLAG_NONE },
+            timestamp,
+            position,
+            orientation,
+            fall_time: 0.0,
+        }
+    }
+}
 
 const USAGE: &str = "\
 bench — 50→200 synthetic-player capacity benchmark
@@ -96,7 +236,14 @@ RAMP:
 WORKLOAD:
   --center X,Y,Z          shared-zone center the crowd walks in    [-8920,-180,82]
   --spread YARDS          crowd radius around the center           [40]
-  --heartbeat-ms MS       per-player movement cadence              [500]
+  --heartbeat-ms MS       per-player movement cadence              [200, or $BENCH_HEARTBEAT_MS]
+                          Every player walks an arc at vanilla RUN SPEED (7 yd/s) with the FORWARD
+                          flag set, leashed inside --spread, so a real client's dead reckoning of
+                          a peer lands where the next heartbeat says it should (#288).
+                          THIS IS AN INPUT TO MOVEMENT THROUGHPUT: at 200ms a rung offers 2.5x the
+                          movement_update rate it did at the pre-2026-07-29 default of 500. Pass
+                          --heartbeat-ms 500 to reproduce a run recorded in docs/bench/ before
+                          then (its peers WILL look jittery on a real client at that cadence).
   --combat-pct N          % of players that engage a nearby creature [25]
 
 IDENTITY:
@@ -181,6 +328,16 @@ impl Args {
     }
 }
 
+/// A numeric default read from the environment. Unset falls back to `default`; SET-BUT-GARBAGE is
+/// an error rather than a silent fallback, because a typo'd `BENCH_HEARTBEAT_MS=20O` that quietly
+/// ran at the default would publish a rung labelled with a cadence it never used.
+fn env_num<T: std::str::FromStr>(key: &str, default: T) -> Result<T> {
+    match std::env::var(key) {
+        Err(_) => Ok(default),
+        Ok(v) => v.trim().parse().map_err(|_| anyhow::anyhow!("${key}: cannot parse {v:?}")),
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 //  Shared state
 // ---------------------------------------------------------------------------------------------
@@ -206,6 +363,20 @@ struct Cfg {
     /// every synthetic player is born on the default shard and transfers off the one under test
     /// (#71).
     race: Race,
+    /// The class new characters are created as. Warrior is the default and what every rung before
+    /// 2026-07-29 used; the reason it is now a knob is RAID MODE below — a warrior's abilities are
+    /// rage-gated, so a warrior crowd asked to cast mostly produces power-failure results, which
+    /// measures the gate rather than the cast. A caster class starts with mana and a rank-1 nuke it
+    /// already knows at level 1, so the crowd actually lands spells.
+    class: Class,
+    /// RAID MODE (all three or none): every combat player selects `boss_guid`, swings it, and casts
+    /// `cast_spell` at it every `cast_ms`, instead of picking whatever creature the AOI burst
+    /// happened to spawn nearby. This is what turns the crowd from "N players moving" into "N
+    /// players fighting ONE target" — the shape that concentrates threat, healing and spell traffic
+    /// on a single entity the way a real boss pull does.
+    boss_guid: u64,
+    cast_spell: u32,
+    cast_ms: u64,
 }
 
 #[derive(Default)]
@@ -213,19 +384,24 @@ struct Counters {
     heartbeats: AtomicU64,
     peer_moves: AtomicU64,
     swings: AtomicU64,
+    casts: AtomicU64,
     frames: AtomicU64,
     backpressure: AtomicU64,
 }
 
 impl Counters {
     /// Read every counter at once (window boundaries take a `snapshot` before and after).
-    fn snapshot(&self) -> [u64; 5] {
+    /// `casts` is appended LAST so the existing index order (heartbeats, peer_moves, swings,
+    /// frames, backpressure) that the window arithmetic and the report both index by position
+    /// keeps meaning what it did.
+    fn snapshot(&self) -> [u64; 6] {
         [
             self.heartbeats.load(Ordering::Relaxed),
             self.peer_moves.load(Ordering::Relaxed),
             self.swings.load(Ordering::Relaxed),
             self.frames.load(Ordering::Relaxed),
             self.backpressure.load(Ordering::Relaxed),
+            self.casts.load(Ordering::Relaxed),
         ]
     }
 }
@@ -279,16 +455,23 @@ fn run_player(idx: usize, cfg: Arc<Cfg>, sh: Arc<Shared>) {
     sh.connected.fetch_add(1, Ordering::Relaxed);
     sh.live.fetch_add(1, Ordering::Relaxed);
 
-    // Spread the crowd over a disc of radius `spread` using the golden angle, so successive
-    // players never line up and every player sits inside everyone else's AOI box.
-    let ang = idx as f32 * 2.399_963_2;
-    let radius = cfg.spread * (((idx % 23) as f32 + 0.5) / 23.0).sqrt();
-    let (bx, by) = (cfg.center[0] + radius * ang.cos(), cfg.center[1] + radius * ang.sin());
     let combat = idx % 100 < cfg.combat_pct;
 
     let hb_interval = Duration::from_millis(cfg.heartbeat_ms);
+    // The arc this player walks, at the speed its movement flags imply and inside the crowd's
+    // leash. Everything on the wire but the timestamp comes from here — see `WalkPath`.
+    // Raid mode stands the crowd in formation around the boss; every other run walks the #288 arc.
+    let walk = if cfg.boss_guid != 0 {
+        WalkPath::standing(idx, cfg.center, cfg.spread)
+    } else {
+        WalkPath::for_player(idx, cfg.center, cfg.spread, hb_interval)
+    };
     let mut next_hb = Instant::now();
     let mut next_combat_flip = Instant::now() + Duration::from_secs(COMBAT_FLIP_SECS);
+    // Stagger the first cast across the crowd so 100 players don't fire their opener on the same
+    // millisecond — a real pull trickles in, and a synchronised burst measures a thundering herd
+    // rather than a fight.
+    let mut next_cast = Instant::now() + Duration::from_millis((idx as u64 * 37) % cfg.cast_ms.max(1));
     let mut engaged: Option<u64> = None;
     let mut hb_count: u32 = 0;
     let mut local_lat: Vec<u32> = Vec::with_capacity(LATENCY_FLUSH_BATCH);
@@ -303,26 +486,14 @@ fn run_player(idx: usize, cfg: Arc<Cfg>, sh: Arc<Shared>) {
             // heartbeat? Same clock and same scheduler as the movement-latency samples, so it is a
             // lower bound on how much of the reported latency is the benchmark process.
             local_lag.push(now.saturating_duration_since(next_hb).as_millis() as u32);
-            // A 3yd circular stroll around the player's base point. Heading follows the circle's
-            // TANGENT and the FORWARD movement flag is set, because that is what a real running
-            // client sends — and the gateway classifies a heartbeat by (flags, heading) against the
-            // last one it forwarded (`gateway/src/world/coalesce.rs`). A constant heading would
-            // make this stream perfectly coalescible in a way real crowd movement is not
-            // (docs/perf-fix-catalog.md 1.8: heading drift while turning defeats coalescing), which
-            // would let a future coalescing-window change look better here than it is in the world.
-            let t = hb_count as f32 * 0.35;
-            let info = MovementInfo {
-                flags: MOVE_FLAG_FORWARD,
-                timestamp: sh.now_ms(),
-                position: Vector3d {
-                    x: bx + 3.0 * t.cos(),
-                    y: by + 3.0 * t.sin(),
-                    z: cfg.center[2],
-                },
-                // Tangent to the stroll, wrapped into 0..2π like a client's facing.
-                orientation: (t + std::f32::consts::FRAC_PI_2).rem_euclid(std::f32::consts::TAU),
-                fall_time: 0.0,
-            };
+            // The whole packet — position, heading AND flags — comes from the one pure path, so
+            // this loop cannot desynchronise "what the flags claim" from "how fast the positions
+            // move" (work-item #288). Heading drifts along the arc, which the gateway classifies
+            // as a state change (`gateway/src/world/coalesce.rs`) rather than a coalescible pure
+            // heartbeat — a constant heading would make this stream perfectly coalescible in a way
+            // real crowd movement is not (docs/perf-fix-catalog.md 1.8), which would let a future
+            // coalescing-window change look better here than it is in the world.
+            let info = walk.heartbeat(hb_count, sh.now_ms());
             if c.send(&MSG_MOVE_HEARTBEAT_Client { info }).is_err() {
                 break; // socket gone — the session is over
             }
@@ -335,7 +506,36 @@ fn run_player(idx: usize, cfg: Arc<Cfg>, sh: Arc<Shared>) {
             }
         }
 
-        if combat && now >= next_combat_flip {
+        // RAID MODE: one named target for the whole crowd, engaged once and never released — a boss
+        // pull is not a series of flips, it is N players locked on one entity for the fight's whole
+        // duration. Stays armed even if the swing is refused (out of range, dead), because the cast
+        // loop below is what carries the load and it needs the selection either way.
+        if cfg.boss_guid != 0 && combat && engaged.is_none() {
+            if c.set_selection(cfg.boss_guid).is_ok()
+                && c.send(&CMSG_ATTACKSWING { guid: Guid::new(cfg.boss_guid) }).is_ok()
+            {
+                engaged = Some(cfg.boss_guid);
+                sh.counters.swings.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        // The abilities half. A real fight is not auto-attack: it is a cast every GCD-ish interval,
+        // each one a full server-side gate (known spell, level, power, range, cooldown, target
+        // validity) plus a hit roll and a damage log fanned out to everyone watching. That is the
+        // work this mode exists to generate, and none of it happens on a swing alone.
+        if cfg.cast_spell != 0 && combat && now >= next_cast {
+            next_cast = now + Duration::from_millis(cfg.cast_ms);
+            let target = if cfg.boss_guid != 0 { Some(cfg.boss_guid) } else { engaged };
+            if let Some(t) = target {
+                if c.cast_spell(cfg.cast_spell, t).is_ok() {
+                    sh.counters.casts.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+
+        // Free-for-all combat (the pre-raid-mode behaviour, unchanged): flip between swinging at
+        // whatever creature the AOI burst spawned nearby and disengaging.
+        if cfg.boss_guid == 0 && combat && now >= next_combat_flip {
             next_combat_flip = now + Duration::from_secs(COMBAT_FLIP_SECS);
             match engaged.take() {
                 Some(_) => {
@@ -422,7 +622,7 @@ fn connect(cfg: &Cfg, account: &str, char_name: &str) -> Result<WireClient> {
     let (k, realm_world) = wire_client::logon_at(&cfg.logon, account, &cfg.password)?;
     let world = cfg.world.clone().unwrap_or(realm_world);
     let mut c = WireClient::connect_world(&world, account, k)?;
-    let guid = c.create_or_find_char_as(char_name, Class::Warrior, cfg.race)?;
+    let guid = c.create_or_find_char_as(char_name, cfg.class, cfg.race)?;
     c.player_login(guid)?;
     c.set_recv_timeout(Duration::from_millis(DRAIN_POLL_MS))?;
     Ok(c)
@@ -637,8 +837,28 @@ fn main() -> Result<()> {
         char_prefix: args.str("char-prefix", "Bench"),
         center: args.vec3("center", [-8920.0, -180.0, 82.0])?,
         spread: args.num::<f32>("spread", 40.0)?,
-        heartbeat_ms: args.num::<u64>("heartbeat-ms", 500)?,
+        // `--heartbeat-ms` > `$BENCH_HEARTBEAT_MS` > the default. The env var exists so a wrapper
+        // script that does NOT pass the flag (or a shell that exports it for a whole session) can
+        // still reproduce a pre-#288 cadence without editing anything.
+        heartbeat_ms: args.num::<u64>("heartbeat-ms", env_num("BENCH_HEARTBEAT_MS", DEFAULT_HEARTBEAT_MS)?)?,
         combat_pct: args.num::<usize>("combat-pct", 25)?,
+        class: match args.str("class", "warrior").to_ascii_lowercase().as_str() {
+            "warrior" => Class::Warrior,
+            "mage" => Class::Mage,
+            "priest" => Class::Priest,
+            "warlock" => Class::Warlock,
+            "rogue" => Class::Rogue,
+            "paladin" => Class::Paladin,
+            other => anyhow::bail!(
+                "--class {other} is not one this benchmark knows. Use warrior (the default, and \
+                 what every rung before 2026-07-29 used) or a caster — mage/priest/warlock — when \
+                 the run casts, since a warrior's abilities are rage-gated and an idle warrior has \
+                 no rage. Note the (race, class) pair must be legal: Human has no shaman."
+            ),
+        },
+        boss_guid: args.num::<u64>("boss", 0)?,
+        cast_spell: args.num::<u32>("cast-spell", 0)?,
+        cast_ms: args.num::<u64>("cast-ms", 1500)?,
         race: match args.str("race", "human").to_ascii_lowercase().as_str() {
             "human" => Race::Human,
             "orc" => Race::Orc,
@@ -1110,6 +1330,184 @@ spacetime_num_bytes_sent_to_clients_total{db="aaa",txn_type="Reducer"} 5
         assert_eq!(parked.len(), 1, "{parked:?}");
         assert!(parked[0].contains("queue wait"), "{}", parked[0]);
         assert!(parked[0].contains("BY ABSENCE"), "{}", parked[0]);
+    }
+
+    /// Distance between two emitted positions, in yards — what a client's dead reckoning has to
+    /// cover between two heartbeats.
+    fn dist(a: &MovementInfo, b: &MovementInfo) -> f32 {
+        let (dx, dy) = (b.position.x - a.position.x, b.position.y - a.position.y);
+        (dx * dx + dy * dy).sqrt()
+    }
+
+    /// THE #288 test: the emitted stream must be physically self-consistent — the distance between
+    /// consecutive heartbeats must match the speed the movement FLAGS imply (a client extrapolates
+    /// a peer carrying `FORWARD` at run speed along its heading), the heading must be the direction
+    /// travel actually goes, and the walk must stay inside the crowd's leash.
+    ///
+    /// The old model failed all three: 3yd circle at ~2 yd/s while flagged FORWARD (7 yd/s).
+    #[test]
+    fn emitted_movement_is_self_consistent_at_the_flagged_run_speed() {
+        // The speed a 1.12.1 client extrapolates a peer carrying MOVEMENT_FLAG_FORWARD at —
+        // deliberately a SEPARATE literal from `RUN_SPEED_YDS`, not a reference to it. Written as
+        // `RUN_SPEED_YDS` first, this whole test stayed green when the harness constant was
+        // mutated to 2.0 (the exact pre-#288 defect): both sides moved together and the assertion
+        // reduced to "the harness walks at the speed the harness says it walks at". The client's
+        // number is fixed by the CLIENT, so it belongs here as a fact, not as a variable.
+        const CLIENT_DEAD_RECKON_YDS: f32 = 7.0;
+        let center = [-8920.0f32, -180.0, 82.0];
+        let spread = 40.0f32;
+        // Both the new default cadence and the pre-#288 one people will still reproduce runs with:
+        // the geometry has to hold at ANY heartbeat rate, since the step scales with it.
+        for hb_ms in [200u64, 500, 100] {
+            let dt = Duration::from_millis(hb_ms);
+            for idx in [0usize, 1, 7, 22, 23, 99, 199] {
+                let w = WalkPath::for_player(idx, center, spread, dt);
+                let mut prev = w.heartbeat(0, 0);
+                assert_eq!(
+                    prev.flags, MOVE_FLAG_FORWARD,
+                    "a walking player must carry FORWARD, or peers render it standing still"
+                );
+                for hb in 1..=64u32 {
+                    let cur = w.heartbeat(hb, hb);
+                    // 1. SPEED: the straight-line gap a client must cover in `dt` is the run speed
+                    //    its flags advertise. (Chord vs arc: the chord is what dead reckoning sees,
+                    //    and it is within 0.5% of the arc for this curvature.)
+                    let implied = dist(&prev, &cur) / dt.as_secs_f32();
+                    assert!(
+                        (implied - CLIENT_DEAD_RECKON_YDS).abs() < CLIENT_DEAD_RECKON_YDS * 0.02,
+                        "idx {idx} hb {hb} at {hb_ms}ms implies {implied:.2} yd/s but the FORWARD \
+                         flag makes every observing client extrapolate at \
+                         {CLIENT_DEAD_RECKON_YDS} yd/s — that gap IS the #288 jitter"
+                    );
+                    // 2. HEADING: the facing must point where the player actually goes, or the
+                    //    extrapolation is wrong in DIRECTION however right the speed is.
+                    let travel = (cur.position.y - prev.position.y)
+                        .atan2(cur.position.x - prev.position.x)
+                        .rem_euclid(std::f32::consts::TAU);
+                    let err = (travel - prev.orientation).abs().min(
+                        std::f32::consts::TAU - (travel - prev.orientation).abs(),
+                    );
+                    assert!(
+                        err < w.step,
+                        "idx {idx} hb {hb} at {hb_ms}ms faces {:.3} but travels {travel:.3}",
+                        prev.orientation
+                    );
+                    // 3. LEASH: the crowd must stay inside `--spread`, or a rung stops measuring
+                    //    the crowd density it reports.
+                    let from_center = ((cur.position.x - center[0]).powi(2)
+                        + (cur.position.y - center[1]).powi(2))
+                    .sqrt();
+                    assert!(
+                        from_center <= spread + 1e-3,
+                        "idx {idx} hb {hb} wandered {from_center:.2}yd from the crowd centre, \
+                         outside the {spread}yd spread"
+                    );
+                    // 4. The z-plane and the epoch stamp are passed through untouched.
+                    assert_eq!(cur.position.z, center[2]);
+                    assert_eq!(cur.timestamp, hb);
+                    // 5. Heading DRIFTS every heartbeat, so the gateway's coalescer classifies each
+                    //    one as a state change. A constant-heading crowd would be perfectly
+                    //    coalescible and would offer the writer a load no real crowd offers.
+                    assert_ne!(
+                        cur.orientation, prev.orientation,
+                        "idx {idx} hb {hb}: a constant heading is fully coalescible"
+                    );
+                    prev = cur;
+                }
+                // A long rung must not drift out of the leash (or out of speed) as `phase +
+                // step * hb` loses f32 precision: at 5 Hz a 60s window is ~300 heartbeats, and a
+                // soak is orders of magnitude more.
+                let (a, b) = (w.heartbeat(50_000, 0), w.heartbeat(50_001, 0));
+                let implied = dist(&a, &b) / dt.as_secs_f32();
+                assert!(
+                    (implied - CLIENT_DEAD_RECKON_YDS).abs() < CLIENT_DEAD_RECKON_YDS * 0.02,
+                    "idx {idx} at {hb_ms}ms drifts to {implied:.2} yd/s after 50k heartbeats"
+                );
+                let far = ((b.position.x - center[0]).powi(2) + (b.position.y - center[1]).powi(2))
+                    .sqrt();
+                assert!(far <= spread + 1e-3, "idx {idx} left the leash after 50k heartbeats");
+            }
+        }
+    }
+
+    /// The degenerate leash: no room to walk must produce a player that says it is standing still,
+    /// not one that claims to be running while its position never changes — the same inconsistency
+    /// in miniature.
+    #[test]
+    fn a_player_with_no_room_to_walk_does_not_claim_to_be_running() {
+        let w = WalkPath::for_player(3, [0.0, 0.0, 10.0], 0.0, Duration::from_millis(200));
+        let a = w.heartbeat(0, 0);
+        let b = w.heartbeat(9, 1);
+        assert_eq!(a.flags, MOVE_FLAG_NONE);
+        assert_eq!(dist(&a, &b), 0.0);
+        assert!(w.step.is_finite(), "a zero radius must not divide by zero into NaN/inf");
+    }
+
+    /// Everything above tests the pure path. This tests that `run_player` — which needs a live
+    /// socket and cannot be called from a unit test — actually PUTS IT ON THE WIRE.
+    ///
+    /// Playbook §8's most repeated defect in this repo is exactly this shape: a perfect test on an
+    /// extracted helper while the call site is free to keep the defect. Both mutations were run:
+    /// reverting the heartbeat body to the old hand-rolled `MovementInfo` (3yd/0.35rad), and
+    /// keeping the call but sending a hand-rolled packet instead — each is caught here and NEITHER
+    /// is caught by the behavioural tests above.
+    ///
+    /// What it does NOT catch: a wrong CONSTANT (`RUN_SPEED_YDS = 2.0`) — that is
+    /// `emitted_movement_is_self_consistent...`'s job — or `run_player` sending the right info to
+    /// the wrong opcode.
+    #[test]
+    fn the_heartbeat_loop_sends_the_walk_paths_packet_and_builds_none_of_its_own() {
+        let body = code_of("fn run_player(");
+        // BOTH constructors must be present and both must be a `WalkPath`: the walking arc for an
+        // ordinary rung, and the standing raid formation when a boss is named. A run that fell back
+        // to hand-rolled movement in EITHER branch puts #288's jitter back on the wire.
+        assert!(
+            body.contains("WalkPath::for_player(idx, cfg.center, cfg.spread, hb_interval)")
+                && body.contains("WalkPath::standing(idx, cfg.center, cfg.spread)")
+                && body.contains("let info = walk.heartbeat(hb_count, sh.now_ms())")
+                && body.contains("c.send(&MSG_MOVE_HEARTBEAT_Client { info })"),
+            "the player loop no longer derives its heartbeat from a leashed `WalkPath` in both the \
+             walking and standing branches — #288's jitter is back on the wire while every test \
+             above stays green"
+        );
+        assert!(
+            !body.contains("MovementInfo {"),
+            "`run_player` hand-rolls a MovementInfo again: the one place flags and speed can \
+             disagree is a packet built outside `WalkPath`"
+        );
+    }
+
+    /// Source scan support: the body of the item starting at `needle`, with comments stripped
+    /// (LEADING *and* TRAILING — playbook §8: a `// let info = walk.heartbeat(..)` comment left a
+    /// scan satisfied by nothing but its own prose) and whitespace collapsed. String literals are
+    /// respected so a `//` inside one is not read as a comment.
+    fn code_of(needle: &str) -> String {
+        let src = include_str!("main.rs");
+        let at = src.find(needle).unwrap_or_else(|| panic!("{needle} moved"));
+        // Bound the scan at the NEXT top-level item, so a later function (or this test module,
+        // whose assertion strings contain the needles) cannot satisfy the scan by itself.
+        let rest = &src[at + needle.len()..];
+        let end = rest.find("\n}\n").map(|e| at + needle.len() + e).unwrap_or(src.len());
+        let mut out = String::new();
+        for line in src[at..end].lines() {
+            let mut in_str = false;
+            let mut prev = '\0';
+            let mut cut = line.len();
+            for (i, ch) in line.char_indices() {
+                match ch {
+                    '"' if prev != '\\' => in_str = !in_str,
+                    '/' if !in_str && prev == '/' => {
+                        cut = i - 1;
+                        break;
+                    }
+                    _ => {}
+                }
+                prev = ch;
+            }
+            out.push_str(line[..cut].trim());
+            out.push(' ');
+        }
+        out.split_whitespace().collect::<Vec<_>>().join(" ")
     }
 
     #[test]
