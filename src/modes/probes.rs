@@ -53,6 +53,7 @@ pub(crate) fn try_dispatch(
         "addon-ping" => addon_ping(c, args, mcx)?,
         "event-stream" => event_stream(c, args, mcx)?,
         "walkmelee" => walkmelee(c, args, mcx)?,
+        "seamwalk" => seamwalk(c, args, mcx)?,
         "casttime" => casttime(c, args, mcx)?,
         "name-query" => name_query(c, args, mcx)?,
         "bindpoint" => bindpoint(c, args, mcx)?,
@@ -479,6 +480,104 @@ fn walkmelee(
         bail!("walkmelee FAIL: no own swing after walking into reach (walk_to position not tracked?)");
     }
     println!("[wire] WALKMELEE PASS \u{2713} walked 12yd -> 3yd and the swing fired");
+    Ok(())
+}
+
+// ---- seamwalk <x0> <y0> <z0> <x1> <y1> <z1>: walk across a REGION SEAM and back, and assert the
+// crossing was a NON-EVENT (issue #68 AC3).
+//
+// A dormant seam — two regions assigned to the same database — must be invisible: no handoff, no
+// reconnect, nothing the client can tell apart from ordinary ground. That is a claim about what did
+// NOT happen, which is exactly what a human watching a screen cannot verify, and it is why this is a
+// probe rather than an eyeball item.
+//
+// The failure it exists to catch is a crossing that DOES hand off (a region wrongly assigned, or
+// routing consulted at the wrong moment): the gateway would send SMSG_TRANSFER_PENDING +
+// SMSG_NEW_WORLD, which `recv` surfaces even though it auto-acks the worldport.
+//
+// Walked in short legs with a drain between each: `walk_to` only sends, so a long unbroken walk lets
+// the gateway's outbound queue back up until it drops the session (danger-zones §2) — which would
+// read as a handoff-adjacent failure and would be the harness's fault, not the server's.
+fn seamwalk(
+    c: &mut WireClient,
+    args: &mut dyn Iterator<Item = String>,
+    _mcx: &ModeCtx<'_>,
+) -> Result<()> {
+    use game_shared::spatial::grid_cell;
+    use std::time::Duration;
+    let mut f = || -> f32 {
+        args.next()
+            .and_then(|s| s.parse().ok())
+            .expect("usage: seamwalk <x0> <y0> <z0> <x1> <y1> <z1>")
+    };
+    let (x0, y0, z0, x1, y1, z1) = (f(), f(), f(), f(), f(), f());
+    // `oneway` leaves the character on the FAR side. Needed because a round trip ends where it began,
+    // which is indistinguishable from the server never having applied the walk at all — the caller
+    // asserts the final position server-side to tell those two apart.
+    let oneway = args.next().as_deref() == Some("oneway");
+    let (a, b) = ((x0, y0, z0), (x1, y1, z1));
+    let (ca, cb) = (grid_cell(x0, y0), grid_cell(x1, y1));
+    let dist = ((x1 - x0).powi(2) + (y1 - y0).powi(2)).sqrt();
+    println!("[wire] seamwalk: cell {ca:?} -> {cb:?} ({dist:.0} yd each way)");
+    if ca == cb {
+        bail!("seamwalk FAIL: both endpoints are in cell {ca:?} — this walk crosses no cell boundary, so it cannot cross a seam either");
+    }
+
+    // Legs of ~35 yd (~5 s at run speed) so the socket is drained often enough to stay healthy.
+    const LEG_YD: f32 = 35.0;
+    let mut ported = Vec::new();
+    let mut drained = 0u32;
+    let mut walk = |c: &mut WireClient, from: (f32, f32, f32), to: (f32, f32, f32)| -> Result<()> {
+        let legs = ((dist / LEG_YD).ceil() as u32).max(1);
+        let mut prev = from;
+        for i in 1..=legs {
+            let t = i as f32 / legs as f32;
+            let next = (
+                from.0 + (to.0 - from.0) * t,
+                from.1 + (to.1 - from.1) * t,
+                from.2 + (to.2 - from.2) * t,
+            );
+            c.walk_to(prev, next, 7.0)?; // real vanilla run speed
+            prev = next;
+            // Drain whatever the walk produced. A transfer here is the defect under test, so it is
+            // recorded rather than acted on — and `recv` has already acked the worldport, which keeps
+            // the session usable so the walk back can still run and report.
+            c.set_recv_timeout(Duration::from_millis(400))?;
+            loop {
+                match c.recv() {
+                    Ok(Smsg::SMSG_TRANSFER_PENDING(_)) => ported.push("SMSG_TRANSFER_PENDING"),
+                    Ok(Smsg::SMSG_NEW_WORLD(_)) => ported.push("SMSG_NEW_WORLD"),
+                    Ok(_) => drained += 1,
+                    Err(e) if wire_client::is_read_timeout(&e) => break, // quiet — leg done
+                    Err(e) => return Err(e),                            // a real socket failure
+                }
+            }
+        }
+        Ok(())
+    };
+
+    walk(c, a, b)?;
+    println!("[wire] seamwalk: crossed into cell {cb:?}");
+    if oneway {
+        println!("[wire] seamwalk: ONEWAY — left standing in cell {cb:?} for a server-side position check");
+    } else {
+        walk(c, b, a)?;
+        println!("[wire] seamwalk: returned to cell {ca:?}");
+    }
+
+    if !ported.is_empty() {
+        bail!(
+            "seamwalk FAIL: the crossing handed the session off ({}) — a seam whose regions share one \
+             database must be a strict no-op",
+            ported.join(", ")
+        );
+    }
+    // The session surviving both legs is the other half of "nothing happened": a dropped socket would
+    // have surfaced as a non-timeout Err above.
+    println!(
+        "[wire] SEAMWALK PASS \u{2713} crossed the seam and returned with NO handoff \
+         (no TRANSFER_PENDING, no NEW_WORLD, session intact, {drained} packets drained)"
+    );
     Ok(())
 }
 
