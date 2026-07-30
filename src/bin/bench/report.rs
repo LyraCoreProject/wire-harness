@@ -328,6 +328,16 @@ impl fmt::Display for Report {
             self.config.combat_pct,
             self.config.spread_yards
         )?;
+        // The movement MODEL, not just its cadence: #288 changed it, and a rung's movement
+        // throughput is a function of both. Stated in every report so two runs are never compared
+        // across the change without noticing.
+        writeln!(
+            f,
+            "walk           {}yd arc at {} yd/s (vanilla run speed) with MOVEMENT_FLAG_FORWARD, \
+             leashed inside the spread — self-consistent for a client's dead reckoning (#288)",
+            crate::WALK_ARC_RADIUS_YDS,
+            crate::RUN_SPEED_YDS
+        )?;
         writeln!(f)?;
 
         writeln!(f, "## Headline")?;
