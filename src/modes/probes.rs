@@ -483,17 +483,33 @@ fn walkmelee(
     Ok(())
 }
 
-// ---- seamwalk <x0> <y0> <z0> <x1> <y1> <z1>: walk across a REGION SEAM and back, and assert the
-// crossing was a NON-EVENT (issue #68 AC3).
+// ---- seamwalk <x0> <y0> <z0> <x1> <y1> <z1> [oneway|expect-handoff]: walk across a REGION SEAM.
 //
-// A dormant seam — two regions assigned to the same database — must be invisible: no handoff, no
-// reconnect, nothing the client can tell apart from ordinary ground. That is a claim about what did
-// NOT happen, which is exactly what a human watching a screen cannot verify, and it is why this is a
-// probe rather than an eyeball item.
+// Two callers, one mechanism:
 //
-// The failure it exists to catch is a crossing that DOES hand off (a region wrongly assigned, or
-// routing consulted at the wrong moment): the gateway would send SMSG_TRANSFER_PENDING +
-// SMSG_NEW_WORLD, which `recv` surfaces even though it auto-acks the worldport.
+// * **No trailing flag, or `oneway`** (issue #68 AC3): a DORMANT seam — two regions assigned to
+//   the SAME database — must be invisible: no handoff, no reconnect, nothing the client can tell
+//   apart from ordinary ground. That is a claim about what did NOT happen, which is exactly what a
+//   human watching a screen cannot verify, and it is why this is a probe rather than an eyeball
+//   item. `oneway` leaves the character on the far side (needed because a round trip ends where it
+//   began, indistinguishable from the walk never having applied — the caller asserts the final
+//   position server-side to tell those two apart).
+// * **`expect-handoff`** (#72 slice 2): the LIVE seam — the two endpoints are on DIFFERENT
+//   databases. The wire-level signature of a SUCCESSFUL warm handoff is IDENTICAL to a dormant
+//   no-op (no `SMSG_TRANSFER_PENDING`/`SMSG_NEW_WORLD` either way — that is the whole point of "no
+//   loading screen"), so this reuses the exact same walk+drain mechanism and the exact same
+//   packet-level assertion. What it adds: it is always one-way (there is somewhere real to land),
+//   and after landing it walks a short WIGGLE fully inside the new cell — proving the session
+//   keeps receiving ordinary world traffic from wherever it now lives, not just that the socket
+//   didn't drop the instant the crossing happened. Server-side proof (which database holds the
+//   durable row, both escrow ledgers empty, a re-login not re-transferring) is NOT this probe's
+//   job — it has no privileged DB access — see `test-warm-handoff.sh`, which wraps this with
+//   `spacetime sql` on both databases.
+//
+// The failure both callers care about is a crossing that DOES send a wire-level transfer packet
+// when it shouldn't have (a region wrongly assigned, or — for `expect-handoff` — a warm handoff
+// that fell back to a loading screen instead of driving invisibly): `SMSG_TRANSFER_PENDING` +
+// `SMSG_NEW_WORLD`, which `recv` surfaces even though it auto-acks the worldport.
 //
 // Walked in short legs with a drain between each: `walk_to` only sends, so a long unbroken walk lets
 // the gateway's outbound queue back up until it drops the session (danger-zones §2) — which would
@@ -508,13 +524,14 @@ fn seamwalk(
     let mut f = || -> f32 {
         args.next()
             .and_then(|s| s.parse().ok())
-            .expect("usage: seamwalk <x0> <y0> <z0> <x1> <y1> <z1>")
+            .expect("usage: seamwalk <x0> <y0> <z0> <x1> <y1> <z1> [oneway|expect-handoff]")
     };
     let (x0, y0, z0, x1, y1, z1) = (f(), f(), f(), f(), f(), f());
-    // `oneway` leaves the character on the FAR side. Needed because a round trip ends where it began,
-    // which is indistinguishable from the server never having applied the walk at all — the caller
-    // asserts the final position server-side to tell those two apart.
-    let oneway = args.next().as_deref() == Some("oneway");
+    let flag = args.next();
+    let expect_handoff = flag.as_deref() == Some("expect-handoff");
+    // `expect-handoff` implies oneway (there is somewhere real to land); an ordinary `oneway` is
+    // the dormant-seam caller's own explicit choice.
+    let oneway = expect_handoff || flag.as_deref() == Some("oneway");
     let (a, b) = ((x0, y0, z0), (x1, y1, z1));
     let (ca, cb) = (grid_cell(x0, y0), grid_cell(x1, y1));
     let dist = ((x1 - x0).powi(2) + (y1 - y0).powi(2)).sqrt();
@@ -528,7 +545,8 @@ fn seamwalk(
     let mut ported = Vec::new();
     let mut drained = 0u32;
     let mut walk = |c: &mut WireClient, from: (f32, f32, f32), to: (f32, f32, f32)| -> Result<()> {
-        let legs = ((dist / LEG_YD).ceil() as u32).max(1);
+        let leg_dist = ((to.0 - from.0).powi(2) + (to.1 - from.1).powi(2)).sqrt();
+        let legs = ((leg_dist / LEG_YD).ceil() as u32).max(1);
         let mut prev = from;
         for i in 1..=legs {
             let t = i as f32 / legs as f32;
@@ -558,7 +576,16 @@ fn seamwalk(
 
     walk(c, a, b)?;
     println!("[wire] seamwalk: crossed into cell {cb:?}");
-    if oneway {
+    if expect_handoff {
+        // Prove the session is still being served, from wherever it now lives — not merely that
+        // the socket survived the instant of the crossing. A short there-and-back fully inside the
+        // destination cell (no further seam involved): any further TRANSFER packet here would mean
+        // the destination itself is mid-handoff-loop or the session desynced silently.
+        let wiggle_far = (b.0 + 10.0, b.1, b.2);
+        walk(c, b, wiggle_far)?;
+        walk(c, wiggle_far, b)?;
+        println!("[wire] seamwalk: post-handoff wiggle in cell {cb:?} served normally");
+    } else if oneway {
         println!("[wire] seamwalk: ONEWAY — left standing in cell {cb:?} for a server-side position check");
     } else {
         walk(c, b, a)?;
@@ -567,17 +594,30 @@ fn seamwalk(
 
     if !ported.is_empty() {
         bail!(
-            "seamwalk FAIL: the crossing handed the session off ({}) — a seam whose regions share one \
-             database must be a strict no-op",
-            ported.join(", ")
+            "seamwalk FAIL: {} sent a wire-level transfer packet ({}) — {}",
+            if expect_handoff { "the handoff" } else { "the crossing" },
+            ported.join(", "),
+            if expect_handoff {
+                "a warm handoff must be invisible on the wire, exactly like a dormant no-op"
+            } else {
+                "a seam whose regions share one database must be a strict no-op"
+            }
         );
     }
-    // The session surviving both legs is the other half of "nothing happened": a dropped socket would
-    // have surfaced as a non-timeout Err above.
-    println!(
-        "[wire] SEAMWALK PASS \u{2713} crossed the seam and returned with NO handoff \
-         (no TRANSFER_PENDING, no NEW_WORLD, session intact, {drained} packets drained)"
-    );
+    // The session surviving every leg is the other half of "nothing went wrong on the wire": a
+    // dropped socket would have surfaced as a non-timeout Err above.
+    if expect_handoff {
+        println!(
+            "[wire] SEAMWALK EXPECT-HANDOFF PASS \u{2713} crossed into {cb:?} with NO wire-level \
+             transfer (no TRANSFER_PENDING, no NEW_WORLD) and kept serving world traffic \
+             afterward ({drained} packets drained) — the no-loading-screen property"
+        );
+    } else {
+        println!(
+            "[wire] SEAMWALK PASS \u{2713} crossed the seam and returned with NO handoff \
+             (no TRANSFER_PENDING, no NEW_WORLD, session intact, {drained} packets drained)"
+        );
+    }
     Ok(())
 }
 
