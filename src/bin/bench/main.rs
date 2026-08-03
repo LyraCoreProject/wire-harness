@@ -99,6 +99,34 @@ const RUN_SPEED_YDS: f32 = 7.0;
 /// crowd would offer the writer a load no real crowd offers. An arc keeps the heading drifting.
 const WALK_ARC_RADIUS_YDS: f32 = 20.0;
 
+/// #184 (AOI subscription-churn experiment): `WALK_SPAN` / `--walk-span` replaces the #288 arc with
+/// a straight back-and-forth line of this many yards, walked at `WALK_SPEED` below. The arc's ~40yd
+/// excursion sits mostly inside one 50yd AOI grid cell (`game_shared::spatial::GRID_CELL_SIZE`) by
+/// construction, so it cannot be dialled up to cross cells at a chosen rate.
+///
+/// ⚠ **Measured, not assumed: `WALK_SPAN` alone does NOT sweep a churn continuum.** Once a span
+/// clears one cell width, the steady-state cell-crossing rate is `speed / GRID_CELL_SIZE` —
+/// independent of the exact span — because the walker crosses a fixed number of boundaries per
+/// yard travelled regardless of how long the line is. 60yd and 180yd measured the SAME ~27
+/// recenters/s at 150 clients (see `docs/bench/churn-184-2026-08-03.md`). Getting a higher rate
+/// needs `WALK_SPEED` (below) to raise the crossing rate itself, not a longer span.
+///
+/// Unset (`None`) = today's arc, byte-identical — nothing here changes behaviour unless the env
+/// var/flag is present.
+const WALK_SPAN_ENV: &str = "WALK_SPAN";
+
+/// #184: overrides the speed a `WALK_SPAN` line is walked at (yd/s) — see the churn-rate note
+/// above. Movement is client-authoritative: the module's anti-cheat gate logs a
+/// `game_movement_violation` row for an implausible speed but does not drop the packet
+/// (`docs/capacity-benchmark.md` §2.1), so a synthetic client is free to claim any speed. This
+/// exists ONLY to push the recenter rate past what `RUN_SPEED_YDS` can reach — cell-crossing rate
+/// is `speed / GRID_CELL_SIZE`, so 3× speed is 3× churn, which a longer span cannot do (see above).
+/// It does NOT change the emitted `MOVEMENT_FLAG_FORWARD`, so a value other than `RUN_SPEED_YDS`
+/// makes the stream dead-reckoning-INCONSISTENT for an observing client (#288's own invariant) —
+/// fine for measuring the writer, wrong for measuring movement latency. Unset = `RUN_SPEED_YDS`,
+/// byte-identical to before this existed. Has no effect without `WALK_SPAN` also set.
+const WALK_SPEED_ENV: &str = "WALK_SPEED";
+
 /// Golden angle, radians — successive players are placed (and phase-offset along their arcs) by
 /// this, so no two line up and the crowd never rotates as a rigid body.
 const GOLDEN_ANGLE: f32 = 2.399_963_2;
@@ -127,6 +155,10 @@ struct WalkPath {
     /// with no room to walk.
     step: f32,
     speed_yds: f32,
+    /// #184 `WALK_SPAN`: `Some((direction_radians, half_span_yards, yards_per_heartbeat))` walks a
+    /// straight back-and-forth line instead of the arc above. `None` (the default) leaves every
+    /// field above governing the walk exactly as it did before this existed.
+    line: Option<(f32, f32, f32)>,
 }
 
 impl WalkPath {
@@ -135,8 +167,37 @@ impl WalkPath {
     ///
     /// The placement disc is shrunk by the arc radius, so a player's FURTHEST point on its arc is
     /// still exactly on the `spread` boundary and never outside it.
-    fn for_player(idx: usize, center: [f32; 3], spread: f32, heartbeat: Duration) -> Self {
+    ///
+    /// `walk_span` is #184's knob: `Some(span)` walks a straight back-and-forth line of `span` yards
+    /// instead of the arc, budgeted against `spread` the same way (so the leash invariant holds
+    /// either way), at `walk_speed` yd/s (ignored when `walk_span` is `None`). `None` reproduces the
+    /// arc exactly as it was before this parameter existed, at the fixed `RUN_SPEED_YDS`.
+    fn for_player(
+        idx: usize,
+        center: [f32; 3],
+        spread: f32,
+        heartbeat: Duration,
+        walk_span: Option<f32>,
+        walk_speed: f32,
+    ) -> Self {
         let spread = spread.max(0.0);
+        if let Some(span) = walk_span.filter(|s| *s > 0.0) {
+            let ang = idx as f32 * GOLDEN_ANGLE;
+            let half_span = (span / 2.0).min(spread);
+            let base_radius =
+                (spread - half_span).max(0.0) * (((idx % 23) as f32 + 0.5) / 23.0).sqrt();
+            let base = [center[0] + base_radius * ang.cos(), center[1] + base_radius * ang.sin()];
+            let per_hb = walk_speed * heartbeat.as_secs_f32();
+            return Self {
+                base,
+                z: center[2],
+                radius: 0.0,
+                phase: ang,
+                step: 0.0,
+                speed_yds: walk_speed,
+                line: Some((ang, half_span, per_hb)),
+            };
+        }
         let radius = WALK_ARC_RADIUS_YDS.min(spread);
         // Golden-angle placement over the remaining disc, so successive players never line up and
         // every player sits inside everyone else's AOI box (unchanged from before #288 except for
@@ -152,7 +213,7 @@ impl WalkPath {
         } else {
             (0.0, 0.0)
         };
-        Self { base, z: center[2], radius, phase: ang, step, speed_yds }
+        Self { base, z: center[2], radius, phase: ang, step, speed_yds, line: None }
     }
 
     /// RAID FORMATION: the same golden-angle placement, but the player STANDS — no arc, no
@@ -175,11 +236,41 @@ impl WalkPath {
             phase: (ang + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU),
             step: 0.0,
             speed_yds: 0.0,
+            line: None,
         }
     }
 
     /// The complete `MovementInfo` for heartbeat number `hb`, stamped `timestamp`.
     fn heartbeat(&self, hb: u32, timestamp: u32) -> MovementInfo {
+        if let Some((dir, half_span, per_hb)) = self.line {
+            // #184: constant-speed back-and-forth over a straight line of `2 * half_span` yards.
+            // `d` is the ODOMETER reading (total distance walked, wrapped to one there-and-back
+            // period) — walking, not the phase-angle trick the arc uses, so the speed is exact by
+            // construction rather than a small-angle approximation.
+            let one_way = 2.0 * half_span;
+            let period = 2.0 * one_way;
+            let d = if period > 0.0 { (per_hb * hb as f32).rem_euclid(period) } else { 0.0 };
+            let (offset, heading) = if d <= one_way {
+                (-half_span + d, dir)
+            } else {
+                (half_span - (d - one_way), dir + std::f32::consts::PI)
+            };
+            let position = Vector3d {
+                x: self.base[0] + dir.cos() * offset,
+                y: self.base[1] + dir.sin() * offset,
+                z: self.z,
+            };
+            // A degenerate leash (`--spread 0`) collapses `half_span` to 0 — stand still and say
+            // so, the same rule the arc applies for the same reason.
+            let flags = if half_span > 0.0 { MOVE_FLAG_FORWARD } else { MOVE_FLAG_NONE };
+            return MovementInfo {
+                flags,
+                timestamp,
+                position,
+                orientation: heading.rem_euclid(std::f32::consts::TAU),
+                fall_time: 0.0,
+            };
+        }
         let phi = self.phase + self.step * hb as f32;
         // A stationary player reports its fixed spot and its fixed facing. Reusing the arc formula
         // with radius 0 would work for the position but would rotate the FACING every heartbeat —
@@ -244,6 +335,20 @@ WORKLOAD:
                           movement_update rate it did at the pre-2026-07-29 default of 500. Pass
                           --heartbeat-ms 500 to reproduce a run recorded in docs/bench/ before
                           then (its peers WILL look jittery on a real client at that cadence).
+  --walk-span YARDS       #184: walk a straight back-and-forth LINE of this length instead of the
+                          #288 arc. The arc's ~40yd excursion sits mostly inside one 50yd AOI grid
+                          cell, so it cannot cross cells at all reliably; a line long enough to
+                          clear one cell can. MEASURED: once span clears one cell, the crossing
+                          rate is speed/GRID_CELL_SIZE and does NOT depend on span any further —
+                          60yd and 180yd measured the same ~27 recenters/s at 150 clients. Use
+                          --walk-speed, not a longer span, to raise the rate. Unset (or $WALK_SPAN)
+                          = the #288 arc, unchanged.                                      [unset]
+  --walk-speed YD/S       #184: the speed a --walk-span line is walked at. Ignored without
+                          --walk-span. Movement is client-authoritative (the anti-cheat gate logs
+                          a violation row but does not drop the packet), so this can exceed vanilla
+                          run speed to push the recenter rate higher — 3x speed is 3x churn.
+                          Breaks dead-reckoning realism for movement-LATENCY runs; fine for a
+                          writer/subscribe-cost run. Unset (or $WALK_SPEED) = run speed (7 yd/s).
   --combat-pct N          % of players that engage a nearby creature [25]
 
 IDENTITY:
@@ -338,6 +443,26 @@ fn env_num<T: std::str::FromStr>(key: &str, default: T) -> Result<T> {
     }
 }
 
+/// `--walk-span` > `$WALK_SPAN` > `None` (today's #288 arc). Same "set-but-garbage is an error"
+/// rule as `env_num` — a typo'd span must not silently fall back to the arc and mislabel the rung.
+fn walk_span_yards(args: &Args) -> Result<Option<f32>> {
+    if let Some(v) = args.opt("walk-span") {
+        return v
+            .trim()
+            .parse::<f32>()
+            .map(Some)
+            .map_err(|_| anyhow::anyhow!("--walk-span: cannot parse {v:?}"));
+    }
+    match std::env::var(WALK_SPAN_ENV) {
+        Err(_) => Ok(None),
+        Ok(v) => v
+            .trim()
+            .parse::<f32>()
+            .map(Some)
+            .map_err(|_| anyhow::anyhow!("${WALK_SPAN_ENV}: cannot parse {v:?}")),
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 //  Shared state
 // ---------------------------------------------------------------------------------------------
@@ -355,6 +480,12 @@ struct Cfg {
     char_prefix: String,
     center: [f32; 3],
     spread: f32,
+    /// #184 `WALK_SPAN`/`--walk-span`: `Some(span)` walks a straight back-and-forth line instead of
+    /// the #288 arc — see `WalkPath::for_player`. `None` (unset) is today's arc, unchanged.
+    walk_span: Option<f32>,
+    /// #184 `WALK_SPEED`/`--walk-speed`: the speed (yd/s) a `WALK_SPAN` line is walked at. Ignored
+    /// when `walk_span` is `None`. Defaults to `RUN_SPEED_YDS`.
+    walk_speed: f32,
     heartbeat_ms: u64,
     combat_pct: usize,
     /// The race new characters are created as, which decides WHICH DATABASE they are born on:
@@ -458,13 +589,14 @@ fn run_player(idx: usize, cfg: Arc<Cfg>, sh: Arc<Shared>) {
     let combat = idx % 100 < cfg.combat_pct;
 
     let hb_interval = Duration::from_millis(cfg.heartbeat_ms);
-    // The arc this player walks, at the speed its movement flags imply and inside the crowd's
-    // leash. Everything on the wire but the timestamp comes from here — see `WalkPath`.
-    // Raid mode stands the crowd in formation around the boss; every other run walks the #288 arc.
+    // The arc this player walks (or, with `WALK_SPAN` set, #184's straight back-and-forth line), at
+    // the speed its movement flags imply and inside the crowd's leash. Everything on the wire but
+    // the timestamp comes from here — see `WalkPath`.
+    // Raid mode stands the crowd in formation around the boss; every other run walks.
     let walk = if cfg.boss_guid != 0 {
         WalkPath::standing(idx, cfg.center, cfg.spread)
     } else {
-        WalkPath::for_player(idx, cfg.center, cfg.spread, hb_interval)
+        WalkPath::for_player(idx, cfg.center, cfg.spread, hb_interval, cfg.walk_span, cfg.walk_speed)
     };
     let mut next_hb = Instant::now();
     let mut next_combat_flip = Instant::now() + Duration::from_secs(COMBAT_FLIP_SECS);
@@ -821,6 +953,7 @@ fn main() -> Result<()> {
     let witness_db = args.str("witness-db", "");
     let witness_dbf = metrics::db_filter(&witness_db);
     let table_filter = args.str("tables-filter", "");
+    let walk_span = walk_span_yards(&args)?;
     // SAFETY GATE. Every default in this binary points at the LOCAL DEVELOPMENT STACK, so a bare
     // `cargo run -p wire-client --bin bench` used to log 200 synthetic players into whatever node
     // is running and saturate its writer for eight minutes. The run has to be deliberate: an
@@ -837,6 +970,10 @@ fn main() -> Result<()> {
         char_prefix: args.str("char-prefix", "Bench"),
         center: args.vec3("center", [-8920.0, -180.0, 82.0])?,
         spread: args.num::<f32>("spread", 40.0)?,
+        walk_span,
+        // `--walk-speed` > `$WALK_SPEED` > `RUN_SPEED_YDS` — the same override chain
+        // `--heartbeat-ms` uses below. Only matters when `walk_span` is set.
+        walk_speed: args.num::<f32>("walk-speed", env_num(WALK_SPEED_ENV, RUN_SPEED_YDS)?)?,
         // `--heartbeat-ms` > `$BENCH_HEARTBEAT_MS` > the default. The env var exists so a wrapper
         // script that does NOT pass the flag (or a shell that exports it for a whole session) can
         // still reproduce a pre-#288 cadence without editing anything.
@@ -919,6 +1056,8 @@ fn main() -> Result<()> {
         spread_yards: cfg.spread,
         center: cfg.center,
         login_stagger_ms: stagger,
+        walk_span_yards: cfg.walk_span,
+        walk_speed_yds: cfg.walk_speed,
     };
     let mut rep = Report::new(
         &label,
@@ -1361,7 +1500,7 @@ spacetime_num_bytes_sent_to_clients_total{db="aaa",txn_type="Reducer"} 5
         for hb_ms in [200u64, 500, 100] {
             let dt = Duration::from_millis(hb_ms);
             for idx in [0usize, 1, 7, 22, 23, 99, 199] {
-                let w = WalkPath::for_player(idx, center, spread, dt);
+                let w = WalkPath::for_player(idx, center, spread, dt, None, RUN_SPEED_YDS);
                 let mut prev = w.heartbeat(0, 0);
                 assert_eq!(
                     prev.flags, MOVE_FLAG_FORWARD,
@@ -1430,12 +1569,114 @@ spacetime_num_bytes_sent_to_clients_total{db="aaa",txn_type="Reducer"} 5
         }
     }
 
+    /// #184's second walk model — a straight back-and-forth LINE (`WALK_SPAN`), added because the
+    /// arc's ~40yd excursion sits mostly inside one 50yd AOI grid cell by construction and so cannot
+    /// be dialled to a chosen cell-crossing rate. Same speed/leash properties as the arc test above,
+    /// plus the one thing unique to this model: it actually reverses direction at both ends (the arc
+    /// never stops going one way). Deliberately does NOT require heading to drift every heartbeat
+    /// the way the arc test does — a piecewise-constant heading per leg is the point here, so the
+    /// coalescer's own cost stays out of what a WALK_SPAN rung measures.
+    #[test]
+    fn walk_span_line_is_self_consistent_and_leashed() {
+        const CLIENT_DEAD_RECKON_YDS: f32 = 7.0;
+        let center = [-8920.0f32, -180.0, 82.0];
+        let spread = 200.0f32;
+        let dt = Duration::from_millis(200);
+        for span in [60.0f32, 180.0] {
+            for idx in [0usize, 1, 7, 22, 99] {
+                let w = WalkPath::for_player(idx, center, spread, dt, Some(span), RUN_SPEED_YDS);
+                let mut prev = w.heartbeat(0, 0);
+                assert_eq!(
+                    prev.flags, MOVE_FLAG_FORWARD,
+                    "span {span} idx {idx}: a walking player must carry FORWARD"
+                );
+                let mut prev_heading = prev.orientation;
+                let mut saw_reversal = false;
+                // `one_way` == `span` exactly here (spread=200 never clips half_span for either
+                // test span), so the odometer's "which leg" for heartbeat `hb` is this. A heartbeat
+                // whose leg differs from the previous one straddles a turnaround: net DISPLACEMENT
+                // over that gap is less than the path length walked (the line reverses mid-gap), so
+                // the straight-line speed check legitimately reads low there — a real 1.12.1 client
+                // sees the exact same thing at a directional pivot, sampled discretely. Skip the
+                // speed assertion only on that one heartbeat per leg; every other heartbeat still
+                // has to hold to 2%.
+                let per_hb = CLIENT_DEAD_RECKON_YDS * dt.as_secs_f32();
+                let leg = |hb: u32| (per_hb * hb as f32 / span).floor() as i64;
+                for hb in 1..=400u32 {
+                    let cur = w.heartbeat(hb, hb);
+                    let implied = dist(&prev, &cur) / dt.as_secs_f32();
+                    if leg(hb - 1) == leg(hb) {
+                        assert!(
+                            (implied - CLIENT_DEAD_RECKON_YDS).abs() < CLIENT_DEAD_RECKON_YDS * 0.02,
+                            "span {span} idx {idx} hb {hb} implies {implied:.2} yd/s but the \
+                             FORWARD flag makes every observing client extrapolate at \
+                             {CLIENT_DEAD_RECKON_YDS} yd/s"
+                        );
+                    }
+                    let from_center = ((cur.position.x - center[0]).powi(2)
+                        + (cur.position.y - center[1]).powi(2))
+                    .sqrt();
+                    assert!(
+                        from_center <= spread + 1e-3,
+                        "span {span} idx {idx} hb {hb} wandered {from_center:.2}yd from the crowd \
+                         centre, outside the {spread}yd spread"
+                    );
+                    let heading_delta = (cur.orientation - prev_heading).abs();
+                    if heading_delta > 1.0 && heading_delta < std::f32::consts::TAU - 1.0 {
+                        saw_reversal = true;
+                    }
+                    prev_heading = cur.orientation;
+                    prev = cur;
+                }
+                assert!(
+                    saw_reversal,
+                    "span {span} idx {idx}: never reversed direction in 400 heartbeats"
+                );
+            }
+        }
+    }
+
+    /// #184's correction after the span ladder turned out flat (B≈C, both ~27 recenters/s at 150
+    /// clients — see `docs/bench/churn-184-2026-08-03.md`): `WALK_SPEED` is the knob that actually
+    /// moves the crossing rate, since it scales linearly with speed while span (once past one cell)
+    /// does not. This pins the one property that matters for that: doubling `walk_speed` doubles
+    /// the distance covered per heartbeat, so the SAME span is traversed (and re-crossed) twice as
+    /// often.
+    #[test]
+    fn walk_speed_scales_the_distance_covered_per_heartbeat_linearly() {
+        let center = [0.0f32, 0.0, 0.0];
+        let spread = 200.0f32;
+        let dt = Duration::from_millis(200);
+        let span = 180.0f32;
+        for idx in [0usize, 5, 41] {
+            let slow = WalkPath::for_player(idx, center, spread, dt, Some(span), 7.0);
+            let fast = WalkPath::for_player(idx, center, spread, dt, Some(span), 21.0);
+            // Heartbeat 1 (before either walker has had a chance to hit a turnaround, since a full
+            // one-way leg is 90yd — many heartbeats away at either speed) isolates the per-heartbeat
+            // distance cleanly.
+            let (s0, s1) = (slow.heartbeat(0, 0), slow.heartbeat(1, 0));
+            let (f0, f1) = (fast.heartbeat(0, 0), fast.heartbeat(1, 0));
+            let slow_dist = dist(&s0, &s1);
+            let fast_dist = dist(&f0, &f1);
+            assert!(
+                (fast_dist - 3.0 * slow_dist).abs() < 1e-3,
+                "idx {idx}: 21 yd/s covered {fast_dist:.3}yd/hb but 7 yd/s covered {slow_dist:.3}, \
+                 not a clean 3x — WALK_SPEED must scale distance (and therefore recenter rate) \
+                 linearly, or it cannot substitute for a longer WALK_SPAN"
+            );
+            // And the base speed (7 yd/s, matching RUN_SPEED_YDS) is unaffected — this test only
+            // exists to prove WALK_SPEED changes anything at all.
+            assert!((slow_dist - 7.0 * dt.as_secs_f32()).abs() < 1e-3);
+        }
+    }
+
     /// The degenerate leash: no room to walk must produce a player that says it is standing still,
     /// not one that claims to be running while its position never changes — the same inconsistency
     /// in miniature.
     #[test]
     fn a_player_with_no_room_to_walk_does_not_claim_to_be_running() {
-        let w = WalkPath::for_player(3, [0.0, 0.0, 10.0], 0.0, Duration::from_millis(200));
+        let w =
+            WalkPath::for_player(3, [0.0, 0.0, 10.0], 0.0, Duration::from_millis(200), None, RUN_SPEED_YDS);
         let a = w.heartbeat(0, 0);
         let b = w.heartbeat(9, 1);
         assert_eq!(a.flags, MOVE_FLAG_NONE);
@@ -1462,8 +1703,10 @@ spacetime_num_bytes_sent_to_clients_total{db="aaa",txn_type="Reducer"} 5
         // ordinary rung, and the standing raid formation when a boss is named. A run that fell back
         // to hand-rolled movement in EITHER branch puts #288's jitter back on the wire.
         assert!(
-            body.contains("WalkPath::for_player(idx, cfg.center, cfg.spread, hb_interval)")
-                && body.contains("WalkPath::standing(idx, cfg.center, cfg.spread)")
+            body.contains(
+                "WalkPath::for_player(idx, cfg.center, cfg.spread, hb_interval, cfg.walk_span, \
+                 cfg.walk_speed)"
+            ) && body.contains("WalkPath::standing(idx, cfg.center, cfg.spread)")
                 && body.contains("let info = walk.heartbeat(hb_count, sh.now_ms())")
                 && body.contains("c.send(&MSG_MOVE_HEARTBEAT_Client { info })"),
             "the player loop no longer derives its heartbeat from a leashed `WalkPath` in both the \

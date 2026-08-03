@@ -159,6 +159,16 @@ pub struct RunConfig {
     pub spread_yards: f32,
     pub center: [f32; 3],
     pub login_stagger_ms: u64,
+    /// #184 `WALK_SPAN`: `Some(span)` means the crowd walked a straight back-and-forth line of this
+    /// many yards instead of the #288 arc — see `main.rs::WalkPath`. `None` (old reports too, via
+    /// `#[serde(default)]`) means the arc, unchanged.
+    #[serde(default)]
+    pub walk_span_yards: Option<f32>,
+    /// #184 `WALK_SPEED`: the speed (yd/s) the `walk_span_yards` line was walked at. Meaningless
+    /// when `walk_span_yards` is `None`. `#[serde(default)]` so an old report without this field
+    /// still parses (reads as `0.0`, which the display code below reads as "not overridden").
+    #[serde(default)]
+    pub walk_speed_yds: f32,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -330,14 +340,34 @@ impl fmt::Display for Report {
         )?;
         // The movement MODEL, not just its cadence: #288 changed it, and a rung's movement
         // throughput is a function of both. Stated in every report so two runs are never compared
-        // across the change without noticing.
-        writeln!(
-            f,
-            "walk           {}yd arc at {} yd/s (vanilla run speed) with MOVEMENT_FLAG_FORWARD, \
-             leashed inside the spread — self-consistent for a client's dead reckoning (#288)",
-            crate::WALK_ARC_RADIUS_YDS,
-            crate::RUN_SPEED_YDS
-        )?;
+        // across the change without noticing. #184 adds a second model (a straight back-and-forth
+        // line, for a predictable AOI-cell-crossing rate) — say which one actually ran.
+        match self.config.walk_span_yards {
+            Some(span) => {
+                // #184's own measurement: the rate is speed/GRID_CELL_SIZE, NOT a function of span
+                // once span clears one cell — say the actual speed used, since that (not the span)
+                // is what moves the crossing rate.
+                let speed = if self.config.walk_speed_yds > 0.0 {
+                    self.config.walk_speed_yds
+                } else {
+                    crate::RUN_SPEED_YDS
+                };
+                writeln!(
+                    f,
+                    "walk           {span}yd back-and-forth LINE at {speed} yd/s with \
+                     MOVEMENT_FLAG_FORWARD, leashed inside the spread — #184 WALK_SPAN/WALK_SPEED, \
+                     crosses AOI cells at ~speed/{}yd",
+                    game_shared::spatial::GRID_CELL_SIZE
+                )?
+            }
+            None => writeln!(
+                f,
+                "walk           {}yd arc at {} yd/s (vanilla run speed) with MOVEMENT_FLAG_FORWARD, \
+                 leashed inside the spread — self-consistent for a client's dead reckoning (#288)",
+                crate::WALK_ARC_RADIUS_YDS,
+                crate::RUN_SPEED_YDS
+            )?,
+        }
         writeln!(f)?;
 
         writeln!(f, "## Headline")?;
