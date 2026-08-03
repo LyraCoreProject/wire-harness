@@ -8,7 +8,8 @@
 
 pub use game_shared::values_mask;
 
-use std::net::TcpStream;
+use std::io::{Cursor, Read};
+use std::net::{Shutdown, TcpStream};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -48,6 +49,123 @@ const LOGON_PORT: u16 = 3724;
 pub const DEFAULT_WORLD_ADDR: &str = "127.0.0.1:8085";
 /// Default logon-tier address — the same `127.0.0.1:3724` every existing caller assumed.
 pub const DEFAULT_LOGON_ADDR: &str = "127.0.0.1:3724";
+
+/// `SMSG_COMPRESSED_MOVES` carries a u32 decompressed-size prefix inside the protocol's already
+/// bounded u16 frame. The generated wow_messages 0.3 decoder trusts that prefix for two allocations
+/// and unwraps zlib errors, so inspect it before handing the frame over. Four MiB is orders of
+/// magnitude above a legitimate 1.12 movement batch while keeping one corrupt session from asking
+/// the process allocator for hundreds of GiB (issue #210).
+const SMSG_COMPRESSED_MOVES_OPCODE: u16 = 0x02FB;
+const MAX_DECOMPRESSED_FRAME_BYTES: usize = 4 * 1024 * 1024;
+const FRAME_DIAGNOSTIC_BYTES: usize = 16;
+
+#[derive(Debug)]
+struct UnsafeServerFrame {
+    opcode: u16,
+    payload_prefix: Vec<u8>,
+    reason: String,
+}
+
+impl std::fmt::Display for UnsafeServerFrame {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "unsafe inbound server frame: opcode=0x{:04X} ", self.opcode)?;
+        write!(f, "payload[0..{}]=", self.payload_prefix.len())?;
+        if self.payload_prefix.is_empty() {
+            f.write_str("<empty>")?;
+        } else {
+            for (i, byte) in self.payload_prefix.iter().enumerate() {
+                if i != 0 {
+                    f.write_str(" ")?;
+                }
+                write!(f, "{byte:02X}")?;
+            }
+        }
+        write!(f, ": {}", self.reason)
+    }
+}
+
+impl std::error::Error for UnsafeServerFrame {}
+
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
+    payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&'static str>().copied())
+        .unwrap_or("non-string panic payload")
+}
+
+fn unsafe_frame(opcode: u16, payload_prefix: &[u8], reason: impl Into<String>) -> anyhow::Error {
+    anyhow::Error::new(UnsafeServerFrame {
+        opcode,
+        payload_prefix: payload_prefix.to_vec(),
+        reason: reason.into(),
+    })
+}
+
+/// Read the encrypted header and only the first few payload bytes before invoking the generated
+/// decoder. The rest of the payload streams straight through; cloning the pre-header cipher state
+/// lets the decoder see the original encrypted header while the live state advances exactly once.
+fn read_guarded_world_message<R: Read>(r: &mut R, dec: &mut DecrypterHalf) -> Result<WorldSmsg> {
+    let mut parser_dec = dec.clone();
+    let mut encrypted_header = [0u8; 4];
+    r.read_exact(&mut encrypted_header)
+        .map_err(|e| anyhow!("world frame header: {e}"))?;
+    let header = dec.decrypt_server_header(encrypted_header);
+    if header.size < 2 {
+        return Err(unsafe_frame(
+            header.opcode,
+            &[],
+            format!(
+                "invalid server-frame size {} (the size must include the 2-byte opcode)",
+                header.size
+            ),
+        ));
+    }
+
+    let payload_len = usize::from(header.size - 2);
+    let preview_len = payload_len.min(FRAME_DIAGNOSTIC_BYTES);
+    let mut preview = vec![0u8; preview_len];
+    r.read_exact(&mut preview)
+        .map_err(|e| anyhow!("world frame payload: {e}"))?;
+
+    if header.opcode == SMSG_COMPRESSED_MOVES_OPCODE {
+        if payload_len < 4 {
+            return Err(unsafe_frame(
+                header.opcode,
+                &preview,
+                format!(
+                    "compressed-moves payload is {payload_len} bytes; the decompressed-size prefix needs 4"
+                ),
+            ));
+        }
+        let declared = u32::from_le_bytes(preview[..4].try_into().unwrap()) as usize;
+        if declared > MAX_DECOMPRESSED_FRAME_BYTES {
+            return Err(unsafe_frame(
+                header.opcode,
+                &preview,
+                format!(
+                    "declares {declared} decompressed bytes; limit is {MAX_DECOMPRESSED_FRAME_BYTES}"
+                ),
+            ));
+        }
+    }
+
+    let remaining = payload_len - preview_len;
+    let mut frame = Cursor::new(encrypted_header)
+        .chain(Cursor::new(preview.as_slice()))
+        .chain(r.take(remaining as u64));
+    let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        WorldSmsg::read_encrypted(&mut frame, &mut parser_dec)
+    }));
+    match decoded {
+        Ok(result) => result.map_err(anyhow::Error::new),
+        Err(payload) => Err(unsafe_frame(
+            header.opcode,
+            &preview,
+            format!("decoder panicked: {}", panic_message(payload.as_ref())),
+        )),
+    }
+}
 
 fn ns(s: &str) -> Result<NormalizedString> {
     NormalizedString::new(s).map_err(|e| anyhow!("normalized string {s:?}: {e:?}"))
@@ -223,7 +341,7 @@ impl WireClient {
 
         let mut queue_positions_seen = Vec::new();
         loop {
-            match WorldSmsg::read_encrypted(&mut stream, &mut dec)? {
+            match read_guarded_world_message(&mut stream, &mut dec)? {
                 WorldSmsg::SMSG_AUTH_RESPONSE(r) => match *r {
                     SMSG_AUTH_RESPONSE::AuthOk { .. } => break,
                     SMSG_AUTH_RESPONSE::AuthWaitQueue { queue_position } => {
@@ -357,7 +475,7 @@ impl WireClient {
     pub fn recv(&mut self) -> Result<WorldSmsg> {
         let mut skipped = 0u32;
         loop {
-            match WorldSmsg::read_encrypted(&mut self.stream, &mut self.dec) {
+            match read_guarded_world_message(&mut self.stream, &mut self.dec) {
                 Ok(m) => {
                     self.note_guids(&m);
                     // The real 5875 client answers a cross-map transfer (SMSG_NEW_WORLD after
@@ -371,6 +489,14 @@ impl WireClient {
                     return Ok(m);
                 }
                 Err(e) => {
+                    // An unsafe length prefix or a decoder panic is not an ordinary gtker gap.
+                    // Surface the diagnostic, close only this connection, and let a multi-session
+                    // harness keep every other player alive (issue #210).
+                    if is_unsafe_server_frame(&e) {
+                        eprintln!("[wire] {e}");
+                        let _ = self.stream.shutdown(Shutdown::Both);
+                        return Err(e);
+                    }
                     // Diagnostic: surface every skipped (undecodable) frame when asked — the gtker
                     // wire gaps (danger-zones §2) are otherwise silent.
                     if std::env::var_os("WIRE_LOG_SKIPS").is_some() {
@@ -425,10 +551,14 @@ impl WireClient {
     ) -> Option<T> {
         let deadline = std::time::Instant::now() + window;
         while std::time::Instant::now() < deadline {
-            if let Ok(m) = self.recv() {
-                if let Some(t) = pred(&m) {
-                    return Some(t);
+            match self.recv() {
+                Ok(m) => {
+                    if let Some(t) = pred(&m) {
+                        return Some(t);
+                    }
                 }
+                Err(e) if is_unsafe_server_frame(&e) => return None,
+                Err(_) => {}
             }
         }
         None
@@ -819,4 +949,104 @@ pub fn create_object_type(
 /// already handle this internally; this is for the loops that don't.
 pub fn is_read_timeout(e: &anyhow::Error) -> bool {
     e.to_string().contains("socket read timeout")
+}
+
+/// Did [`WireClient::recv`] reject a frame before an unbounded generated-decoder allocation, or
+/// contain a panic raised by that decoder? Deadline helpers and multi-session harnesses use this to
+/// stop only the affected session instead of treating the failure like a transient quiet socket.
+pub fn is_unsafe_server_frame(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<UnsafeServerFrame>().is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use std::net::TcpListener;
+
+    const SMSG_COMPRESSED_MOVES_OPCODE: u16 = 0x02FB;
+    const MAX_DECOMPRESSED_FRAME_BYTES: u32 = 4 * 1024 * 1024;
+
+    fn client_receiving_frames(frames: &[(u16, &[u8])]) -> WireClient {
+        let (_, crypto) = ProofSeed::new()
+            .into_client_header_crypto(&ns("TEST").unwrap(), [7; 40], 0x1234_5678);
+        let (mut enc, dec) = crypto.split();
+
+        let mut wire = Vec::new();
+        for (opcode, payload) in frames {
+            wire.extend_from_slice(
+                &enc.encrypt_server_header((payload.len() + 2) as u16, *opcode),
+            );
+            wire.extend_from_slice(payload);
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        server.write_all(&wire).unwrap();
+        drop(server);
+
+        WireClient {
+            stream,
+            enc,
+            dec,
+            self_guid: 0,
+            seen_guids: Vec::new(),
+            item_guids: Vec::new(),
+            initial_spells: Vec::new(),
+            init_factions: Vec::new(),
+            init_faction_flags: Vec::new(),
+            queue_positions_seen: Vec::new(),
+        }
+    }
+
+    fn client_receiving_frame(opcode: u16, payload: &[u8]) -> WireClient {
+        client_receiving_frames(&[(opcode, payload)])
+    }
+
+    #[test]
+    fn oversized_compressed_frame_is_rejected_before_the_declared_allocation() {
+        let declared = MAX_DECOMPRESSED_FRAME_BYTES + 1;
+        let mut payload = declared.to_le_bytes().to_vec();
+        payload.push(0); // invalid zlib is immaterial: the size prefix must reject first
+        let mut client = client_receiving_frame(SMSG_COMPRESSED_MOVES_OPCODE, &payload);
+
+        let error = client.recv().expect_err("an oversized decompressed frame must fail the session");
+        let diagnostic = error.to_string();
+        assert!(diagnostic.contains("opcode=0x02FB"), "missing opcode: {diagnostic}");
+        assert!(
+            diagnostic.contains("payload[0..5]=01 00 40 00 00"),
+            "missing frame preview: {diagnostic}"
+        );
+        assert!(
+            diagnostic.contains("declares 4194305 decompressed bytes; limit is 4194304"),
+            "missing bounded-allocation diagnosis: {diagnostic}"
+        );
+    }
+
+    #[test]
+    fn corrupt_compressed_frame_becomes_a_diagnostic_instead_of_a_decoder_panic() {
+        let mut payload = 32u32.to_le_bytes().to_vec();
+        payload.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+        let mut client = client_receiving_frame(SMSG_COMPRESSED_MOVES_OPCODE, &payload);
+
+        let error = client.recv().expect_err("corrupt zlib must fail only this session");
+        let diagnostic = error.to_string();
+        assert!(diagnostic.contains("opcode=0x02FB"), "missing opcode: {diagnostic}");
+        assert!(
+            diagnostic.contains("payload[0..8]=20 00 00 00 DE AD BE EF"),
+            "missing frame preview: {diagnostic}"
+        );
+        assert!(diagnostic.contains("decoder panicked"), "missing panic diagnosis: {diagnostic}");
+    }
+
+    #[test]
+    fn guarded_reader_preserves_header_cipher_state_across_valid_frames() {
+        let mut client = client_receiving_frames(&[
+            (0x004D, &[]), // SMSG_LOGOUT_COMPLETE
+            (0x004F, &[]), // SMSG_LOGOUT_CANCEL_ACK
+        ]);
+        assert!(matches!(client.recv().unwrap(), WorldSmsg::SMSG_LOGOUT_COMPLETE));
+        assert!(matches!(client.recv().unwrap(), WorldSmsg::SMSG_LOGOUT_CANCEL_ACK));
+    }
 }
