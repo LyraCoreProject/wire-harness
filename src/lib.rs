@@ -162,6 +162,11 @@ pub struct WireClient {
     pub init_factions: Vec<i32>,
     /// The login SMSG_INITIALIZE_FACTIONS flag byte per slot (195B: bit 0x02 = AT_WAR).
     pub init_faction_flags: Vec<u8>,
+    /// #180: every `queue_position` seen in an `AuthWaitQueue` response during `connect_world`,
+    /// in the order received (empty if the world admitted immediately — the common case, and
+    /// exactly what every pre-#180 caller of this client still gets). Used by the `login-queue`
+    /// probe to assert the FIFO position sequence a queued connection actually observed.
+    pub queue_positions_seen: Vec<u32>,
 }
 
 impl WireClient {
@@ -182,6 +187,15 @@ impl WireClient {
 
     /// The world handshake: plaintext SMSG_AUTH_CHALLENGE -> CMSG_AUTH_SESSION -> encrypted
     /// SMSG_AUTH_RESPONSE(AuthOk). Mirrors `world/tests.rs::client_handshake`.
+    ///
+    /// #180: the gateway's admission gate can answer with `AuthWaitQueue { queue_position }`
+    /// instead of `AuthOk` any number of times before eventually admitting — this loops through
+    /// every resend, recording each position into [`WireClient::queue_positions_seen`], and lifts
+    /// the read timeout for the duration of the wait (a queued connection can legitimately sit for
+    /// as long as it takes seats to free, which is NOT bounded by the normal 10s packet-arrival
+    /// timeout every other read in this client uses). Every pre-#180 caller sees no behavior change
+    /// at all: an unlimited gateway (`GW_MAX_SESSIONS` unset) never sends `AuthWaitQueue`, so the
+    /// loop body below never runs and `queue_positions_seen` stays empty.
     pub fn connect_world(world_addr: &str, account: &str, k: [u8; 40]) -> Result<Self> {
         let mut stream =
             TcpStream::connect(world_addr).with_context(|| format!("connect world {world_addr}"))?;
@@ -207,9 +221,28 @@ impl WireClient {
         }
         .write_unencrypted_client(&mut stream)?;
 
-        match WorldSmsg::read_encrypted(&mut stream, &mut dec)? {
-            WorldSmsg::SMSG_AUTH_RESPONSE(r) if matches!(*r, SMSG_AUTH_RESPONSE::AuthOk { .. }) => {}
-            other => bail!("world auth rejected: {other}"),
+        let mut queue_positions_seen = Vec::new();
+        loop {
+            match WorldSmsg::read_encrypted(&mut stream, &mut dec)? {
+                WorldSmsg::SMSG_AUTH_RESPONSE(r) => match *r {
+                    SMSG_AUTH_RESPONSE::AuthOk { .. } => break,
+                    SMSG_AUTH_RESPONSE::AuthWaitQueue { queue_position } => {
+                        if queue_positions_seen.is_empty() {
+                            // First time we learn we're queued: admission can legitimately take
+                            // an arbitrarily long time (bounded by how fast OTHER sessions end,
+                            // not by anything this client controls), so stop timing out.
+                            stream.set_read_timeout(None)?;
+                        }
+                        queue_positions_seen.push(queue_position);
+                    }
+                    other => bail!("world auth rejected: {other:?}"),
+                },
+                other => bail!("expected SMSG_AUTH_RESPONSE, got {other}"),
+            }
+        }
+        if !queue_positions_seen.is_empty() {
+            // Admitted — restore the normal per-read timeout for the rest of the session.
+            stream.set_read_timeout(Some(Duration::from_secs(10)))?;
         }
         Ok(Self {
             stream,
@@ -221,6 +254,7 @@ impl WireClient {
             initial_spells: Vec::new(),
             init_factions: Vec::new(),
             init_faction_flags: Vec::new(),
+            queue_positions_seen,
         })
     }
 

@@ -100,6 +100,7 @@ pub(crate) fn try_dispatch_charselect(
         "make-char" => make_char(account, password, char_name, args)?,
         "char-create-gear" => char_create_gear(account, password, char_name, args)?,
         "char-delete" => char_delete(account, password, char_name, args)?,
+        "login-queue" => login_queue_probe(account, password, args)?,
         _ => return Ok(false),
     }
     Ok(true)
@@ -214,6 +215,87 @@ fn char_delete(
         "[wire] CHAR-DELETE PASS \u{2713}  SMSG_CHAR_DELETE(CharDeleteSuccess); guid={guid} no longer in SMSG_CHAR_ENUM"
     );
     Ok(())
+}
+
+// ---- login-queue probe (#180): drive N concurrent world logins against a small admission cap
+// and assert the FIFO AUTH_WAIT_QUEUE shape. WRITTEN, not run as part of any suite — a login
+// storm is an operator-approved live-stack action (CLAUDE.md "Live wire tests are operator-gated").
+//
+// Usage: wire-client <ACCOUNT_PREFIX> <password> _ login-queue <N>
+//
+// Spins up N accounts named "<ACCOUNT_PREFIX>0" .. "<ACCOUNT_PREFIX><N-1>" CONCURRENTLY (one
+// thread each) and takes each one only as far as the world handshake (`WireClient::connect_world`
+// — no character, no world entry: the #180 gate sits before either). Requires:
+//   - the N accounts already provisioned (`gateway provision`, or `scripts/run-capacity-bench.sh`'s
+//     provisioning step for a larger N) — this probe does not provision anything itself;
+//   - the gateway running with a small `GW_MAX_SESSIONS` (< N), so some of these are forced to
+//     queue. Against an unconfigured gateway every connection admits immediately and this still
+//     passes (`queue_positions_seen` empty for all of them) — a legitimate, if less interesting, run.
+//
+// Pass: every one of the N connections eventually reaches `AuthOk`, and every position sequence a
+// queued connection observed is monotonically non-increasing (position only ever moves toward the
+// front — a resend may repeat the same number, but must never report a WORSE one).
+fn login_queue_probe(
+    account_prefix: &str,
+    password: &str,
+    args: &mut dyn Iterator<Item = String>,
+) -> Result<()> {
+    let n: usize = args
+        .next()
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| anyhow!("usage: login-queue <N> — missing/invalid <N>"))?;
+    eprintln!(
+        "[wire] login-queue: {n} concurrent world logins as {account_prefix}0..{account_prefix}{} \
+         (accounts must already be provisioned; gateway should be running with a small GW_MAX_SESSIONS)",
+        n.saturating_sub(1)
+    );
+
+    let handles: Vec<_> = (0..n)
+        .map(|i| {
+            let account = format!("{account_prefix}{i}");
+            let password = password.to_string();
+            std::thread::spawn(move || -> Result<Vec<u32>> {
+                let (k, world_addr) = logon(&account, &password)?;
+                let c = WireClient::connect_world(&world_addr, &account, k)?;
+                Ok(c.queue_positions_seen)
+            })
+        })
+        .collect();
+
+    let mut fails: Vec<String> = vec![];
+    let mut queued_count = 0usize;
+    for (i, h) in handles.into_iter().enumerate() {
+        match h.join() {
+            Ok(Ok(positions)) => {
+                if positions.is_empty() {
+                    println!("[probe] login-queue[{i}]: admitted immediately (no AuthWaitQueue)");
+                } else {
+                    queued_count += 1;
+                    println!("[probe] login-queue[{i}]: queued at positions {positions:?} -> admitted");
+                    if positions.windows(2).any(|w| w[1] > w[0]) {
+                        fails.push(format!(
+                            "login-queue[{i}]: position sequence {positions:?} went UP at some point \
+                             (FIFO position must be monotonically non-increasing)"
+                        ));
+                    }
+                }
+            }
+            Ok(Err(e)) => fails.push(format!("login-queue[{i}]: {e:#}")),
+            Err(_) => fails.push(format!("login-queue[{i}]: thread panicked")),
+        }
+    }
+
+    if fails.is_empty() {
+        println!(
+            "[wire] LOGIN-QUEUE PASS \u{2713}  {n} connections all reached AuthOk ({queued_count} of them queued first)"
+        );
+        Ok(())
+    } else {
+        for f in &fails {
+            eprintln!("[wire] FAIL: {f}");
+        }
+        bail!("login-queue: {} of {n} connection(s) failed", fails.len())
+    }
 }
 
 // ---- initial-spells probe: assert SMSG_INITIAL_SPELLS carries the given spell ids ----
