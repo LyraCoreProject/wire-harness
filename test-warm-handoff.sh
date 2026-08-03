@@ -16,8 +16,18 @@ WORLD2=spacetime-world-2
 SRC_X=-9424.66; SRC_Y=129.056; SRC_Z=59.8005
 DST_X=-9549.82; DST_Y=112.997; DST_Z=59.0065
 
+# The account here MUST be the one the wire legs below log in with (SEAMTEST): the shared
+# fresh_char/drop_char helpers are pinned to the suite's TEST account by convention, and a char
+# created there is invisible to SEAMTEST's char enum (bit 2026-08-03).
+seamtest_fresh_char() {
+  timeout 60 "$WC" SEAMTEST seamtest123 "$1" char-delete >/dev/null 2>&1 || true
+  timeout 60 "$WC" SEAMTEST seamtest123 "$1" make-char "${2:-warrior}" >/dev/null 2>&1
+  local guid; guid=$(char_guid "$1")
+  [ -n "$guid" ] && scall debug_set_level "$guid" "${3:-5}"
+  echo "$guid"
+}
 echo "== fresh char"
-GUID=$(fresh_char SeamHandoff warrior 5)
+GUID=$(seamtest_fresh_char SeamHandoff warrior 5)
 echo "guid=$GUID"
 [ -n "$GUID" ] || { echo "FAIL: no guid"; exit 1; }
 
@@ -53,4 +63,4 @@ RC2=$?
 echo "relogin rc=$RC2"
 
 echo "== teardown"
-drop_char SeamHandoff
+timeout 60 "$WC" SEAMTEST seamtest123 SeamHandoff char-delete >/dev/null 2>&1 || true
