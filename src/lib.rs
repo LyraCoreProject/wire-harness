@@ -148,6 +148,12 @@ pub struct WireClient {
     pub self_guid: u64,
     /// guids seen in CREATE_OBJECT updates (mobs/peers), newest last.
     pub seen_guids: Vec<u64>,
+    /// #72 (warm-handoff self-relay-suppression, seamwalk expect-handoff assertion): the SUBSET of
+    /// `seen_guids` whose CREATE carried `ObjectType::Item` or `ObjectType::Container` — this
+    /// session's own item/bag objects (the login CREATE burst, plus any gained mid-session).
+    /// `note_guids` populates it from the SAME `SMSG_UPDATE_OBJECT` scan that feeds `seen_guids`,
+    /// so it needs no separate decode pass.
+    pub item_guids: Vec<u64>,
     /// Spell ids from SMSG_INITIAL_SPELLS, captured during the `player_login` burst drain.
     pub initial_spells: Vec<u32>,
     /// Per-slot (standing, flag-empty) from SMSG_INITIALIZE_FACTIONS, captured during the
@@ -211,6 +217,7 @@ impl WireClient {
             dec,
             self_guid: 0,
             seen_guids: Vec::new(),
+            item_guids: Vec::new(),
             initial_spells: Vec::new(),
             init_factions: Vec::new(),
             init_faction_flags: Vec::new(),
@@ -417,11 +424,19 @@ impl WireClient {
     }
 
     fn note_guids(&mut self, m: &WorldSmsg) {
+        use wow_world_messages::vanilla::ObjectType;
         if let WorldSmsg::SMSG_UPDATE_OBJECT(u) = m {
             for o in &u.objects {
                 if let Some(g) = create_object_guid(o) {
                     if !self.seen_guids.contains(&g) {
                         self.seen_guids.push(g);
+                    }
+                    // #72: ITEM and CONTAINER creates are this session's own item/bag objects (the
+                    // login burst, plus anything gained mid-session) — see `item_guids`'s field doc.
+                    if matches!(create_object_type(o), Some(ObjectType::Item | ObjectType::Container))
+                        && !self.item_guids.contains(&g)
+                    {
+                        self.item_guids.push(g);
                     }
                 }
             }
@@ -737,6 +752,24 @@ pub fn create_object_guid(o: &wow_world_messages::vanilla::Object) -> Option<u64
     match o {
         Object::CreateObject { guid3, .. } | Object::CreateObject2 { guid3, .. } => {
             Some(guid3.guid())
+        }
+        _ => None,
+    }
+}
+
+/// The `ObjectType` a CREATE/CREATE2 block carries, or `None` for any other `Object` variant —
+/// the type-discriminating sibling of [`create_object_guid`] (same match shape, so the two can
+/// never disagree on which `Object` variants count as a create). #72's `seamwalk expect-handoff`
+/// assertion uses this to separate this session's own ITEM/CONTAINER objects from every other
+/// CREATE (mobs, peers, its own player entity) — a `SMSG_DESTROY_OBJECT` for a peer or a creature
+/// leaving AOI on the far side of the seam is normal; one for an item guid is the #72 defect.
+pub fn create_object_type(
+    o: &wow_world_messages::vanilla::Object,
+) -> Option<wow_world_messages::vanilla::ObjectType> {
+    use wow_world_messages::vanilla::Object;
+    match o {
+        Object::CreateObject { object_type, .. } | Object::CreateObject2 { object_type, .. } => {
+            Some(*object_type)
         }
         _ => None,
     }
