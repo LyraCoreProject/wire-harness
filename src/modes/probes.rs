@@ -540,10 +540,21 @@ fn seamwalk(
         bail!("seamwalk FAIL: both endpoints are in cell {ca:?} — this walk crosses no cell boundary, so it cannot cross a seam either");
     }
 
+    // #72 (self-relay-suppression fix): the diagnosed live defect — `finish_transfer`'s cascade
+    // delete relaying every one of THIS session's own items as a real `SMSG_DESTROY_OBJECT` while
+    // the OLD subs were still armed. Snapshotted BEFORE the walk (not read live off `c.item_guids`
+    // during it) so this is exactly "the item guids the login sequence's CREATEs established",
+    // per the fix's own scope — not whatever the session happens to hold by the time a leg drains.
+    let item_guids: std::collections::HashSet<u64> = c.item_guids.iter().copied().collect();
     // Legs of ~35 yd (~5 s at run speed) so the socket is drained often enough to stay healthy.
     const LEG_YD: f32 = 35.0;
     let mut ported = Vec::new();
     let mut drained = 0u32;
+    // Guids from a `SMSG_DESTROY_OBJECT` that matched `item_guids` — populated only when
+    // `expect_handoff` (a plain `oneway`/round-trip seam crossing has no self-relay-suppression
+    // claim to check, and a peer/creature leaving THIS viewer's AOI box across the seam legitimately
+    // destroys, which is exactly the case this must not flag).
+    let mut destroyed_own_items = Vec::new();
     let mut walk = |c: &mut WireClient, from: (f32, f32, f32), to: (f32, f32, f32)| -> Result<()> {
         let leg_dist = ((to.0 - from.0).powi(2) + (to.1 - from.1).powi(2)).sqrt();
         let legs = ((leg_dist / LEG_YD).ceil() as u32).max(1);
@@ -565,6 +576,12 @@ fn seamwalk(
                 match c.recv() {
                     Ok(Smsg::SMSG_TRANSFER_PENDING(_)) => ported.push("SMSG_TRANSFER_PENDING"),
                     Ok(Smsg::SMSG_NEW_WORLD(_)) => ported.push("SMSG_NEW_WORLD"),
+                    Ok(Smsg::SMSG_DESTROY_OBJECT(d))
+                        if expect_handoff && item_guids.contains(&d.guid.guid()) =>
+                    {
+                        destroyed_own_items.push(d.guid.guid());
+                        drained += 1;
+                    }
                     Ok(_) => drained += 1,
                     Err(e) if wire_client::is_read_timeout(&e) => break, // quiet — leg done
                     Err(e) => return Err(e),                            // a real socket failure
@@ -604,13 +621,31 @@ fn seamwalk(
             }
         );
     }
+    // #72: the diagnosed live defect — `finish_transfer`'s cascade delete on the SOURCE database
+    // relaying every one of this session's own items as a real loss (SMSG_DESTROY_OBJECT + cleared
+    // inventory/visible-item slots) while the OLD subs were still armed, even though the
+    // destination's import already held the byte-identical rows. `self_relay_suppressed`
+    // (gateway/src/stdb/subscriptions.rs) is the server-side fix; this is the wire-level proof no
+    // item the client already has gets destroyed out from under it during the crossing.
+    if !destroyed_own_items.is_empty() {
+        bail!(
+            "seamwalk FAIL: the handoff sent SMSG_DESTROY_OBJECT for {} of this session's own \
+             item guid(s) ({}) during the crossing — the client just watched its own equipment/bag \
+             items disappear even though the destination holds the byte-identical rows; this is \
+             the #72 self-relay-during-warm-handoff defect",
+            destroyed_own_items.len(),
+            destroyed_own_items.iter().map(|g| g.to_string()).collect::<Vec<_>>().join(", "),
+        );
+    }
     // The session surviving every leg is the other half of "nothing went wrong on the wire": a
     // dropped socket would have surfaced as a non-timeout Err above.
     if expect_handoff {
         println!(
             "[wire] SEAMWALK EXPECT-HANDOFF PASS \u{2713} crossed into {cb:?} with NO wire-level \
-             transfer (no TRANSFER_PENDING, no NEW_WORLD) and kept serving world traffic \
-             afterward ({drained} packets drained) — the no-loading-screen property"
+             transfer (no TRANSFER_PENDING, no NEW_WORLD), no DESTROY_OBJECT for any of this \
+             session's {} own item guid(s), and kept serving world traffic afterward ({drained} \
+             packets drained) — the no-loading-screen property",
+            item_guids.len()
         );
     } else {
         println!(
