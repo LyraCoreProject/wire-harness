@@ -29,7 +29,7 @@ sqlq "SELECT map_id, x, y FROM game_character WHERE guid = $GUID" "$DB"
 sqlq "SELECT guid FROM game_character WHERE guid = $GUID" "$WORLD2"
 
 echo "== leg 1: log in on core and walk across the seam (expect-handoff)"
-timeout 90 "$WC" TEST test123 SeamHandoff seamwalk "$SRC_X" "$SRC_Y" "$SRC_Z" "$DST_X" "$DST_Y" "$DST_Z" expect-handoff
+timeout 90 "$WC" SEAMTEST seamtest123 SeamHandoff seamwalk "$SRC_X" "$SRC_Y" "$SRC_Z" "$DST_X" "$DST_Y" "$DST_Z" expect-handoff
 RC=$?
 echo "seamwalk rc=$RC"
 
@@ -48,7 +48,7 @@ sqlq "SELECT * FROM game_transfer_out WHERE character_guid = $GUID" "$WORLD2"
 sqlq "SELECT * FROM game_transfer_in WHERE character_guid = $GUID" "$WORLD2"
 
 echo "== leg 2: re-login (bare M1 smoke — no mode) — must land on world-2 with NO second transfer"
-timeout 30 "$WC" TEST test123 SeamHandoff
+timeout 30 "$WC" SEAMTEST seamtest123 SeamHandoff
 RC2=$?
 echo "relogin rc=$RC2"
 
