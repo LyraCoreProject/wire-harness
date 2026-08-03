@@ -102,9 +102,13 @@ for acct in TEST TEST2; do
   fi
 done
 # Characters: the wire client creates-on-login; `logout` mode is the cheapest clean round-trip.
-[ -z "$(char_guid Ginger)" ]  && timeout 60 "$WC" TEST  test123 Ginger  logout >/dev/null 2>&1
+# Ginger goes through ensure_ginger_home (issue #213), not a bare char_guid check — she is not
+# guaranteed to still be ON spacetime-core (a region-boundary login can transfer her live row to
+# spacetime-world-2; a duplicate created by an old create-on-miss fallback can also shadow her at
+# login) and every test below assumes she is. dfsdfsd has no such shard-drift history (say-range/
+# move-relay keep her pinned near Ginger's canonical spot) so the plain check still covers her.
 [ -z "$(char_guid dfsdfsd)" ] && timeout 60 "$WC" TEST2 test123 dfsdfsd logout >/dev/null 2>&1
-GINGER=$(char_guid Ginger); DFS=$(char_guid dfsdfsd)
+GINGER=$(ensure_ginger_home Ginger); DFS=$(char_guid dfsdfsd)
 if [ -z "$GINGER" ] || [ -z "$DFS" ]; then
   echo "[suite] FATAL: fixture characters missing (Ginger=$GINGER dfsdfsd=$DFS)" >&2
   exit 2

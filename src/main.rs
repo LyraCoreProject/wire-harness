@@ -142,7 +142,14 @@ fn main() -> Result<()> {
                     begin_timer = Some(s.timer);
                 }
             }
-            Smsg::SMSG_SPELL_GO(g) => {
+            // Caster-filtered (issue #213 cast_interrupt live-verify find): the interrupt/pushback
+            // pad puts a hostile in MELEE range and debug_engage's it, and some entries (e.g. 103
+            // Garrick Padfoot) open with their own ability cast (observed: spell 6268 "Rushing
+            // Charge") — an unfiltered match here overwrote OUR cast's go_spell/go_hits/go_unit with
+            // the MOB's SMSG_SPELL_GO, failing the "the pushed-back cast must still complete" assert
+            // for a reason that has nothing to do with pushback. Every assertion below is about
+            // Ginger's own cast, so only a GO she cast counts.
+            Smsg::SMSG_SPELL_GO(g) if g.caster.guid() == c.self_guid => {
                 go_spell = Some(g.spell);
                 go_hits = g.hits.iter().map(|h| h.guid()).collect();
                 go_unit = g.targets.target_flags.get_unit().map(|u| u.unit_target.guid());

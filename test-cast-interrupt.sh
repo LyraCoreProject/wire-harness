@@ -13,7 +13,11 @@ source tools/wire-client/scenario-lib.sh
 SPELL="${1:-686}"   # 686 = Shadow Bolt (1.7s timed)
 ENTRY="${2:-103}"   # 103 = Garrick Padfoot (hostile Defias) — melee attacker
 CHAR="Ginger"
-CGUID=$(char_guid "$CHAR")
+# ensure_ginger_home (issue #213), not a bare char_guid: Ginger is the shared long-lived fixture and
+# is not guaranteed to still be on spacetime-core (region-boundary logins can transfer her live row
+# to another shard; a stale duplicate from an old create-on-miss fallback can also shadow her at
+# login) — self-heals both before handing back a guid.
+CGUID=$(ensure_ginger_home "$CHAR")
 [ -z "$CGUID" ] && { echo "[test] character '$CHAR' not found in game_character" >&2; exit 1; }
 
 cargo build -q -p wire-client || exit 1
