@@ -37,8 +37,11 @@ _is_lyracore() { [ -d "$1/gateway" ] && [ -d "$1/module" ] && [ -f "$1/Cargo.tom
 if [ -n "${LYRACORE_DIR:-}" ]; then
   # Explicit wins, but VALIDATE it: a wrong LYRACORE_DIR otherwise surfaces as a pile of
   # "no such file" noise from `scripts/…` twenty lines later instead of one clear error here.
-  LYRACORE_DIR=$(cd "$LYRACORE_DIR" 2>/dev/null && pwd) \
-    || { echo "[adapter] LYRACORE_DIR=$LYRACORE_DIR does not exist" >&2; exit 2; }
+  # Resolve through a temporary: `LYRACORE_DIR=$(…) || echo "$LYRACORE_DIR"` would report the
+  # variable it had already blanked, i.e. name nothing at all in the one message meant to name it.
+  _lc_given=$LYRACORE_DIR
+  LYRACORE_DIR=$(cd "$_lc_given" 2>/dev/null && pwd) \
+    || { echo "[adapter] LYRACORE_DIR=$_lc_given does not exist" >&2; exit 2; }
   _is_lyracore "$LYRACORE_DIR" \
     || { echo "[adapter] LYRACORE_DIR=$LYRACORE_DIR is not a LyraCore checkout (no gateway/ + module/)" >&2; exit 2; }
 elif _is_lyracore "$PWD"; then
