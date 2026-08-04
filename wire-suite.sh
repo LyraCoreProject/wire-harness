@@ -91,10 +91,13 @@ fi
 cargo build -q -p wire-client || { echo "[suite] FATAL: wire-client build failed" >&2; exit 2; }
 
 # Accounts: provision is operator-gated; tolerate "already provisioned", then ASSERT the row exists.
-TOKEN=$(grep -oP 'spacetimedb_token = "\K[^"]+' ~/.config/spacetime/cli.toml || true)
+TOKEN=$(awk -F'"' '/^[[:space:]]*spacetimedb_token[[:space:]]*=/{print $2; exit}' \
+  "${XDG_CONFIG_HOME:-$HOME/.config}/spacetime/cli.toml" 2>/dev/null || true)
 for acct in TEST TEST2; do
   if [ -z "$(sqlq "SELECT username FROM game_account WHERE username = '$acct'" | grep -o "$acct")" ]; then
-    env GW_COORDINATOR_TOKEN="$TOKEN" ./target/debug/gateway provision "$acct" test123 >/dev/null 2>&1 || true
+    printf '%s\n' test123 \
+      | GW_COORDINATOR_TOKEN="$TOKEN" ./target/debug/gateway provision "$acct" --password-stdin \
+          >/dev/null 2>&1 || true
   fi
   if [ -z "$(sqlq "SELECT username FROM game_account WHERE username = '$acct'" | grep -o "$acct")" ]; then
     echo "[suite] FATAL: account $acct missing and provision failed (operator claimed? token valid?)" >&2

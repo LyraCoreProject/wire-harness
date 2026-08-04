@@ -10,7 +10,7 @@
 # to QA by hand through the wine client.
 #
 # Prereqs: local STDB node + gateway up, the TEST account provisioned
-# (`cargo run -p spacetime-core-gateway -- provision TEST test123`), and a Warlock named
+# (`lyracore account create TEST`), and a Warlock named
 # "Ginger" (the client creates it on first run). Exits nonzero on assertion failure.
 #
 # Usage: tools/wire-client/test-cast-flow.sh [spell_id] [mob_entry]
