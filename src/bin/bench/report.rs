@@ -37,13 +37,18 @@ pub fn plan_ramp(stages: &[usize]) -> Result<Vec<RampStep>, String> {
     // thing being measured is the pair of writers, not this process's synthetic players. It is
     // deliberately the ONLY way to get a zero rung: a `0` anywhere inside a real ramp is a typo.
     if stages == [0] {
-        return Ok(vec![RampStep { target: 0, spawn: 0 }]);
+        return Ok(vec![RampStep {
+            target: 0,
+            spawn: 0,
+        }]);
     }
     let mut plan = Vec::with_capacity(stages.len());
     let mut live = 0usize;
     for &target in stages {
         if target == 0 {
-            return Err("a ramp stage must be > 0 (use `--stages 0` alone for an observe-only run)".into());
+            return Err(
+                "a ramp stage must be > 0 (use `--stages 0` alone for an observe-only run)".into(),
+            );
         }
         if target <= live {
             return Err(format!(
@@ -51,7 +56,10 @@ pub fn plan_ramp(stages: &[usize]) -> Result<Vec<RampStep>, String> {
                  only ever ADDS players"
             ));
         }
-        plan.push(RampStep { target, spawn: target - live });
+        plan.push(RampStep {
+            target,
+            spawn: target - live,
+        });
         live = target;
     }
     Ok(plan)
@@ -312,12 +320,20 @@ impl fmt::Display for Report {
         writeln!(f)?;
         writeln!(f, "rev            {}", self.git_rev)?;
         writeln!(f, "generated      {} (unix)", self.generated_at_unix)?;
-        writeln!(f, "logon / world  {} / {}", self.target.logon, self.target.world)?;
+        writeln!(
+            f,
+            "logon / world  {} / {}",
+            self.target.logon, self.target.world
+        )?;
         writeln!(
             f,
             "metrics / db   {} / {}",
             self.target.metrics_url,
-            if self.target.db.is_empty() { "<all databases on the node>" } else { &self.target.db }
+            if self.target.db.is_empty() {
+                "<all databases on the node>"
+            } else {
+                &self.target.db
+            }
         )?;
         if !self.target.witness_db.is_empty() {
             writeln!(
@@ -502,7 +518,11 @@ impl fmt::Display for Report {
                 )?;
             }
             writeln!(f)?;
-            writeln!(f, "tx/s by reducer (top {}):", s.tx_per_sec_by_reducer.len())?;
+            writeln!(
+                f,
+                "tx/s by reducer (top {}):",
+                s.tx_per_sec_by_reducer.len()
+            )?;
             for r in &s.tx_per_sec_by_reducer {
                 writeln!(f, "  {:<34} {:>10.1}", r.name, r.per_sec)?;
             }
@@ -552,7 +572,11 @@ mod tests {
         assert_eq!(percentile(&v, 99.0), 99);
         assert_eq!(percentile(&v, 100.0), 100);
         assert_eq!(percentile(&v, 0.0), 1, "p0 clamps to the first element");
-        assert_eq!(percentile(&[], 95.0), 0, "empty window reports 0, never panics");
+        assert_eq!(
+            percentile(&[], 95.0),
+            0,
+            "empty window reports 0, never panics"
+        );
         assert_eq!(percentile(&[7], 50.0), 7);
         // Nearest-rank on a short odd set: ceil(0.95*3)=3 -> the 3rd element.
         assert_eq!(percentile(&[10, 20, 30], 95.0), 30);
@@ -578,12 +602,22 @@ mod tests {
         let empty = Latency::default();
         assert_eq!(empty.cell(empty.p99_ms), "—");
         let real = Latency::from_samples(vec![0, 0, 0]);
-        assert_eq!(real.cell(real.p99_ms), "0", "a MEASURED zero still prints as zero");
+        assert_eq!(
+            real.cell(real.p99_ms),
+            "0",
+            "a MEASURED zero still prints as zero"
+        );
 
         let mut r = Report::new("empty", Target::default(), RunConfig::default());
-        r.stages.push(Stage { players_target: 200, ..Default::default() });
+        r.stages.push(Stage {
+            players_target: 200,
+            ..Default::default()
+        });
         let text = r.to_string();
-        assert!(text.contains("| 200 | 0 | 0.0 | 0.0 | 0 | — | — | — | — | 0 |"), "{text}");
+        assert!(
+            text.contains("| 200 | 0 | 0.0 | 0.0 | 0 | — | — | — | — | 0 |"),
+            "{text}"
+        );
     }
 
     /// A stage whose window straddled a node restart has no valid server-side number at all — the
@@ -594,12 +628,18 @@ mod tests {
         r.stages.push(Stage {
             players_target: 100,
             counter_reset: true,
-            writer: Writer { occupancy_pct: -412.7, ..Default::default() },
+            writer: Writer {
+                occupancy_pct: -412.7,
+                ..Default::default()
+            },
             ..Default::default()
         });
         let text = r.to_string();
         assert!(text.contains("VOID (counter reset)"), "{text}");
-        assert!(!text.contains("-412.7"), "the bogus number must not be printed at all:\n{text}");
+        assert!(
+            !text.contains("-412.7"),
+            "the bogus number must not be printed at all:\n{text}"
+        );
     }
 
     #[test]
@@ -607,10 +647,22 @@ mod tests {
         assert_eq!(
             plan_ramp(&[50, 100, 150, 200]).unwrap(),
             vec![
-                RampStep { target: 50, spawn: 50 },
-                RampStep { target: 100, spawn: 50 },
-                RampStep { target: 150, spawn: 50 },
-                RampStep { target: 200, spawn: 50 },
+                RampStep {
+                    target: 50,
+                    spawn: 50
+                },
+                RampStep {
+                    target: 100,
+                    spawn: 50
+                },
+                RampStep {
+                    target: 150,
+                    spawn: 50
+                },
+                RampStep {
+                    target: 200,
+                    spawn: 50
+                },
             ]
         );
         // Uneven rungs still add up to the final target.
@@ -626,8 +678,17 @@ mod tests {
     /// reached by accident from a real ramp.
     #[test]
     fn a_lone_zero_stage_is_the_observe_only_run_and_a_zero_anywhere_else_is_refused() {
-        assert_eq!(plan_ramp(&[0]).unwrap(), vec![RampStep { target: 0, spawn: 0 }]);
-        assert!(plan_ramp(&[0, 50]).is_err(), "a zero inside a ramp is a typo, not a mode");
+        assert_eq!(
+            plan_ramp(&[0]).unwrap(),
+            vec![RampStep {
+                target: 0,
+                spawn: 0
+            }]
+        );
+        assert!(
+            plan_ramp(&[0, 50]).is_err(),
+            "a zero inside a ramp is a typo, not a mode"
+        );
         assert!(plan_ramp(&[50, 0]).is_err());
         assert!(plan_ramp(&[0, 0]).is_err());
     }
@@ -640,7 +701,9 @@ mod tests {
         let names: std::collections::HashSet<String> =
             (0..200).map(|i| char_name_for("Bench", i)).collect();
         assert_eq!(names.len(), 200, "200 distinct names");
-        assert!(names.iter().all(|n| n.chars().all(|c| c.is_ascii_alphabetic())));
+        assert!(names
+            .iter()
+            .all(|n| n.chars().all(|c| c.is_ascii_alphabetic())));
     }
 
     #[test]
@@ -654,14 +717,22 @@ mod tests {
                 db: String::new(),
                 witness_db: String::new(),
             },
-            RunConfig { stages: vec![50], hold_secs: 60, ..Default::default() },
+            RunConfig {
+                stages: vec![50],
+                hold_secs: 60,
+                ..Default::default()
+            },
         );
         r.stages.push(Stage {
             players_target: 50,
             players_connected: 50,
             window_secs: 60.0,
             movement_latency_ms: Latency::from_samples(vec![5, 9, 40]),
-            writer: Writer { occupancy_pct: 31.5, txns_per_sec: 210.0, ..Default::default() },
+            writer: Writer {
+                occupancy_pct: 31.5,
+                txns_per_sec: 210.0,
+                ..Default::default()
+            },
             tx_per_sec_by_reducer: vec![NamedRate {
                 name: "movement_update".into(),
                 per_sec: 100.0,
@@ -683,7 +754,10 @@ mod tests {
         assert_eq!(back.stages[0].event_tables[0].reaps_per_sec, 1990.0);
 
         let text = r.to_string();
-        assert!(text.contains("| 50 | 50 | 31.5 |"), "headline row missing:\n{text}");
+        assert!(
+            text.contains("| 50 | 50 | 31.5 |"),
+            "headline row missing:\n{text}"
+        );
         assert!(text.contains("movement_update"));
         assert!(text.contains("## Parked / not captured"));
     }

@@ -45,8 +45,11 @@ pub fn http_get(url: &str) -> Result<String> {
         Some(i) => (&rest[..i], &rest[i..]),
         None => (rest, "/"),
     };
-    let addr =
-        if hostport.contains(':') { hostport.to_string() } else { format!("{hostport}:80") };
+    let addr = if hostport.contains(':') {
+        hostport.to_string()
+    } else {
+        format!("{hostport}:80")
+    };
     let mut s = TcpStream::connect(&addr).with_context(|| format!("connect metrics {addr}"))?;
     s.set_read_timeout(Some(Duration::from_secs(30)))?;
     write!(
@@ -74,8 +77,12 @@ pub fn parse(text: &str) -> Snapshot {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let Some((key, val)) = line.rsplit_once(' ') else { continue };
-        let Ok(v) = val.trim().parse::<f64>() else { continue };
+        let Some((key, val)) = line.rsplit_once(' ') else {
+            continue;
+        };
+        let Ok(v) = val.trim().parse::<f64>() else {
+            continue;
+        };
         m.insert(key.to_string(), v);
     }
     Snapshot(m)
@@ -217,7 +224,9 @@ impl Snapshot {
             if n != name || !filters.iter().all(|f| labels.contains(f)) {
                 continue;
             }
-            let Some(val) = label_value(labels, label) else { continue };
+            let Some(val) = label_value(labels, label) else {
+                continue;
+            };
             if val.is_empty() {
                 continue;
             }
@@ -249,8 +258,14 @@ pub const REQUIRED_FAMILIES: &[(&str, &str)] = &[
     ("tx/s by reducer", "spacetime_num_txns_total"),
     ("event inserts/s", "spacetime_num_rows_inserted_total"),
     ("event reaps/s", "spacetime_num_rows_deleted_total"),
-    ("queue wait (saturation)", "spacetime_reducer_wait_time_sec_sum"),
-    ("egress bytes/s", "spacetime_num_bytes_sent_to_clients_total"),
+    (
+        "queue wait (saturation)",
+        "spacetime_reducer_wait_time_sec_sum",
+    ),
+    (
+        "egress bytes/s",
+        "spacetime_num_bytes_sent_to_clients_total",
+    ),
 ];
 
 /// The one family whose presence defines "this database is measurable at all" — occupancy is THE
@@ -287,9 +302,15 @@ spacetime_num_rows_inserted_total{db="abc",table_name="game_movement_event",txn_
     fn sum_filters_by_label_substring() {
         let s = parse(SAMPLE);
         // db filter isolates one database; without it both databases are aggregated.
-        assert_eq!(s.sum("spacetime_txn_cpu_time_sec_sum", &[r#"db="abc"#]), 12.0);
         assert_eq!(
-            s.sum("spacetime_txn_cpu_time_sec_sum", &[r#"db="abc"#, r#"txn_type="Reducer""#]),
+            s.sum("spacetime_txn_cpu_time_sec_sum", &[r#"db="abc"#]),
+            12.0
+        );
+        assert_eq!(
+            s.sum(
+                "spacetime_txn_cpu_time_sec_sum",
+                &[r#"db="abc"#, r#"txn_type="Reducer""#]
+            ),
             10.5
         );
         assert_eq!(s.sum("spacetime_txn_cpu_time_sec_sum", &[]), 111.0);
@@ -299,8 +320,18 @@ spacetime_num_rows_inserted_total{db="abc",table_name="game_movement_event",txn_
     #[test]
     fn group_by_reducer_sums_committed_and_rolled_back_and_sorts_desc() {
         let s = parse(SAMPLE);
-        let g = s.group_by("spacetime_num_txns_total", "reducer", &[r#"txn_type="Reducer""#]);
-        assert_eq!(g, vec![("movement_update".into(), 404.0), ("tick_melee".into(), 100.0)]);
+        let g = s.group_by(
+            "spacetime_num_txns_total",
+            "reducer",
+            &[r#"txn_type="Reducer""#],
+        );
+        assert_eq!(
+            g,
+            vec![
+                ("movement_update".into(), 404.0),
+                ("tick_melee".into(), 100.0)
+            ]
+        );
     }
 
     #[test]
@@ -312,13 +343,23 @@ spacetime_num_rows_inserted_total{db="abc",table_name="game_movement_event",txn_
              spacetime_num_txns_total{committed=\"true\",db=\"abc\",reducer=\"brand_new\",txn_type=\"Reducer\"} 7",
         ));
         let d = before.delta(&after);
-        let g = d.group_by("spacetime_num_txns_total", "reducer", &[r#"txn_type="Reducer""#]);
+        let g = d.group_by(
+            "spacetime_num_txns_total",
+            "reducer",
+            &[r#"txn_type="Reducer""#],
+        );
         assert_eq!(
             g,
             vec![("tick_melee".into(), 60.0), ("brand_new".into(), 7.0)],
             "movement_update did not move during the window, so it is not a group at all"
         );
-        assert_eq!(d.sum("spacetime_num_txns_total", &[r#"reducer="movement_update""#]), 0.0);
+        assert_eq!(
+            d.sum(
+                "spacetime_num_txns_total",
+                &[r#"reducer="movement_update""#]
+            ),
+            0.0
+        );
     }
 
     /// The bug this guards is the nastiest one the harness can have: a `--db` prefix that matches
@@ -393,7 +434,10 @@ spacetime_num_txns_total{db="abc",reducer="movement_update"} 700"#,
         assert_eq!(s.databases(), vec!["abc".to_string(), "zzz".to_string()]);
         // Both databases carry transaction CPU here, so both are measurable — this is exactly the
         // multi-database case where an empty --db would silently conflate two writers.
-        assert_eq!(s.databases_with(OCCUPANCY_FAMILY), vec!["abc".to_string(), "zzz".to_string()]);
+        assert_eq!(
+            s.databases_with(OCCUPANCY_FAMILY),
+            vec!["abc".to_string(), "zzz".to_string()]
+        );
         // A node whose second identity is the placeholder label (zeroed bookkeeping only) has one
         // measurable database, and an empty --db is safe there.
         let one = parse(
@@ -403,7 +447,10 @@ spacetime_num_table_rows{db="000abcd",table_name="x"} 135
 "#,
         );
         assert_eq!(one.databases().len(), 2);
-        assert_eq!(one.databases_with(OCCUPANCY_FAMILY), vec!["abc".to_string()]);
+        assert_eq!(
+            one.databases_with(OCCUPANCY_FAMILY),
+            vec!["abc".to_string()]
+        );
     }
 
     #[test]

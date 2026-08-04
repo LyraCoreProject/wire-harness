@@ -47,8 +47,8 @@ use report::{
 use wire_client::WireClient;
 use wow_world_messages::vanilla::opcodes::ServerOpcodeMessage as Smsg;
 use wow_world_messages::vanilla::{
-    Class, MovementInfo, MovementInfo_MovementFlags, Race, Vector3d, CMSG_ATTACKSTOP,
-    CMSG_ATTACKSWING, MSG_MOVE_HEARTBEAT_Client,
+    Class, MSG_MOVE_HEARTBEAT_Client, MovementInfo, MovementInfo_MovementFlags, Race, Vector3d,
+    CMSG_ATTACKSTOP, CMSG_ATTACKSWING,
 };
 use wow_world_messages::Guid;
 
@@ -186,7 +186,10 @@ impl WalkPath {
             let half_span = (span / 2.0).min(spread);
             let base_radius =
                 (spread - half_span).max(0.0) * (((idx % 23) as f32 + 0.5) / 23.0).sqrt();
-            let base = [center[0] + base_radius * ang.cos(), center[1] + base_radius * ang.sin()];
+            let base = [
+                center[0] + base_radius * ang.cos(),
+                center[1] + base_radius * ang.sin(),
+            ];
             let per_hb = walk_speed * heartbeat.as_secs_f32();
             return Self {
                 base,
@@ -204,7 +207,10 @@ impl WalkPath {
         // the arc-radius budget subtracted from the disc).
         let ang = idx as f32 * GOLDEN_ANGLE;
         let base_radius = (spread - radius) * (((idx % 23) as f32 + 0.5) / 23.0).sqrt();
-        let base = [center[0] + base_radius * ang.cos(), center[1] + base_radius * ang.sin()];
+        let base = [
+            center[0] + base_radius * ang.cos(),
+            center[1] + base_radius * ang.sin(),
+        ];
         // A player with no room to walk (a degenerate `--spread 0`) stands still — and says so in
         // its flags, rather than claiming to run while its position never changes.
         let (step, speed_yds) = if radius > 0.0 {
@@ -213,7 +219,15 @@ impl WalkPath {
         } else {
             (0.0, 0.0)
         };
-        Self { base, z: center[2], radius, phase: ang, step, speed_yds, line: None }
+        Self {
+            base,
+            z: center[2],
+            radius,
+            phase: ang,
+            step,
+            speed_yds,
+            line: None,
+        }
     }
 
     /// RAID FORMATION: the same golden-angle placement, but the player STANDS — no arc, no
@@ -227,7 +241,10 @@ impl WalkPath {
         let spread = spread.max(0.0);
         let ang = idx as f32 * GOLDEN_ANGLE;
         let base_radius = spread * (((idx % 23) as f32 + 0.5) / 23.0).sqrt();
-        let base = [center[0] + base_radius * ang.cos(), center[1] + base_radius * ang.sin()];
+        let base = [
+            center[0] + base_radius * ang.cos(),
+            center[1] + base_radius * ang.sin(),
+        ];
         // Face the centre: the player is standing at `ang` on the disc, so inward is `ang + π`.
         Self {
             base,
@@ -249,7 +266,11 @@ impl WalkPath {
             // construction rather than a small-angle approximation.
             let one_way = 2.0 * half_span;
             let period = 2.0 * one_way;
-            let d = if period > 0.0 { (per_hb * hb as f32).rem_euclid(period) } else { 0.0 };
+            let d = if period > 0.0 {
+                (per_hb * hb as f32).rem_euclid(period)
+            } else {
+                0.0
+            };
             let (offset, heading) = if d <= one_way {
                 (-half_span + d, dir)
             } else {
@@ -262,7 +283,11 @@ impl WalkPath {
             };
             // A degenerate leash (`--spread 0`) collapses `half_span` to 0 — stand still and say
             // so, the same rule the arc applies for the same reason.
-            let flags = if half_span > 0.0 { MOVE_FLAG_FORWARD } else { MOVE_FLAG_NONE };
+            let flags = if half_span > 0.0 {
+                MOVE_FLAG_FORWARD
+            } else {
+                MOVE_FLAG_NONE
+            };
             return MovementInfo {
                 flags,
                 timestamp,
@@ -288,10 +313,21 @@ impl WalkPath {
                 (phi + std::f32::consts::FRAC_PI_2).rem_euclid(std::f32::consts::TAU),
             )
         } else {
-            (Vector3d { x: self.base[0], y: self.base[1], z: self.z }, self.phase)
+            (
+                Vector3d {
+                    x: self.base[0],
+                    y: self.base[1],
+                    z: self.z,
+                },
+                self.phase,
+            )
         };
         MovementInfo {
-            flags: if self.speed_yds > 0.0 { MOVE_FLAG_FORWARD } else { MOVE_FLAG_NONE },
+            flags: if self.speed_yds > 0.0 {
+                MOVE_FLAG_FORWARD
+            } else {
+                MOVE_FLAG_NONE
+            },
             timestamp,
             position,
             orientation,
@@ -391,14 +427,19 @@ impl Args {
             let Some(key) = k.strip_prefix("--") else {
                 bail!("unexpected positional argument {k:?}\n\n{USAGE}");
             };
-            let v = it.next().with_context(|| format!("--{key} needs a value\n\n{USAGE}"))?;
+            let v = it
+                .next()
+                .with_context(|| format!("--{key} needs a value\n\n{USAGE}"))?;
             m.insert(key.to_string(), v);
         }
         Ok(Self(m))
     }
 
     fn str(&self, k: &str, default: &str) -> String {
-        self.0.get(k).cloned().unwrap_or_else(|| default.to_string())
+        self.0
+            .get(k)
+            .cloned()
+            .unwrap_or_else(|| default.to_string())
     }
 
     fn opt(&self, k: &str) -> Option<String> {
@@ -408,7 +449,9 @@ impl Args {
     fn num<T: std::str::FromStr>(&self, k: &str, default: T) -> Result<T> {
         match self.0.get(k) {
             None => Ok(default),
-            Some(v) => v.parse().map_err(|_| anyhow::anyhow!("--{k}: cannot parse {v:?}")),
+            Some(v) => v
+                .parse()
+                .map_err(|_| anyhow::anyhow!("--{k}: cannot parse {v:?}")),
         }
     }
 
@@ -417,15 +460,23 @@ impl Args {
             None => Ok(default.to_vec()),
             Some(v) => v
                 .split(',')
-                .map(|s| s.trim().parse::<usize>().map_err(|_| anyhow::anyhow!("--{k}: {s:?}")))
+                .map(|s| {
+                    s.trim()
+                        .parse::<usize>()
+                        .map_err(|_| anyhow::anyhow!("--{k}: {s:?}"))
+                })
                 .collect(),
         }
     }
 
     fn vec3(&self, k: &str, default: [f32; 3]) -> Result<[f32; 3]> {
-        let Some(v) = self.0.get(k) else { return Ok(default) };
-        let parts: Vec<f32> =
-            v.split(',').filter_map(|s| s.trim().parse::<f32>().ok()).collect();
+        let Some(v) = self.0.get(k) else {
+            return Ok(default);
+        };
+        let parts: Vec<f32> = v
+            .split(',')
+            .filter_map(|s| s.trim().parse::<f32>().ok())
+            .collect();
         if parts.len() != 3 {
             bail!("--{k}: expected X,Y,Z (got {v:?})");
         }
@@ -439,7 +490,10 @@ impl Args {
 fn env_num<T: std::str::FromStr>(key: &str, default: T) -> Result<T> {
     match std::env::var(key) {
         Err(_) => Ok(default),
-        Ok(v) => v.trim().parse().map_err(|_| anyhow::anyhow!("${key}: cannot parse {v:?}")),
+        Ok(v) => v
+            .trim()
+            .parse()
+            .map_err(|_| anyhow::anyhow!("${key}: cannot parse {v:?}")),
     }
 }
 
@@ -596,14 +650,22 @@ fn run_player(idx: usize, cfg: Arc<Cfg>, sh: Arc<Shared>) {
     let walk = if cfg.boss_guid != 0 {
         WalkPath::standing(idx, cfg.center, cfg.spread)
     } else {
-        WalkPath::for_player(idx, cfg.center, cfg.spread, hb_interval, cfg.walk_span, cfg.walk_speed)
+        WalkPath::for_player(
+            idx,
+            cfg.center,
+            cfg.spread,
+            hb_interval,
+            cfg.walk_span,
+            cfg.walk_speed,
+        )
     };
     let mut next_hb = Instant::now();
     let mut next_combat_flip = Instant::now() + Duration::from_secs(COMBAT_FLIP_SECS);
     // Stagger the first cast across the crowd so 100 players don't fire their opener on the same
     // millisecond — a real pull trickles in, and a synchronised burst measures a thundering herd
     // rather than a fight.
-    let mut next_cast = Instant::now() + Duration::from_millis((idx as u64 * 37) % cfg.cast_ms.max(1));
+    let mut next_cast =
+        Instant::now() + Duration::from_millis((idx as u64 * 37) % cfg.cast_ms.max(1));
     let mut engaged: Option<u64> = None;
     let mut hb_count: u32 = 0;
     let mut local_lat: Vec<u32> = Vec::with_capacity(LATENCY_FLUSH_BATCH);
@@ -644,7 +706,10 @@ fn run_player(idx: usize, cfg: Arc<Cfg>, sh: Arc<Shared>) {
         // loop below is what carries the load and it needs the selection either way.
         if cfg.boss_guid != 0 && combat && engaged.is_none() {
             if c.set_selection(cfg.boss_guid).is_ok()
-                && c.send(&CMSG_ATTACKSWING { guid: Guid::new(cfg.boss_guid) }).is_ok()
+                && c.send(&CMSG_ATTACKSWING {
+                    guid: Guid::new(cfg.boss_guid),
+                })
+                .is_ok()
             {
                 engaged = Some(cfg.boss_guid);
                 sh.counters.swings.fetch_add(1, Ordering::Relaxed);
@@ -657,7 +722,11 @@ fn run_player(idx: usize, cfg: Arc<Cfg>, sh: Arc<Shared>) {
         // work this mode exists to generate, and none of it happens on a swing alone.
         if cfg.cast_spell != 0 && combat && now >= next_cast {
             next_cast = now + Duration::from_millis(cfg.cast_ms);
-            let target = if cfg.boss_guid != 0 { Some(cfg.boss_guid) } else { engaged };
+            let target = if cfg.boss_guid != 0 {
+                Some(cfg.boss_guid)
+            } else {
+                engaged
+            };
             if let Some(t) = target {
                 if c.cast_spell(cfg.cast_spell, t).is_ok() {
                     sh.counters.casts.fetch_add(1, Ordering::Relaxed);
@@ -675,8 +744,11 @@ fn run_player(idx: usize, cfg: Arc<Cfg>, sh: Arc<Shared>) {
                 }
                 None => {
                     // Whatever creature the login/AOI burst spawned nearby; best effort.
-                    if let Some(t) =
-                        c.seen_guids.iter().copied().find(|g| (*g >> 48) == HIGHGUID_UNIT)
+                    if let Some(t) = c
+                        .seen_guids
+                        .iter()
+                        .copied()
+                        .find(|g| (*g >> 48) == HIGHGUID_UNIT)
                     {
                         if c.set_selection(t).is_ok()
                             && c.send(&CMSG_ATTACKSWING { guid: Guid::new(t) }).is_ok()
@@ -690,7 +762,9 @@ fn run_player(idx: usize, cfg: Arc<Cfg>, sh: Arc<Shared>) {
         }
 
         // ---- drain: read every queued frame, timing the peer heartbeats among them ----
-        let budget = next_hb.saturating_duration_since(Instant::now()).min(Duration::from_millis(100));
+        let budget = next_hb
+            .saturating_duration_since(Instant::now())
+            .min(Duration::from_millis(100));
         let deadline = Instant::now() + budget;
         let mut last_was_ok = false;
         loop {
@@ -728,18 +802,30 @@ fn run_player(idx: usize, cfg: Arc<Cfg>, sh: Arc<Shared>) {
         if pending >= LATENCY_FLUSH_BATCH
             || (pending > 0 && last_flush.elapsed() >= Duration::from_secs(1))
         {
-            sh.latencies.lock().expect("latency lock").extend(local_lat.drain(..));
-            sh.wakeup_lags.lock().expect("lag lock").extend(local_lag.drain(..));
+            sh.latencies
+                .lock()
+                .expect("latency lock")
+                .extend(local_lat.drain(..));
+            sh.wakeup_lags
+                .lock()
+                .expect("lag lock")
+                .extend(local_lag.drain(..));
             last_flush = Instant::now();
         }
     }
     // The stop flag is the only clean way out; anything else `break`s, and that is a lost session.
     let left_early = !sh.stop.load(Ordering::Relaxed);
     if !local_lat.is_empty() {
-        sh.latencies.lock().expect("latency lock").extend(local_lat.drain(..));
+        sh.latencies
+            .lock()
+            .expect("latency lock")
+            .extend(local_lat.drain(..));
     }
     if !local_lag.is_empty() {
-        sh.wakeup_lags.lock().expect("lag lock").extend(local_lag.drain(..));
+        sh.wakeup_lags
+            .lock()
+            .expect("lag lock")
+            .extend(local_lag.drain(..));
     }
     sh.live.fetch_sub(1, Ordering::Relaxed);
     if left_early {
@@ -766,8 +852,14 @@ fn connect(cfg: &Cfg, account: &str, char_name: &str) -> Result<WireClient> {
 
 /// The headline capacity numbers, reduced out of a before/after scrape delta over `secs` seconds.
 fn writer_stats(d: &metrics::Snapshot, secs: f64, dbf: &str) -> Writer {
-    let reducer_cpu = d.sum("spacetime_txn_cpu_time_sec_sum", &[dbf, r#"txn_type="Reducer""#]);
-    let subscribe_cpu = d.sum("spacetime_txn_cpu_time_sec_sum", &[dbf, r#"txn_type="Subscribe""#]);
+    let reducer_cpu = d.sum(
+        "spacetime_txn_cpu_time_sec_sum",
+        &[dbf, r#"txn_type="Reducer""#],
+    );
+    let subscribe_cpu = d.sum(
+        "spacetime_txn_cpu_time_sec_sum",
+        &[dbf, r#"txn_type="Subscribe""#],
+    );
     let total_cpu = d.sum("spacetime_txn_cpu_time_sec_sum", &[dbf]);
     let wait_sum = d.sum("spacetime_reducer_wait_time_sec_sum", &[dbf]);
     let wait_count = d.sum("spacetime_reducer_wait_time_sec_count", &[dbf]);
@@ -779,14 +871,25 @@ fn writer_stats(d: &metrics::Snapshot, secs: f64, dbf: &str) -> Writer {
         // Two things can push it past 100%, and both are caught rather than reported: a `--db`
         // selection spanning several databases (refused at preflight) and a counter reset inside
         // the window (flagged on the stage).
-        occupancy_pct: if secs > 0.0 { total_cpu / secs * 100.0 } else { 0.0 },
+        occupancy_pct: if secs > 0.0 {
+            total_cpu / secs * 100.0
+        } else {
+            0.0
+        },
         reducer_cpu_sec: reducer_cpu,
         subscribe_cpu_sec: subscribe_cpu,
         other_cpu_sec: total_cpu - reducer_cpu - subscribe_cpu,
         total_cpu_sec: total_cpu,
         txns_per_sec: rate(d.sum("spacetime_num_txns_total", &[dbf]), secs),
-        mean_queue_wait_ms: if wait_count > 0.0 { wait_sum / wait_count * 1000.0 } else { 0.0 },
-        egress_bytes_per_sec: rate(d.sum("spacetime_num_bytes_sent_to_clients_total", &[dbf]), secs),
+        mean_queue_wait_ms: if wait_count > 0.0 {
+            wait_sum / wait_count * 1000.0
+        } else {
+            0.0
+        },
+        egress_bytes_per_sec: rate(
+            d.sum("spacetime_num_bytes_sent_to_clients_total", &[dbf]),
+            secs,
+        ),
         rows_scanned_per_sec: rate(d.sum("spacetime_num_rows_scanned_total", &[dbf]), secs),
     }
 }
@@ -800,11 +903,18 @@ fn rate(delta: f64, secs: f64) -> f64 {
 }
 
 fn tx_by_reducer(d: &metrics::Snapshot, secs: f64, dbf: &str, top: usize) -> Vec<NamedRate> {
-    d.group_by("spacetime_num_txns_total", "reducer", &[dbf, r#"txn_type="Reducer""#])
-        .into_iter()
-        .take(top)
-        .map(|(name, n)| NamedRate { name, per_sec: rate(n, secs) })
-        .collect()
+    d.group_by(
+        "spacetime_num_txns_total",
+        "reducer",
+        &[dbf, r#"txn_type="Reducer""#],
+    )
+    .into_iter()
+    .take(top)
+    .map(|(name, n)| NamedRate {
+        name,
+        per_sec: rate(n, secs),
+    })
+    .collect()
 }
 
 /// Per-table insert / delete rates. For the `game_*_event` delivery buffers the delete rate IS the
@@ -816,10 +926,14 @@ fn table_rates(
     filter: &str,
     top: usize,
 ) -> Vec<TableRate> {
-    let ins: HashMap<String, f64> =
-        d.group_by("spacetime_num_rows_inserted_total", "table_name", &[dbf]).into_iter().collect();
-    let del: HashMap<String, f64> =
-        d.group_by("spacetime_num_rows_deleted_total", "table_name", &[dbf]).into_iter().collect();
+    let ins: HashMap<String, f64> = d
+        .group_by("spacetime_num_rows_inserted_total", "table_name", &[dbf])
+        .into_iter()
+        .collect();
+    let del: HashMap<String, f64> = d
+        .group_by("spacetime_num_rows_deleted_total", "table_name", &[dbf])
+        .into_iter()
+        .collect();
     // A table can appear in either half (insert-only, or delete-only when the reaper drains a
     // backlog), so the row set is the UNION of both keyspaces.
     let mut names: Vec<&String> = ins.keys().chain(del.keys()).collect();
@@ -895,7 +1009,12 @@ fn validate_db_selection(s: &metrics::Snapshot, db: &str, dbf: &str) -> Result<(
 /// witness exists to *test*. An instrument that can confirm its own hypothesis by typo is not an
 /// instrument. A witness equal to the primary `--db` is refused for the same reason: it reports one
 /// writer twice and the two columns agree by construction.
-fn validate_witness_selection(s: &metrics::Snapshot, db: &str, witness: &str, wdbf: &str) -> Result<()> {
+fn validate_witness_selection(
+    s: &metrics::Snapshot,
+    db: &str,
+    witness: &str,
+    wdbf: &str,
+) -> Result<()> {
     if witness.is_empty() {
         return Ok(()); // no witness: the pre-#21 single-database report
     }
@@ -977,7 +1096,10 @@ fn main() -> Result<()> {
         // `--heartbeat-ms` > `$BENCH_HEARTBEAT_MS` > the default. The env var exists so a wrapper
         // script that does NOT pass the flag (or a shell that exports it for a whole session) can
         // still reproduce a pre-#288 cadence without editing anything.
-        heartbeat_ms: args.num::<u64>("heartbeat-ms", env_num("BENCH_HEARTBEAT_MS", DEFAULT_HEARTBEAT_MS)?)?,
+        heartbeat_ms: args.num::<u64>(
+            "heartbeat-ms",
+            env_num("BENCH_HEARTBEAT_MS", DEFAULT_HEARTBEAT_MS)?,
+        )?,
         combat_pct: args.num::<usize>("combat-pct", 25)?,
         class: match args.str("class", "warrior").to_ascii_lowercase().as_str() {
             "warrior" => Class::Warrior,
@@ -1112,7 +1234,10 @@ fn main() -> Result<()> {
         }
         let connected = sh.connected.load(Ordering::Relaxed);
         let failed = sh.failed.load(Ordering::Relaxed);
-        eprintln!("[bench] rung {}: {connected} in world, {failed} failed", step.target);
+        eprintln!(
+            "[bench] rung {}: {connected} in world, {failed} failed",
+            step.target
+        );
 
         eprintln!("[bench] warm-up {warmup}s…");
         thread::sleep(Duration::from_secs(warmup));
@@ -1149,7 +1274,11 @@ fn main() -> Result<()> {
             eprintln!("[bench] rung {}: COUNTER RESET during the window ({k} went {v:+.3}) — this stage's server-side numbers are void", step.target);
             k.clone()
         });
-        let dc: Vec<u64> = c0.iter().zip(c1.iter()).map(|(a, b)| b.saturating_sub(*a)).collect();
+        let dc: Vec<u64> = c0
+            .iter()
+            .zip(c1.iter())
+            .map(|(a, b)| b.saturating_sub(*a))
+            .collect();
         let stage = Stage {
             players_target: step.target,
             players_connected: live,
@@ -1171,8 +1300,7 @@ fn main() -> Result<()> {
                 harness_backpressure_events: dc[4],
             },
             writer: writer_stats(&d, secs, &dbf),
-            witness_writer: (!witness_db.is_empty())
-                .then(|| writer_stats(&d, secs, &witness_dbf)),
+            witness_writer: (!witness_db.is_empty()).then(|| writer_stats(&d, secs, &witness_dbf)),
             tx_per_sec_by_reducer: tx_by_reducer(&d, secs, &dbf, 15),
             event_tables: table_rates(&d, secs, &dbf, &table_filter, 20),
         };
@@ -1196,7 +1324,10 @@ fn main() -> Result<()> {
         rep.stages.push(stage);
     }
 
-    eprintln!("[bench] ramp complete — disconnecting {} players…", handles.len());
+    eprintln!(
+        "[bench] ramp complete — disconnecting {} players…",
+        handles.len()
+    );
     sh.stop.store(true, Ordering::Relaxed);
     for h in handles {
         let _ = h.join();
@@ -1227,10 +1358,17 @@ fn dry_run(
 ) -> Result<()> {
     println!("metrics endpoint   {url} — {} sample lines", s.0.len());
     println!("databases on node  {:?}", s.databases());
-    println!("  …measurable      {:?}", s.databases_with(metrics::OCCUPANCY_FAMILY));
+    println!(
+        "  …measurable      {:?}",
+        s.databases_with(metrics::OCCUPANCY_FAMILY)
+    );
     println!(
         "--db selection     {}",
-        if db.is_empty() { "<all databases aggregated>" } else { db }
+        if db.is_empty() {
+            "<all databases aggregated>"
+        } else {
+            db
+        }
     );
     println!();
     println!("required metric families:");
@@ -1252,10 +1390,15 @@ fn dry_run(
     println!();
     println!("tables the report would list (top 10 by lifetime rows):");
     for t in table_rates(s, 1.0, dbf, table_filter, 10) {
-        println!("  {:<34} {:>12.0} ins {:>12.0} del", t.table, t.inserts_per_sec, t.reaps_per_sec);
+        println!(
+            "  {:<34} {:>12.0} ins {:>12.0} del",
+            t.table, t.inserts_per_sec, t.reaps_per_sec
+        );
     }
     println!();
-    println!("(movement latency is measured client-side and needs a real ramp — nothing to preflight)");
+    println!(
+        "(movement latency is measured client-side and needs a real ramp — nothing to preflight)"
+    );
     Ok(())
 }
 
@@ -1313,16 +1456,39 @@ spacetime_num_rows_scanned_total{db="abc"} 1000
 
         let w = writer_stats(&d, 10.0, &dbf);
         // 3s reducer + 1s subscribe CPU over a 10s window = 40% of one serialized writer.
-        assert!((w.occupancy_pct - 40.0).abs() < 1e-9, "occupancy was {}", w.occupancy_pct);
+        assert!(
+            (w.occupancy_pct - 40.0).abs() < 1e-9,
+            "occupancy was {}",
+            w.occupancy_pct
+        );
         assert!((w.reducer_cpu_sec - 3.0).abs() < 1e-9);
-        assert!((w.txns_per_sec - 210.0).abs() < 1e-9, "2000+100 txns over 10s");
+        assert!(
+            (w.txns_per_sec - 210.0).abs() < 1e-9,
+            "2000+100 txns over 10s"
+        );
         // 2s of queue wait spread over 2000 newly-waited reducers = 1ms mean.
-        assert!((w.mean_queue_wait_ms - 1.0).abs() < 1e-9, "wait was {}", w.mean_queue_wait_ms);
+        assert!(
+            (w.mean_queue_wait_ms - 1.0).abs() < 1e-9,
+            "wait was {}",
+            w.mean_queue_wait_ms
+        );
         assert!((w.egress_bytes_per_sec - 1024.0).abs() < 1e-9);
 
         let tx = tx_by_reducer(&d, 10.0, &dbf, 15);
-        assert_eq!(tx[0], NamedRate { name: "movement_update".into(), per_sec: 200.0 });
-        assert_eq!(tx[1], NamedRate { name: "tick_melee".into(), per_sec: 10.0 });
+        assert_eq!(
+            tx[0],
+            NamedRate {
+                name: "movement_update".into(),
+                per_sec: 200.0
+            }
+        );
+        assert_eq!(
+            tx[1],
+            NamedRate {
+                name: "tick_melee".into(),
+                per_sec: 10.0
+            }
+        );
 
         let tables = table_rates(&d, 10.0, &dbf, "", 20);
         assert_eq!(
@@ -1361,12 +1527,20 @@ spacetime_num_bytes_sent_to_clients_total{db="aaa",txn_type="Reducer"} 5
         let dbf = metrics::db_filter("deadbeef");
         // What the run WOULD have published, had it proceeded:
         let w = writer_stats(&s, 60.0, &dbf);
-        assert_eq!(w.occupancy_pct, 0.0, "a wrong --db looks exactly like an idle writer");
+        assert_eq!(
+            w.occupancy_pct, 0.0,
+            "a wrong --db looks exactly like an idle writer"
+        );
         assert_eq!(tx_by_reducer(&s, 60.0, &dbf, 15), vec![]);
         // …so it must not proceed.
-        let err = validate_db_selection(&s, "deadbeef", &dbf).unwrap_err().to_string();
+        let err = validate_db_selection(&s, "deadbeef", &dbf)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("matches no database"), "{err}");
-        assert!(err.contains("aaa"), "the error must name the identities that DO exist: {err}");
+        assert!(
+            err.contains("aaa"),
+            "the error must name the identities that DO exist: {err}"
+        );
         // The correct prefix passes.
         assert!(validate_db_selection(&s, "aaa", &metrics::db_filter("aaa")).is_ok());
     }
@@ -1380,7 +1554,9 @@ spacetime_num_bytes_sent_to_clients_total{db="aaa",txn_type="Reducer"} 5
         let dbf = metrics::db_filter("");
         // Two writers at 50% each would be published as one writer at 100%.
         assert!((writer_stats(&two, 60.0, &dbf).occupancy_pct - 100.0).abs() < 1e-9);
-        let err = validate_db_selection(&two, "", &dbf).unwrap_err().to_string();
+        let err = validate_db_selection(&two, "", &dbf)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("2 measurable databases"), "{err}");
         // One database on the node → the aggregate default stays convenient and correct.
         assert!(validate_db_selection(&metrics::parse(ONE_DB), "", &dbf).is_ok());
@@ -1398,9 +1574,14 @@ spacetime_num_bytes_sent_to_clients_total{db="aaa",txn_type="Reducer"} 5
         // Matches nothing → would publish a beautifully flat 0.0%.
         let ghost = metrics::db_filter("deadbeef");
         assert_eq!(writer_stats(&two, 60.0, &ghost).occupancy_pct, 0.0);
-        let err = validate_witness_selection(&two, "aaa", "deadbeef", &ghost).unwrap_err().to_string();
+        let err = validate_witness_selection(&two, "aaa", "deadbeef", &ghost)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("matches no database"), "{err}");
-        assert!(err.contains("bbb"), "the error must name the identities that DO exist: {err}");
+        assert!(
+            err.contains("bbb"),
+            "the error must name the identities that DO exist: {err}"
+        );
         // Same database in both columns.
         let err = validate_witness_selection(&two, "aaa", "aaa", &metrics::db_filter("aaa"))
             .unwrap_err()
@@ -1412,11 +1593,17 @@ spacetime_num_bytes_sent_to_clients_total{db="aaa",txn_type="Reducer"} 5
         let err = validate_witness_selection(&two, "aa", "aaa", &metrics::db_filter("aaa"))
             .unwrap_err()
             .to_string();
-        assert!(err.contains("same database"), "a witness the primary's prefix swallows: {err}");
+        assert!(
+            err.contains("same database"),
+            "a witness the primary's prefix swallows: {err}"
+        );
         let err = validate_witness_selection(&two, "aaa", "aa", &metrics::db_filter("aa"))
             .unwrap_err()
             .to_string();
-        assert!(err.contains("same database"), "a witness that swallows the primary: {err}");
+        assert!(
+            err.contains("same database"),
+            "a witness that swallows the primary: {err}"
+        );
         // Two genuinely different databases is the whole point, and no witness at all is the
         // pre-#21 report — neither may be refused.
         assert!(validate_witness_selection(&two, "aaa", "bbb", &metrics::db_filter("bbb")).is_ok());
@@ -1435,7 +1622,9 @@ spacetime_num_bytes_sent_to_clients_total{db="aaa",txn_type="Reducer"} 5
         // Bound the scan at the test module, or the assertion strings BELOW would satisfy it
         // themselves — a self-matching scanner passes on an empty `main`. (Caught by re-running the
         // two mutations this test exists for: both stayed green until this line was added.)
-        let end = src[at..].find("\n#[cfg(test)]").expect("the test module follows `main`");
+        let end = src[at..]
+            .find("\n#[cfg(test)]")
+            .expect("the test module follows `main`");
         let body: String = src[at..at + end]
             .lines()
             .filter(|l| !l.trim_start().starts_with("//"))
@@ -1460,10 +1649,17 @@ spacetime_num_bytes_sent_to_clients_total{db="aaa",txn_type="Reducer"} 5
     fn parked_is_derived_from_the_live_scrape_not_hard_coded() {
         let dbf = metrics::db_filter("aaa");
         // A node exposing every required family parks nothing.
-        assert_eq!(park_missing_families(&metrics::parse(ONE_DB), &dbf), Vec::<String>::new());
+        assert_eq!(
+            park_missing_families(&metrics::parse(ONE_DB), &dbf),
+            Vec::<String>::new()
+        );
         // Drop one family: the report must say the field is zero BY ABSENCE.
         let missing = metrics::parse(
-            &ONE_DB.lines().filter(|l| !l.contains("reducer_wait_time")).collect::<Vec<_>>().join("\n"),
+            &ONE_DB
+                .lines()
+                .filter(|l| !l.contains("reducer_wait_time"))
+                .collect::<Vec<_>>()
+                .join("\n"),
         );
         let parked = park_missing_families(&missing, &dbf);
         assert_eq!(parked.len(), 1, "{parked:?}");
@@ -1523,9 +1719,9 @@ spacetime_num_bytes_sent_to_clients_total{db="aaa",txn_type="Reducer"} 5
                     let travel = (cur.position.y - prev.position.y)
                         .atan2(cur.position.x - prev.position.x)
                         .rem_euclid(std::f32::consts::TAU);
-                    let err = (travel - prev.orientation).abs().min(
-                        std::f32::consts::TAU - (travel - prev.orientation).abs(),
-                    );
+                    let err = (travel - prev.orientation)
+                        .abs()
+                        .min(std::f32::consts::TAU - (travel - prev.orientation).abs());
                     assert!(
                         err < w.step,
                         "idx {idx} hb {hb} at {hb_ms}ms faces {:.3} but travels {travel:.3}",
@@ -1564,7 +1760,10 @@ spacetime_num_bytes_sent_to_clients_total{db="aaa",txn_type="Reducer"} 5
                 );
                 let far = ((b.position.x - center[0]).powi(2) + (b.position.y - center[1]).powi(2))
                     .sqrt();
-                assert!(far <= spread + 1e-3, "idx {idx} left the leash after 50k heartbeats");
+                assert!(
+                    far <= spread + 1e-3,
+                    "idx {idx} left the leash after 50k heartbeats"
+                );
             }
         }
     }
@@ -1607,7 +1806,8 @@ spacetime_num_bytes_sent_to_clients_total{db="aaa",txn_type="Reducer"} 5
                     let implied = dist(&prev, &cur) / dt.as_secs_f32();
                     if leg(hb - 1) == leg(hb) {
                         assert!(
-                            (implied - CLIENT_DEAD_RECKON_YDS).abs() < CLIENT_DEAD_RECKON_YDS * 0.02,
+                            (implied - CLIENT_DEAD_RECKON_YDS).abs()
+                                < CLIENT_DEAD_RECKON_YDS * 0.02,
                             "span {span} idx {idx} hb {hb} implies {implied:.2} yd/s but the \
                              FORWARD flag makes every observing client extrapolate at \
                              {CLIENT_DEAD_RECKON_YDS} yd/s"
@@ -1675,13 +1875,22 @@ spacetime_num_bytes_sent_to_clients_total{db="aaa",txn_type="Reducer"} 5
     /// in miniature.
     #[test]
     fn a_player_with_no_room_to_walk_does_not_claim_to_be_running() {
-        let w =
-            WalkPath::for_player(3, [0.0, 0.0, 10.0], 0.0, Duration::from_millis(200), None, RUN_SPEED_YDS);
+        let w = WalkPath::for_player(
+            3,
+            [0.0, 0.0, 10.0],
+            0.0,
+            Duration::from_millis(200),
+            None,
+            RUN_SPEED_YDS,
+        );
         let a = w.heartbeat(0, 0);
         let b = w.heartbeat(9, 1);
         assert_eq!(a.flags, MOVE_FLAG_NONE);
         assert_eq!(dist(&a, &b), 0.0);
-        assert!(w.step.is_finite(), "a zero radius must not divide by zero into NaN/inf");
+        assert!(
+            w.step.is_finite(),
+            "a zero radius must not divide by zero into NaN/inf"
+        );
     }
 
     /// Everything above tests the pure path. This tests that `run_player` — which needs a live
@@ -1704,8 +1913,8 @@ spacetime_num_bytes_sent_to_clients_total{db="aaa",txn_type="Reducer"} 5
         // to hand-rolled movement in EITHER branch puts #288's jitter back on the wire.
         assert!(
             body.contains(
-                "WalkPath::for_player(idx, cfg.center, cfg.spread, hb_interval, cfg.walk_span, \
-                 cfg.walk_speed)"
+                "WalkPath::for_player( idx, cfg.center, cfg.spread, hb_interval, cfg.walk_span, \
+                 cfg.walk_speed, )"
             ) && body.contains("WalkPath::standing(idx, cfg.center, cfg.spread)")
                 && body.contains("let info = walk.heartbeat(hb_count, sh.now_ms())")
                 && body.contains("c.send(&MSG_MOVE_HEARTBEAT_Client { info })"),
@@ -1730,7 +1939,10 @@ spacetime_num_bytes_sent_to_clients_total{db="aaa",txn_type="Reducer"} 5
         // Bound the scan at the NEXT top-level item, so a later function (or this test module,
         // whose assertion strings contain the needles) cannot satisfy the scan by itself.
         let rest = &src[at + needle.len()..];
-        let end = rest.find("\n}\n").map(|e| at + needle.len() + e).unwrap_or(src.len());
+        let end = rest
+            .find("\n}\n")
+            .map(|e| at + needle.len() + e)
+            .unwrap_or(src.len());
         let mut out = String::new();
         for line in src[at..end].lines() {
             let mut in_str = false;
@@ -1766,7 +1978,10 @@ spacetime_num_bytes_sent_to_clients_total{db="aaa",txn_type="Reducer"} 5
         assert_eq!(a.vec3("center", [0.0; 3]).unwrap(), [-1.5, 2.0, 3.0]);
         assert_eq!(a.num::<u64>("hold", 60).unwrap(), 42);
         assert_eq!(a.num::<u64>("missing", 60).unwrap(), 60);
-        assert!(a.num::<u64>("center", 0).is_err(), "a bad numeric value must not fall back");
+        assert!(
+            a.num::<u64>("center", 0).is_err(),
+            "a bad numeric value must not fall back"
+        );
         assert_eq!(a.str("missing", "dflt"), "dflt");
         assert_eq!(a.opt("missing"), None);
     }

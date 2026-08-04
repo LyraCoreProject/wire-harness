@@ -7,12 +7,12 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Result};
 use wire_client::WireClient;
 use wow_world_messages::vanilla::opcodes::ServerOpcodeMessage as Smsg;
+use wow_world_messages::vanilla::CMSG_LOOT_ROLL;
 use wow_world_messages::vanilla::{
     GroupLootSetting, ItemQuality, PartyResult, RollVote, CMSG_GROUP_ACCEPT, CMSG_GROUP_DECLINE,
     CMSG_GROUP_DISBAND, CMSG_GROUP_INVITE, CMSG_LOOT_METHOD,
 };
 use wow_world_messages::Guid;
-use wow_world_messages::vanilla::CMSG_LOOT_ROLL;
 
 use super::{drain_until_file, require_path_arg, ModeCtx};
 
@@ -47,7 +47,9 @@ fn group_leader(c: &mut WireClient, args: &mut dyn Iterator<Item = String>) -> R
     let _ = std::fs::remove_file(format!("{hold}.ingroup"));
     c.set_recv_timeout(Duration::from_millis(500))?;
 
-    c.send(&CMSG_GROUP_INVITE { name: target.clone() })?;
+    c.send(&CMSG_GROUP_INVITE {
+        name: target.clone(),
+    })?;
     match c.recv_for(Duration::from_secs(10), |m| match m {
         Smsg::SMSG_PARTY_COMMAND_RESULT(r) => Some(r.result),
         _ => None,
@@ -62,7 +64,10 @@ fn group_leader(c: &mut WireClient, args: &mut dyn Iterator<Item = String>) -> R
     let Some((leader, names)) = c.recv_for(Duration::from_secs(60), |m| match m {
         Smsg::SMSG_GROUP_LIST(l) => {
             let names: Vec<String> = l.members.iter().map(|m| m.name.clone()).collect();
-            println!("[group] SMSG_GROUP_LIST members={names:?} leader={:#x}", l.leader.guid());
+            println!(
+                "[group] SMSG_GROUP_LIST members={names:?} leader={:#x}",
+                l.leader.guid()
+            );
             Some((l.leader.guid(), names))
         }
         _ => None,
@@ -148,7 +153,10 @@ fn party_bots(c: &mut WireClient, args: &mut dyn Iterator<Item = String>) -> Res
             bail!("party-bots: final roster {latest_roster:?} lacks {name:?}");
         }
     }
-    println!("[party] STEP OK — all {} bots in the roster {latest_roster:?}", names.len());
+    println!(
+        "[party] STEP OK — all {} bots in the roster {latest_roster:?}",
+        names.len()
+    );
 
     hold_then_disband(c, &hold, 300, "party-bots")?;
     println!("[wire] PARTY-BOTS PASS \u{2713}  {} bots invited (auto-accept) -> full roster -> hold -> disband -> destroyed", names.len());
@@ -176,7 +184,10 @@ fn group_join(c: &mut WireClient, args: &mut dyn Iterator<Item = String>) -> Res
     let Some(names) = c.recv_for(Duration::from_secs(10), |m| match m {
         Smsg::SMSG_GROUP_LIST(l) => {
             let names: Vec<String> = l.members.iter().map(|m| m.name.clone()).collect();
-            println!("[group] SMSG_GROUP_LIST members={names:?} leader={:#x}", l.leader.guid());
+            println!(
+                "[group] SMSG_GROUP_LIST members={names:?} leader={:#x}",
+                l.leader.guid()
+            );
             Some(names)
         }
         _ => None,
@@ -205,10 +216,15 @@ fn group_join(c: &mut WireClient, args: &mut dyn Iterator<Item = String>) -> Res
 }
 
 // ---- group-invite-expect-decline <target_name>: invite, then assert SMSG_GROUP_DECLINE. ----
-fn group_invite_expect_decline(c: &mut WireClient, args: &mut dyn Iterator<Item = String>) -> Result<()> {
+fn group_invite_expect_decline(
+    c: &mut WireClient,
+    args: &mut dyn Iterator<Item = String>,
+) -> Result<()> {
     let target: String = args.next().expect("target name");
     c.set_recv_timeout(Duration::from_millis(500))?;
-    c.send(&CMSG_GROUP_INVITE { name: target.clone() })?;
+    c.send(&CMSG_GROUP_INVITE {
+        name: target.clone(),
+    })?;
     let (mut acked, mut declined) = (false, false);
     let done = c.recv_for(Duration::from_secs(30), |m| {
         match m {
@@ -268,8 +284,10 @@ fn hold_then_disband(c: &mut WireClient, hold: &str, hold_secs: u64, tag: &str) 
     let _ = std::fs::remove_file(hold);
 
     c.send(&CMSG_GROUP_DISBAND {})?;
-    if c.recv_for(Duration::from_secs(10), |m| matches!(m, Smsg::SMSG_GROUP_DESTROYED).then_some(()))
-        .is_none()
+    if c.recv_for(Duration::from_secs(10), |m| {
+        matches!(m, Smsg::SMSG_GROUP_DESTROYED).then_some(())
+    })
+    .is_none()
     {
         bail!("{tag}: no SMSG_GROUP_DESTROYED within 10s of CMSG_GROUP_DISBAND");
     }
@@ -293,7 +311,11 @@ fn loot_roll_cycle(c: &mut WireClient, vote: &str, hold: &str, tag: &str) -> Res
         bail!("{tag}: no SMSG_LOOT_START_ROLL within 60s of the kill");
     };
     println!("[loot] START_ROLL item={item} slot={slot}; voting {vote:?}");
-    c.send(&CMSG_LOOT_ROLL { item: Guid::new(creature), item_slot: slot, vote })?;
+    c.send(&CMSG_LOOT_ROLL {
+        item: Guid::new(creature),
+        item_slot: slot,
+        vote,
+    })?;
     let Some((winner, won_item)) = c.recv_for(Duration::from_secs(90), |m| match m {
         Smsg::SMSG_LOOT_ROLL_WON(w) => Some((w.winning_player.guid(), w.item)),
         _ => None,
@@ -310,16 +332,24 @@ fn loot_roll_cycle(c: &mut WireClient, vote: &str, hold: &str, tag: &str) -> Res
 // SMSG_GROUP_LIST echo carries it (clause 3), writes <hold>.method, then runs one roll cycle
 // (clause 1) and holds until the orchestrator releases -> disband. ----
 fn loot_leader(c: &mut WireClient, args: &mut dyn Iterator<Item = String>) -> Result<()> {
-    let target: String = args.next().expect("usage: loot-leader <target_name> <vote> <hold_file>");
+    let target: String = args
+        .next()
+        .expect("usage: loot-leader <target_name> <vote> <hold_file>");
     let vote: String = args.next().expect("vote (need|greed)");
-    let hold = require_path_arg(args, "loot-leader <target_name> <vote> <hold_file>", "hold_file")?;
+    let hold = require_path_arg(
+        args,
+        "loot-leader <target_name> <vote> <hold_file>",
+        "hold_file",
+    )?;
     let _ = std::fs::remove_file(&hold);
     for suffix in [".ingroup", ".method", ".won"] {
         let _ = std::fs::remove_file(format!("{hold}{suffix}"));
     }
     c.set_recv_timeout(Duration::from_millis(500))?;
 
-    c.send(&CMSG_GROUP_INVITE { name: target.clone() })?;
+    c.send(&CMSG_GROUP_INVITE {
+        name: target.clone(),
+    })?;
     match c.recv_for(Duration::from_secs(10), |m| match m {
         Smsg::SMSG_PARTY_COMMAND_RESULT(r) => Some(r.result),
         _ => None,
@@ -329,9 +359,15 @@ fn loot_leader(c: &mut WireClient, args: &mut dyn Iterator<Item = String>) -> Re
         None => bail!("loot-leader STEP 1 FAIL: no SMSG_PARTY_COMMAND_RESULT"),
     }
     if c.recv_for(Duration::from_secs(60), |m| match m {
-        Smsg::SMSG_GROUP_LIST(l) => l.members.iter().any(|m| m.name.eq_ignore_ascii_case(&target)).then_some(()),
+        Smsg::SMSG_GROUP_LIST(l) => l
+            .members
+            .iter()
+            .any(|m| m.name.eq_ignore_ascii_case(&target))
+            .then_some(()),
         _ => None,
-    }).is_none() {
+    })
+    .is_none()
+    {
         bail!("loot-leader STEP 2 FAIL: no SMSG_GROUP_LIST with {target:?} (accept missing?)");
     }
     std::fs::write(format!("{hold}.ingroup"), "1").ok();
@@ -351,7 +387,9 @@ fn loot_leader(c: &mut WireClient, args: &mut dyn Iterator<Item = String>) -> Re
             .filter(|b| b.loot_setting == GroupLootSetting::GroupLoot)
             .map(|_| ()),
         _ => None,
-    }).is_none() {
+    })
+    .is_none()
+    {
         bail!("loot-leader STEP 3 FAIL: no SMSG_GROUP_LIST echoing GroupLoot within 10s");
     }
     println!("[loot] STEP 3 OK — GROUP_LIST echoes GroupLoot/Uncommon");
@@ -374,11 +412,19 @@ fn loot_voter(c: &mut WireClient, args: &mut dyn Iterator<Item = String>) -> Res
     }
     c.set_recv_timeout(Duration::from_millis(500))?;
 
-    if c.recv_for(Duration::from_secs(60), |m| matches!(m, Smsg::SMSG_GROUP_INVITE(_)).then_some(())).is_none() {
+    if c.recv_for(Duration::from_secs(60), |m| {
+        matches!(m, Smsg::SMSG_GROUP_INVITE(_)).then_some(())
+    })
+    .is_none()
+    {
         bail!("loot-voter STEP 1 FAIL: no SMSG_GROUP_INVITE within 60s");
     }
     c.send(&CMSG_GROUP_ACCEPT {})?;
-    if c.recv_for(Duration::from_secs(10), |m| matches!(m, Smsg::SMSG_GROUP_LIST(_)).then_some(())).is_none() {
+    if c.recv_for(Duration::from_secs(10), |m| {
+        matches!(m, Smsg::SMSG_GROUP_LIST(_)).then_some(())
+    })
+    .is_none()
+    {
         bail!("loot-voter STEP 2 FAIL: no SMSG_GROUP_LIST after accept");
     }
     std::fs::write(format!("{hold}.ingroup"), "1").ok();
@@ -391,7 +437,9 @@ fn loot_voter(c: &mut WireClient, args: &mut dyn Iterator<Item = String>) -> Res
             let _ = std::fs::remove_file(&hold);
         }
         matches!(m, Smsg::SMSG_GROUP_DESTROYED).then_some(())
-    }).is_none() {
+    })
+    .is_none()
+    {
         bail!("loot-voter STEP 4 FAIL: no SMSG_GROUP_DESTROYED after the leader disband");
     }
     println!("[wire] LOOT-VOTER PASS \u{2713}  accept + roll cycle + destroyed");
