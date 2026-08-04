@@ -5,9 +5,10 @@
 use anyhow::{bail, Result};
 use wire_client::WireClient;
 use wow_world_messages::vanilla::opcodes::ServerOpcodeMessage as Smsg;
+use wow_world_messages::vanilla::{CMSG_TEXT_EMOTE, TextEmote};
 use wow_world_messages::Guid;
 
-use super::{drain_until_file, read_packed_guid, require_path_arg, ModeCtx};
+use super::{drain_until_file, extract_chat_sender, extract_chat_text, read_packed_guid, require_path_arg, ModeCtx};
 
 /// Run `mode` if it belongs to this family. `Ok(true)` = recognized and completed
 /// (bail!/exit on failure inside); `Ok(false)` = not this family's mode.
@@ -249,6 +250,80 @@ fn aoi_observer(
             }
             continue;
         }
+        // #74 seam-chat: "expect-chat <text...>" — assert a Say/Yell SMSG_MESSAGECHAT from `peer`
+        // (the launch guid — the away-shard speaker in the seam-chat script) carrying EXACTLY this
+        // text arrives within the window.
+        if let Some(rest) = cmd.strip_prefix("expect-chat ") {
+            let want = rest.to_string();
+            let ok = c
+                .recv_for(window, |m| match m {
+                    Smsg::SMSG_MESSAGECHAT(msg) => {
+                        (extract_chat_sender(msg) == Some(peer) && extract_chat_text(msg).as_deref() == Some(want.as_str()))
+                            .then_some(())
+                    }
+                    _ => None,
+                })
+                .is_some();
+            let verdict = if ok { "OK" } else { "FAIL" };
+            println!("[aoi] expect-chat {want:?} -> {verdict}");
+            std::fs::write(&ack_file, format!("{verdict} expect-chat")).ok();
+            if !ok { bail!("aoi-observer: expect-chat {want:?} from {peer:#x} not seen within 30s"); }
+            continue;
+        }
+        // "expect-no-chat [secs]" (default 5) — the NEGATIVE control: assert NO Say/Yell from
+        // `peer` arrives within a SHORT window. This is the actual "range filter, not a broadcast
+        // leak" assertion — a hand-rolled distance check that silently degraded to "deliver
+        // everything" would still pass every OTHER command in this file.
+        if let Some(rest) = cmd.strip_prefix("expect-no-chat") {
+            let secs: u64 = rest.trim().parse().unwrap_or(5);
+            let leaked = c
+                .recv_for(std::time::Duration::from_secs(secs), |m| match m {
+                    Smsg::SMSG_MESSAGECHAT(msg) => (extract_chat_sender(msg) == Some(peer)).then_some(()),
+                    _ => None,
+                })
+                .is_some();
+            let ok = !leaked;
+            let verdict = if ok { "OK" } else { "FAIL" };
+            println!("[aoi] expect-no-chat -> {verdict}");
+            std::fs::write(&ack_file, format!("{verdict} expect-no-chat")).ok();
+            if !ok {
+                bail!(
+                    "aoi-observer: expect-no-chat — a chat line from {peer:#x} arrived despite \
+                     being out of range (broadcast leak)"
+                );
+            }
+            continue;
+        }
+        // "expect-emote <name-substring...>" — assert an SMSG_TEXT_EMOTE from `peer` arrives whose
+        // resolved target-name field CONTAINS the given substring (the "waves at NAME" text, baked
+        // in server-side rather than left to a client NAME_QUERY — see
+        // `register_peer_view_relays`'s doc comment on why that distinction matters for a cross-
+        // seam targeted emote specifically). Raw-payload decode, matching `text-emote` mode's own
+        // probe (guid(8) + text_emote(4) + emote(4) + SizedCString name).
+        if let Some(rest) = cmd.strip_prefix("expect-emote ") {
+            let want_name = rest.to_string();
+            const TEXT_EMOTE_OPCODE: u16 = 0x0105;
+            let got: Option<String> = c.recv_raw_for(window, |opcode, payload| {
+                if opcode != TEXT_EMOTE_OPCODE || payload.len() < 20 {
+                    return None;
+                }
+                let sender = u64::from_le_bytes(payload[0..8].try_into().unwrap());
+                if sender != peer {
+                    return None;
+                }
+                let len = u32::from_le_bytes(payload[16..20].try_into().unwrap()) as usize;
+                let end = 20 + len.min(payload.len().saturating_sub(20));
+                Some(String::from_utf8_lossy(&payload[20..end]).trim_end_matches('\0').to_string())
+            });
+            let ok = matches!(&got, Some(name) if name.contains(&want_name));
+            let verdict = if ok { "OK" } else { "FAIL" };
+            println!("[aoi] expect-emote {want_name:?} -> {verdict} (got {got:?})");
+            std::fs::write(&ack_file, format!("{verdict} expect-emote")).ok();
+            if !ok {
+                bail!("aoi-observer: expect-emote {want_name:?} from {peer:#x} not seen within 30s (got {got:?})");
+            }
+            continue;
+        }
         // a command may carry an explicit guid ("expect-seen 42") overriding the launch peer —
         // used when the interesting guid (a freshly spawned bot) isn't known at observer start
         let (cmd, peer) = match cmd.split_once(' ') {
@@ -353,6 +428,37 @@ fn aoi_mover(
                     let _ = c.recv();
                 }
                 println!("[aoi-mover] burst of 10 heartbeats sent around ({}, {}, {})", p[0], p[1], p[2]);
+            }
+        }
+        // #74 seam-chat: "say <text...>" / "yell <text...>" — CMSG_MESSAGECHAT via the same
+        // `send_say`/`send_yell` helpers the say-range probe uses. No ack file (mirrors "burst"
+        // above) — the orchestrator's paired `aoi-observer expect-chat`/`expect-no-chat` command is
+        // the assertion; this mover only needs to have actually sent the packet.
+        if let Some(rest) = cmdtext.strip_prefix("say ") {
+            match c.send_say(rest) {
+                Ok(()) => println!("[aoi-mover] sent SAY: {rest:?}"),
+                Err(e) => println!("[aoi-mover] SAY send failed: {e}"),
+            }
+        }
+        if let Some(rest) = cmdtext.strip_prefix("yell ") {
+            match c.send_yell(rest) {
+                Ok(()) => println!("[aoi-mover] sent YELL: {rest:?}"),
+                Err(e) => println!("[aoi-mover] YELL send failed: {e}"),
+            }
+        }
+        // "emote <target_guid>" — a targeted Wave (CMSG_TEXT_EMOTE), matching `text-emote` mode's
+        // own probe emote. Always Wave: the seam-chat script only needs ONE known, name-bearing
+        // emote to prove the away leg's `character_anywhere` cross-shard name resolution works —
+        // which emote id is irrelevant to that assertion.
+        if let Some(rest) = cmdtext.strip_prefix("emote ") {
+            match rest.trim().parse::<u64>() {
+                Ok(target) => {
+                    match c.send(&CMSG_TEXT_EMOTE { text_emote: TextEmote::Wave, emote: 0, target: Guid::new(target) }) {
+                        Ok(()) => println!("[aoi-mover] sent emote(Wave) targeting {target:#x}"),
+                        Err(e) => println!("[aoi-mover] emote send failed: {e}"),
+                    }
+                }
+                Err(_) => println!("[aoi-mover] emote needs <target_guid>, got {rest:?}"),
             }
         }
     }
