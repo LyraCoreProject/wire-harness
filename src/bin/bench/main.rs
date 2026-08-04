@@ -27,8 +27,8 @@
 //! Everything server-side (writer occupancy, tx/s by reducer, event insert/reap rates) is scraped
 //! from SpacetimeDB's own Prometheus endpoint — see `metrics.rs`.
 //!
-//! Run `bench --help` for the full argument list; `tools/wire-client/test-bench.sh` is the
-//! runbook wrapper that provisions accounts first.
+//! Run `vanilla-wire-bench --help` for the full argument list; LyraCore's
+//! `scripts/run-capacity-bench.sh` is the runbook wrapper that provisions accounts first.
 
 mod metrics;
 mod report;
@@ -740,16 +740,17 @@ fn run_player(idx: usize, cfg: Arc<Cfg>, sh: Arc<Shared>) {
         // pull is not a series of flips, it is N players locked on one entity for the fight's whole
         // duration. Stays armed even if the swing is refused (out of range, dead), because the cast
         // loop below is what carries the load and it needs the selection either way.
-        if cfg.boss_guid != 0 && combat && engaged.is_none() {
-            if c.set_selection(cfg.boss_guid).is_ok()
-                && c.send(&CMSG_ATTACKSWING {
-                    guid: Guid::new(cfg.boss_guid),
-                })
-                .is_ok()
-            {
-                engaged = Some(cfg.boss_guid);
-                sh.counters.swings.fetch_add(1, Ordering::Relaxed);
-            }
+        if cfg.boss_guid != 0
+            && combat
+            && engaged.is_none()
+            && c.set_selection(cfg.boss_guid).is_ok()
+            && c.send(&CMSG_ATTACKSWING {
+                guid: Guid::new(cfg.boss_guid),
+            })
+            .is_ok()
+        {
+            engaged = Some(cfg.boss_guid);
+            sh.counters.swings.fetch_add(1, Ordering::Relaxed);
         }
 
         // The abilities half. A real fight is not auto-attack: it is a cast every GCD-ish interval,

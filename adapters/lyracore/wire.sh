@@ -7,7 +7,7 @@
 # suite's fixture characters are, where the gateway listens — lives HERE, in one file, and
 # reaches the client only through its documented CLI.
 #
-# Every orchestrator in tools/wire-client/*.sh calls the client through this wrapper (as $WC,
+# Every orchestrator in adapters/lyracore/*.sh calls the client through this wrapper (as $WC,
 # defined by scenario-lib.sh) instead of exec'ing the binary directly. That is what keeps the
 # client extractable: point $WIRE_BIN at a downloaded wire-harness release and the whole suite
 # runs against it unchanged (#245/#246).
@@ -29,7 +29,7 @@
 set -u
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-repo=$(cd "$here/../../../.." && pwd)
+repo=$(cd "$here/../.." && pwd)
 BIN=${WIRE_BIN:-$repo/target/debug/vanilla-wire}
 
 # The dev stack's fixture credentials. These are LOCAL TEST accounts on a local server; they are

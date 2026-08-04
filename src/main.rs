@@ -4,14 +4,14 @@
 //!   * `smoke` — logon → world handshake → enter the world → report. The generic acceptance test:
 //!     it asserts nothing project-specific, so it passes against ANY working 5875 server given a
 //!     reachable host and valid credentials.
-//!   * `scenario NAME [ARGS…]` — one named protocol scenario (`src/modes/`).
+//!   * `scenario NAME [ARGS…]` — one named protocol scenario (`src/scenarios/`).
 //!
 //! Every server fact (host, ports) and every identity fact (account, character, class, password)
 //! comes from the CLI. Nothing here knows what server it is talking to.
 
 use anyhow::{bail, Result};
 
-mod modes;
+mod scenarios;
 use wire_client::cli::{invocation, Command};
 use wire_client::WireClient;
 use wow_world_messages::vanilla::opcodes::ServerOpcodeMessage as Smsg;
@@ -29,10 +29,10 @@ fn main() -> Result<()> {
     };
     let mut args = inv.args.clone().into_iter();
 
-    // ---- char-select-tier scenarios (modes/probes.rs): these run BEFORE login — they operate
+    // ---- char-select-tier scenarios (scenarios/probes.rs): these run BEFORE login — they operate
     // at the character-select screen (char-enum-gear, char-delete) and never enter the world. ----
     if let Some(m) = mode {
-        if modes::dispatch_charselect(m, &account, &password, &char_name, &mut args)? {
+        if scenarios::dispatch_charselect(m, &account, &password, &char_name, &mut args)? {
             return Ok(());
         }
     }
@@ -51,17 +51,17 @@ fn main() -> Result<()> {
         c.seen_guids.len()
     );
 
-    // ---- named scenarios: the five family dispatchers own everything below (modes/*.rs) ----
+    // ---- named scenarios: the five family dispatchers own everything below (scenarios/*.rs) ----
     // `smoke` is the M1 login check we just printed. A name NOBODY claims must bail: a silent
     // Ok(()) here turns a renamed/typo'd scenario into a green suite entry.
     let Some(mode) = mode else { return Ok(()) };
-    let mcx = modes::ModeCtx {
+    let mcx = scenarios::ModeCtx {
         account: &account,
         password: &password,
         char_name: &char_name,
         inv: &inv,
     };
-    if modes::dispatch(mode, &mut c, &mut args, &mcx)? {
+    if scenarios::dispatch(mode, &mut c, &mut args, &mcx)? {
         return Ok(());
     }
 

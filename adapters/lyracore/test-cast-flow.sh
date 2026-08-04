@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# Cast-flow integration test (headless, no wine client).
+#
+# Drives the headless wire test-client: log in as a Warlock, spawn a hostile mob at her
+# feet, cast a TIMED spell at it, and assert the SMSG cast sequence the gateway relays:
+#   SMSG_SPELL_START(cast_time) -> SMSG_SPELL_GO(targets.unit=mob) [NO 2nd START — the timed
+#   completion sends GO alone] -> [SMSG_SPELLNONMELEEDAMAGELOG] -> SMSG_SPELL_COOLDOWN
+# i.e. it deterministically verifies the cast-state-close (the START->GO pair the 5875
+# client needs) and the projectile trajectory (GO.unit_target) — the class of bug we used
+# to QA by hand through the wine client.
+#
+# Prereqs: local STDB node + gateway up, the TEST account provisioned
+# (`lyracore account create TEST`), and a Warlock named
+# "Ginger" (the client creates it on first run). Exits nonzero on assertion failure.
+#
+# Usage: adapters/lyracore/test-cast-flow.sh [spell_id] [mob_entry]
+set -uo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/adapter-env.sh" # two roots; cds to $LYRACORE_DIR
+
+source "$ADAPTER_DIR/scenario-lib.sh"
+SPELL="${1:-686}"   # 686 = Shadow Bolt (1.7s timed projectile)
+ENTRY="${2:-103}"   # 103 = Garrick Padfoot (a hostile Defias) — the cast target
+CHAR="Ginger"
+# ensure_ginger_home (issue #213), not a bare char_guid: Ginger is the shared long-lived fixture and
+# is not guaranteed to still be on lyracore (region-boundary logins can transfer her live row
+# to another shard; a stale duplicate from an old create-on-miss fallback can also shadow her at
+# login) — self-heals both before handing back a guid.
+CGUID=$(ensure_ginger_home "$CHAR")
+[ -z "$CGUID" ] && { echo "[test] character '$CHAR' not found in game_character" >&2; exit 1; }
+
+wire_build || exit 1
+TGT="$(mktemp -u /tmp/wc_target_XXXXXX)"; rm -f "$TGT"
+
+# Purge stale spawned mobs of this entry — PER GUID, spawn row + entity (the old compound-WHERE
+# DELETE was the documented silently-no-op CLI class, so this test LEAKED its Padfoot every run:
+# the spawn row resurrected it via the respawn pass and the strays mauled later tests' characters).
+for SG in $(spacetime sql "$DB" "SELECT guid FROM game_creature_spawn WHERE entry = $ENTRY" 2>/dev/null | grep -oE '[0-9]{15,}'); do
+  spacetime sql "$DB" "DELETE FROM game_creature_spawn WHERE guid = $SG" >/dev/null 2>&1
+  spacetime sql "$DB" "DELETE FROM game_world_entity WHERE guid = $SG" >/dev/null 2>&1
+done
+# ORPHAN entities too (spawn row already gone — a spawn-row-keyed loop misses them; live find):
+for SG in $(spacetime sql "$DB" "SELECT guid FROM game_world_entity WHERE entry = $ENTRY" 2>/dev/null | grep -oE '[0-9]{15,}'); do
+  spacetime sql "$DB" "DELETE FROM game_melee_attack WHERE attacker_guid = $SG" >/dev/null 2>&1
+  spacetime sql "$DB" "DELETE FROM game_world_entity WHERE guid = $SG" >/dev/null 2>&1
+done
+
+# Orchestrator: wait for the caster to be in-world, spawn the target at her feet, keep her
+# alive, then hand the wire client the target's exact guid (decoded-precise, no mangling).
+orchestrate() {
+  local GX="" GY="" MOB=""
+  for _ in $(seq 1 30); do
+    GX=$(spacetime sql "$DB" "SELECT x FROM game_world_entity WHERE guid=$CGUID" 2>&1 | grep -oE '\-?[0-9]+(\.[0-9]+)?' | tail -1)
+    [ -n "$GX" ] && break
+    sleep 1
+  done
+  [ -z "$GX" ] && { echo "[orch] $CHAR never went live" >&2; return 1; }
+  GY=$(spacetime sql "$DB" "SELECT y FROM game_world_entity WHERE guid=$CGUID" 2>&1 | grep -oE '\-?[0-9]+(\.[0-9]+)?' | tail -1)
+  spacetime call "$DB" debug_spawn_at_feet $CGUID $ENTRY 8 >/dev/null 2>&1
+  sleep 1
+  spacetime call "$DB" debug_set_health $CGUID 100000 >/dev/null 2>&1   # survive the cast
+  MOB=$(spacetime sql "$DB" "SELECT guid, x, y FROM game_world_entity WHERE entry=$ENTRY AND owner_guid=0" 2>&1 \
+        | awk -F'|' -v gx="$GX" -v gy="$GY" '$1 ~ /[0-9]/ {g=$1;x=$2+0;y=$3+0;dx=x-gx;dy=y-gy;d=dx*dx+dy*dy; if(best==""||d<best){best=d;bg=g}} END{gsub(/ /,"",bg);print bg}')
+  echo "[orch] target mob=$MOB near $CHAR=($GX,$GY)" >&2
+  echo "$MOB" > "$TGT"
+}
+
+orchestrate &
+ORCH=$!
+WIRE_TARGET_FILE="$TGT" timeout 120 "$WC" TEST "$CHAR" cast "$SPELL"
+RC=$?
+wait "$ORCH" 2>/dev/null || true
+# Cleanup the spawned mob: ENTITY AND SPAWN ROW (else the respawn pass resurrects it).
+MOBGUID=$(cat "$TGT" 2>/dev/null || echo "")
+if [ -n "$MOBGUID" ]; then
+  spacetime sql "$DB" "DELETE FROM game_creature_spawn WHERE guid = $MOBGUID" >/dev/null 2>&1 || true
+  spacetime sql "$DB" "DELETE FROM game_world_entity WHERE guid = $MOBGUID" >/dev/null 2>&1 || true
+fi
+rm -f "$TGT"
+exit $RC
