@@ -57,7 +57,160 @@ pub const DEFAULT_LOGON_ADDR: &str = "127.0.0.1:3724";
 /// the process allocator for hundreds of GiB (issue #210).
 const SMSG_COMPRESSED_MOVES_OPCODE: u16 = 0x02FB;
 const MAX_DECOMPRESSED_FRAME_BYTES: usize = 4 * 1024 * 1024;
-const FRAME_DIAGNOSTIC_BYTES: usize = 16;
+/// Also doubles as the #209 crash-dump body preview length (deliverable 1 asks for 64 bytes of the
+/// failing frame's body) — bumped from the original 16 so ONE constant drives both the inline
+/// error-message preview and the on-disk diagnostic, instead of two windows that could drift.
+const FRAME_DIAGNOSTIC_BYTES: usize = 64;
+/// How many trailing successfully-decoded frames [`FrameLog`] keeps for the #209 crash dump — enough
+/// to see the sequence leading into a failure without an unbounded dump file over a long session.
+const CRASH_RING_CAPACITY: usize = 32;
+/// Where a fatal per-session decode failure's diagnostic lands (issue #209 probe: "capture the exact
+/// byte sequence at the crash moment" instead of just knowing "it crashed"). Overridable so tests
+/// don't litter the real `/tmp/wire-crash/` and two concurrent test runs can't collide.
+fn crash_dump_dir() -> std::path::PathBuf {
+    std::env::var_os("WIRE_CRASH_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/wire-crash"))
+}
+
+/// One frame this session actually decoded: `declared_body_len` is the header's own size field
+/// (minus the 2-byte opcode); `actual_body_len` is how many body bytes the decoder actually consumed
+/// off the wire before returning. The two SHOULD always match — a mismatch would be exactly #209's
+/// hunted mechanism (a wrong declared size desyncing every later header) surfacing on a frame that
+/// nonetheless decoded "successfully", so it rides along in every ring-buffer entry rather than only
+/// being checked on failure.
+#[derive(Clone, Copy, Debug)]
+struct DecodedFrame {
+    opcode: u16,
+    declared_body_len: usize,
+    actual_body_len: usize,
+}
+
+/// Per-session crash-capture state (issue #209 probe, deliverable 1): a ring buffer of the last
+/// [`CRASH_RING_CAPACITY`] successfully-decoded frames, plus whatever [`read_guarded_world_message`]
+/// read of the CURRENT (possibly failing) frame's header/body before it gave up. [`WireClient::recv`]
+/// updates this on every attempt and — only at the point a decode failure actually ends the session
+/// (the panic path, the huge-alloc guard, or the accumulated-skip desync bailout) — dumps it under
+/// `crash_dump_dir()`, turning "it crashed" into the exact byte sequence that did it.
+struct FrameLog {
+    label: String,
+    ring: std::collections::VecDeque<DecodedFrame>,
+    last_header_raw: [u8; 4],
+    last_opcode: Option<u16>,
+    last_body_preview: Vec<u8>,
+}
+
+impl FrameLog {
+    fn new(label: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            ring: std::collections::VecDeque::with_capacity(CRASH_RING_CAPACITY),
+            last_header_raw: [0; 4],
+            last_opcode: None,
+            last_body_preview: Vec::new(),
+        }
+    }
+
+    /// Record what was read of the frame CURRENTLY being attempted, before it's known whether the
+    /// decode will succeed — so a header/payload read failure (no decoded opcode to blame) still
+    /// leaves the dump something to show.
+    fn record_attempt(&mut self, header_raw: [u8; 4], opcode: u16, body_preview: &[u8]) {
+        self.last_header_raw = header_raw;
+        self.last_opcode = Some(opcode);
+        self.last_body_preview = body_preview.to_vec();
+    }
+
+    fn record_decoded(&mut self, opcode: u16, declared_body_len: usize, actual_body_len: usize) {
+        if self.ring.len() == CRASH_RING_CAPACITY {
+            self.ring.pop_front();
+        }
+        self.ring.push_back(DecodedFrame { opcode, declared_body_len, actual_body_len });
+    }
+
+    /// Best-effort diagnostic dump for a decode failure that is about to end the session. Never
+    /// propagates its own I/O errors — a missing `/tmp` must not mask the REAL error this exists to
+    /// explain, so a write failure here is only ever logged to stderr.
+    fn dump(&self, err: &anyhow::Error) {
+        let dir = crash_dump_dir();
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            eprintln!("[wire-crash] could not create {dir:?}: {e}");
+            return;
+        }
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let path = dir.join(format!("{}-{ts}.txt", sanitize_label(&self.label)));
+
+        let mut out = String::new();
+        use std::fmt::Write as _;
+        let _ = writeln!(out, "session: {}", self.label);
+        let _ = writeln!(out, "error: {err:#}");
+        let _ = writeln!(out, "last {} decoded frames (oldest first):", self.ring.len());
+        for f in &self.ring {
+            let mismatch = if f.declared_body_len != f.actual_body_len { "  <-- MISMATCH" } else { "" };
+            let _ = writeln!(
+                out,
+                "  opcode=0x{:04X} declared_body_len={} actual_body_len={}{mismatch}",
+                f.opcode, f.declared_body_len, f.actual_body_len
+            );
+        }
+        let _ = writeln!(
+            out,
+            "failing header raw bytes: {}",
+            hex_bytes(&self.last_header_raw)
+        );
+        let _ = writeln!(
+            out,
+            "failing frame opcode: {}",
+            self.last_opcode.map(|o| format!("0x{o:04X}")).unwrap_or_else(|| "<unknown>".into())
+        );
+        let _ = writeln!(
+            out,
+            "failing body[0..{}]: {}",
+            self.last_body_preview.len(),
+            hex_bytes(&self.last_body_preview)
+        );
+
+        match std::fs::write(&path, out) {
+            Ok(()) => eprintln!("[wire-crash] dumped session diagnostic to {path:?}"),
+            Err(e) => eprintln!("[wire-crash] failed to write {path:?}: {e}"),
+        }
+    }
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        return "<empty>".to_string();
+    }
+    bytes.iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(" ")
+}
+
+/// Filenames must survive account names like `BENCH0042` unmodified and never escape
+/// `crash_dump_dir()` via a stray `/` or `..`.
+fn sanitize_label(label: &str) -> String {
+    label
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .collect()
+}
+
+/// A tail reader that counts the bytes actually pulled through it — wraps the post-preview portion
+/// of a frame's body so [`read_guarded_world_message`] can compare what the decoder actually consumed
+/// against what the header declared (see [`DecodedFrame`]). `Rc<Cell<_>>` is enough: this reader
+/// never crosses a thread boundary — it lives entirely inside one synchronous decode attempt.
+struct CountingRead<R> {
+    inner: R,
+    consumed: std::rc::Rc<std::cell::Cell<usize>>,
+}
+
+impl<R: Read> Read for CountingRead<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.consumed.set(self.consumed.get() + n);
+        Ok(n)
+    }
+}
 
 #[derive(Debug)]
 struct UnsafeServerFrame {
@@ -105,13 +258,23 @@ fn unsafe_frame(opcode: u16, payload_prefix: &[u8], reason: impl Into<String>) -
 /// Read the encrypted header and only the first few payload bytes before invoking the generated
 /// decoder. The rest of the payload streams straight through; cloning the pre-header cipher state
 /// lets the decoder see the original encrypted header while the live state advances exactly once.
-fn read_guarded_world_message<R: Read>(r: &mut R, dec: &mut DecrypterHalf) -> Result<WorldSmsg> {
+///
+/// `log` records the attempt (issue #209 crash-capture, deliverable 1) regardless of outcome: the
+/// header/opcode/body-preview are stashed BEFORE the decode is attempted (so a header/payload read
+/// failure still leaves something in the dump), and a successful decode is appended to the ring
+/// buffer with its declared vs. actually-consumed body length.
+fn read_guarded_world_message<R: Read>(
+    r: &mut R,
+    dec: &mut DecrypterHalf,
+    log: &mut FrameLog,
+) -> Result<WorldSmsg> {
     let mut parser_dec = dec.clone();
     let mut encrypted_header = [0u8; 4];
     r.read_exact(&mut encrypted_header)
         .map_err(|e| anyhow!("world frame header: {e}"))?;
     let header = dec.decrypt_server_header(encrypted_header);
     if header.size < 2 {
+        log.record_attempt(encrypted_header, header.opcode, &[]);
         return Err(unsafe_frame(
             header.opcode,
             &[],
@@ -127,6 +290,7 @@ fn read_guarded_world_message<R: Read>(r: &mut R, dec: &mut DecrypterHalf) -> Re
     let mut preview = vec![0u8; preview_len];
     r.read_exact(&mut preview)
         .map_err(|e| anyhow!("world frame payload: {e}"))?;
+    log.record_attempt(encrypted_header, header.opcode, &preview);
 
     if header.opcode == SMSG_COMPRESSED_MOVES_OPCODE {
         if payload_len < 4 {
@@ -151,14 +315,19 @@ fn read_guarded_world_message<R: Read>(r: &mut R, dec: &mut DecrypterHalf) -> Re
     }
 
     let remaining = payload_len - preview_len;
-    let mut frame = Cursor::new(encrypted_header)
-        .chain(Cursor::new(preview.as_slice()))
-        .chain(r.take(remaining as u64));
+    let consumed = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let tail = CountingRead { inner: r.take(remaining as u64), consumed: consumed.clone() };
+    let mut frame = Cursor::new(encrypted_header).chain(Cursor::new(preview.as_slice())).chain(tail);
     let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         WorldSmsg::read_encrypted(&mut frame, &mut parser_dec)
     }));
     match decoded {
-        Ok(result) => result.map_err(anyhow::Error::new),
+        Ok(Ok(m)) => {
+            let actual_body_len = preview_len + consumed.get();
+            log.record_decoded(header.opcode, payload_len, actual_body_len);
+            Ok(m)
+        }
+        Ok(Err(e)) => Err(anyhow::Error::new(e)),
         Err(payload) => Err(unsafe_frame(
             header.opcode,
             &preview,
@@ -285,6 +454,10 @@ pub struct WireClient {
     /// exactly what every pre-#180 caller of this client still gets). Used by the `login-queue`
     /// probe to assert the FIFO position sequence a queued connection actually observed.
     pub queue_positions_seen: Vec<u32>,
+    /// #209 crash-capture state (deliverable 1): the ring buffer of recently-decoded frames plus the
+    /// current attempt's raw bytes, dumped to `crash_dump_dir()` if a decode ever proves fatal to
+    /// this session. See [`FrameLog`].
+    frame_log: FrameLog,
 }
 
 impl WireClient {
@@ -340,8 +513,12 @@ impl WireClient {
         .write_unencrypted_client(&mut stream)?;
 
         let mut queue_positions_seen = Vec::new();
+        // The handshake gets its own `FrameLog` (there's no `Self` yet to own one) and carries it
+        // forward into the constructed client below — a queue-wait storm's frames are as legitimate
+        // a lead-in to a later crash as anything post-login, so nothing is thrown away here.
+        let mut frame_log = FrameLog::new(account);
         loop {
-            match read_guarded_world_message(&mut stream, &mut dec)? {
+            match read_guarded_world_message(&mut stream, &mut dec, &mut frame_log)? {
                 WorldSmsg::SMSG_AUTH_RESPONSE(r) => match *r {
                     SMSG_AUTH_RESPONSE::AuthOk { .. } => break,
                     SMSG_AUTH_RESPONSE::AuthWaitQueue { queue_position } => {
@@ -373,6 +550,7 @@ impl WireClient {
             init_factions: Vec::new(),
             init_faction_flags: Vec::new(),
             queue_positions_seen,
+            frame_log,
         })
     }
 
@@ -475,7 +653,7 @@ impl WireClient {
     pub fn recv(&mut self) -> Result<WorldSmsg> {
         let mut skipped = 0u32;
         loop {
-            match read_guarded_world_message(&mut self.stream, &mut self.dec) {
+            match read_guarded_world_message(&mut self.stream, &mut self.dec, &mut self.frame_log) {
                 Ok(m) => {
                     self.note_guids(&m);
                     // The real 5875 client answers a cross-map transfer (SMSG_NEW_WORLD after
@@ -494,6 +672,7 @@ impl WireClient {
                     // harness keep every other player alive (issue #210).
                     if is_unsafe_server_frame(&e) {
                         eprintln!("[wire] {e}");
+                        self.frame_log.dump(&e);
                         let _ = self.stream.shutdown(Shutdown::Both);
                         return Err(e);
                     }
@@ -516,7 +695,14 @@ impl WireClient {
                     }
                     skipped += 1;
                     if skipped > 64 {
-                        return Err(anyhow!("recv: stream desync/closed after 64 skips: {e}"));
+                        // 64 STRAIGHT ordinary `read_encrypted` errors (as opposed to the ONE-shot
+                        // panic/huge-alloc guard above) is the OTHER shape a real desync can take: no
+                        // single frame trips a guard, but nothing ever decodes cleanly again. Dump the
+                        // same diagnostic — this is exactly the "any read_encrypted error" case #209's
+                        // probe asks to capture, just detected after it accumulates instead of once.
+                        let terminal = anyhow!("recv: stream desync/closed after 64 skips: {e}");
+                        self.frame_log.dump(&terminal);
+                        return Err(terminal);
                     }
                     continue;
                 }
@@ -968,6 +1154,10 @@ mod tests {
     const MAX_DECOMPRESSED_FRAME_BYTES: u32 = 4 * 1024 * 1024;
 
     fn client_receiving_frames(frames: &[(u16, &[u8])]) -> WireClient {
+        client_receiving_frames_labeled(frames, "TEST")
+    }
+
+    fn client_receiving_frames_labeled(frames: &[(u16, &[u8])], label: &str) -> WireClient {
         let (_, crypto) = ProofSeed::new()
             .into_client_header_crypto(&ns("TEST").unwrap(), [7; 40], 0x1234_5678);
         let (mut enc, dec) = crypto.split();
@@ -997,6 +1187,7 @@ mod tests {
             init_factions: Vec::new(),
             init_faction_flags: Vec::new(),
             queue_positions_seen: Vec::new(),
+            frame_log: FrameLog::new(label),
         }
     }
 
@@ -1048,5 +1239,113 @@ mod tests {
         ]);
         assert!(matches!(client.recv().unwrap(), WorldSmsg::SMSG_LOGOUT_COMPLETE));
         assert!(matches!(client.recv().unwrap(), WorldSmsg::SMSG_LOGOUT_CANCEL_ACK));
+    }
+
+    /// Remove every file this test wrote so re-running the suite doesn't accumulate cruft in the
+    /// real `/tmp/wire-crash/` (these tests deliberately exercise the REAL dump path, not an
+    /// env-var-overridden temp dir, since `crash_dump_dir()` reads `WIRE_CRASH_DIR` once per call
+    /// and mutating process env vars from parallel test threads would just trade one race for
+    /// another).
+    fn cleanup_dumps_labeled(label: &str) {
+        let dir = crash_dump_dir();
+        let prefix = format!("{}-", sanitize_label(label));
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                if entry.file_name().to_string_lossy().starts_with(&prefix) {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
+
+    /// Issue #209 deliverable 1: on the SAME "decoder panicked" failure
+    /// [`corrupt_compressed_frame_becomes_a_diagnostic_instead_of_a_decoder_panic`] pins, the session
+    /// must ALSO dump a file recording the frames that led into it — not just the inline error
+    /// string. This is the actual point of the capture: turning "it crashed" into "here is the exact
+    /// byte sequence", per two clean decodes then the corrupt one.
+    #[test]
+    fn a_fatal_decode_dumps_the_preceding_ring_and_the_failing_frame_to_disk() {
+        let label = "CRASHTEST-basic";
+        cleanup_dumps_labeled(label);
+
+        let mut corrupt = 32u32.to_le_bytes().to_vec();
+        corrupt.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+        let mut client = client_receiving_frames_labeled(
+            &[
+                (0x004D, &[]),                                 // SMSG_LOGOUT_COMPLETE (clean)
+                (0x004F, &[]),                                 // SMSG_LOGOUT_CANCEL_ACK (clean)
+                (SMSG_COMPRESSED_MOVES_OPCODE, &corrupt), // the fatal one
+            ],
+            label,
+        );
+        assert!(matches!(client.recv().unwrap(), WorldSmsg::SMSG_LOGOUT_COMPLETE));
+        assert!(matches!(client.recv().unwrap(), WorldSmsg::SMSG_LOGOUT_CANCEL_ACK));
+        let err = client.recv().expect_err("the corrupt frame must end the session");
+        assert!(is_unsafe_server_frame(&err));
+
+        let dir = crash_dump_dir();
+        let prefix = format!("{}-", sanitize_label(label));
+        let dumped: Vec<_> = std::fs::read_dir(&dir)
+            .expect("dump dir must exist after a fatal decode")
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with(&prefix))
+            .collect();
+        assert_eq!(dumped.len(), 1, "expected exactly one dump file for this session's one failure");
+        let text = std::fs::read_to_string(dumped[0].path()).unwrap();
+
+        assert!(text.contains(&format!("session: {label}")), "missing session label: {text}");
+        assert!(text.contains("last 2 decoded frames"), "missing ring size header: {text}");
+        assert!(
+            text.contains("opcode=0x004D declared_body_len=0 actual_body_len=0"),
+            "missing first ring entry: {text}"
+        );
+        assert!(
+            text.contains("opcode=0x004F declared_body_len=0 actual_body_len=0"),
+            "missing second ring entry: {text}"
+        );
+        assert!(!text.contains("MISMATCH"), "no real mismatch occurred here: {text}");
+        assert!(text.contains("failing frame opcode: 0x02FB"), "missing failing opcode: {text}");
+        assert!(
+            text.contains("failing body[0..8]: 20 00 00 00 DE AD BE EF"),
+            "missing failing body preview: {text}"
+        );
+        assert!(text.contains("decoder panicked"), "missing the actual error text: {text}");
+
+        cleanup_dumps_labeled(label);
+    }
+
+    /// The ring buffer is BOUNDED (`CRASH_RING_CAPACITY`) — a long-lived session must not grow its
+    /// dump file without bound; only the frames closest to the crash matter for this probe.
+    #[test]
+    fn the_ring_buffer_keeps_only_the_last_32_frames() {
+        let label = "CRASHTEST-ring-cap";
+        cleanup_dumps_labeled(label);
+
+        let mut frames: Vec<(u16, &[u8])> = vec![(0x004D, &[]); 40]; // 40 clean frames > capacity
+        let mut corrupt = 32u32.to_le_bytes().to_vec();
+        corrupt.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+        frames.push((SMSG_COMPRESSED_MOVES_OPCODE, &corrupt));
+        let mut client = client_receiving_frames_labeled(&frames, label);
+
+        for _ in 0..40 {
+            client.recv().expect("the first 40 frames all decode cleanly");
+        }
+        let err = client.recv().expect_err("frame 41 is the fatal corrupt one");
+        assert!(is_unsafe_server_frame(&err));
+
+        let dir = crash_dump_dir();
+        let prefix = format!("{}-", sanitize_label(label));
+        let dumped = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .find(|e| e.file_name().to_string_lossy().starts_with(&prefix))
+            .expect("a dump file must exist");
+        let text = std::fs::read_to_string(dumped.path()).unwrap();
+
+        assert!(text.contains("last 32 decoded frames"), "ring must cap at 32: {text}");
+        let entry_count = text.matches("opcode=0x004D").count();
+        assert_eq!(entry_count, 32, "expected exactly 32 surviving ring entries, got {entry_count}");
+
+        cleanup_dumps_labeled(label);
     }
 }
