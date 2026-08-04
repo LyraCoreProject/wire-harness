@@ -12,7 +12,7 @@
 # as written is not runnable, and a "pass" from random killing means nothing. This script uses the
 # gateway's deterministic fault injector instead (`gateway/src/world/transfer.rs`):
 #
-#     GW_TRANSFER_ABORT_AFTER=<step>   # the named step COMMITS, then the process abort()s
+#     LYRACORE_TRANSFER_ABORT_AFTER=<step>   # the named step COMMITS, then the process abort()s
 #
 # For each of the seven steps it: restarts the gateway with the injection + a two-database shard
 # map, drives Ginger through the Deadmines portal (the live cross-database hop), waits for the
@@ -42,13 +42,13 @@
 # headless crash matrix (`world::tests::a_gateway_kill_at_every_transfer_step_recovers_to_...`).
 #
 # STATUS: RUN, and green on both boundaries.
-#   instance  (spacetime-core ↔ spacetime-instances, map 36) — 8/8, 2026-07-27, after #81's fix.
-#   continent (spacetime-core ↔ spacetime-world-1,   map 1)  — #70; see that issue for the run.
+#   instance  (lyracore ↔ lyracore-instances, map 36) — 8/8, 2026-07-27, after #81's fix.
+#   continent (lyracore ↔ lyracore-world-1,   map 1)  — #70; see that issue for the run.
 # It reached 8/8 on the instance boundary only after #91/#98 (staging) and #81 (a real product
 # defect this matrix is what found). Treat a change to it as a change to the instrument Phase B's
 # crash guarantees rest on.
 #
-# TOPOLOGY: the gateway runs with `GW_REALM_CORE` (#100), so the character→shard index this exercises
+# TOPOLOGY: the gateway runs with `LYRACORE_REALM_CORE` (#100), so the character→shard index this exercises
 # is realm-core's — the one production reads — rather than the default shard's own copy. The instance
 # boundary therefore runs three databases and the continent boundary four.
 #
@@ -57,11 +57,11 @@
 #       spacetime publish -s local -p module --build-options='--features=debug_reducers' <db>
 #       spacetime call <db> claim_operator
 #   - its world data loaded:  DB=<db> bash scripts/import-world.sh
-#     (instance boundary needs map 36 on spacetime-instances; continent needs map 1 on
-#      spacetime-world-1)
+#     (instance boundary needs map 36 on lyracore-instances; continent needs map 1 on
+#      lyracore-world-1)
 #
 # NOTE: this test OWNS the gateway process for its duration — it kills and restarts it seven times
-# and leaves it running with GW_SHARD_MAP set (same precedent as test-playerbots.sh's restart step).
+# and leaves it running with LYRACORE_SHARD_MAP set (same precedent as test-playerbots.sh's restart step).
 # Run it when nobody is playing.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -76,21 +76,21 @@ source tools/wire-client/scenario-lib.sh
 BOUNDARY="${XCRASH_BOUNDARY:-instance}"
 case "$BOUNDARY" in
   instance)
-    IDB="${IDB:-spacetime-instances}"      # the instance shard (gateway/src/config.rs:63 convention)
-    SHARD_MAP="${GW_SHARD_MAP:-36:*=spacetime-instances}"
+    IDB="${IDB:-lyracore-instances}"      # the instance shard (gateway/src/config.rs:63 convention)
+    SHARD_MAP="${LYRACORE_SHARD_MAP:-36:*=lyracore-instances}"
     DEST_MAP=36
     # "Deadmines - Entering" → map 36. A real areatrigger, so this drives the crossing exactly as a
     # player does.
     DM_TRIGGER=78
     ;;
   continent)
-    IDB="${IDB:-spacetime-world-1}"
+    IDB="${IDB:-lyracore-world-1}"
     # THE `36:*` RULE STAYS, even though this boundary never touches map 36. Without it dungeon
-    # instances resolve to `spacetime-core`, whose `game_config.hosts_instances` is FALSE, and the
+    # instances resolve to `lyracore`, whose `game_config.hosts_instances` is FALSE, and the
     # gateway REFUSES TO START rather than degrade (issue #48's startup check — it fired on the
     # first continent run and is why this line is not just "1:*=..."). So this boundary runs on
     # THREE databases, which is also closer to production than the instance boundary's two.
-    SHARD_MAP="${GW_SHARD_MAP:-36:*=spacetime-instances, 1:*=spacetime-world-1}"
+    SHARD_MAP="${LYRACORE_SHARD_MAP:-36:*=lyracore-instances, 1:*=lyracore-world-1}"
     DEST_MAP=1
     # There is NO map-0 → map-1 areatrigger in the dump, and no boat/zeppelin/taxi anywhere in this
     # codebase (that is #69, and it is build rather than reuse). So the crossing is driven by a
@@ -105,7 +105,7 @@ case "$BOUNDARY" in
     exit 2
     ;;
 esac
-REALM_CORE="${GW_REALM_CORE:-realm-core}"   # issue #100: the matrix runs the PRODUCTION topology
+REALM_CORE="${LYRACORE_REALM_CORE:-lyracore-realm}"   # issue #100: the matrix runs the PRODUCTION topology
 GWLOG=/tmp/gw_xcrash.log
 PAD_X=-8930.0; PAD_Y=-250.0; PAD_Z=80.0    # the open-world staging pad (test-bot-deadmines.sh)
 FAILED=0
@@ -192,14 +192,14 @@ TOKEN=$(grep -oP 'spacetimedb_token = "\K[^"]+' ~/.config/spacetime/cli.toml || 
 # otherwise every suite run silently leaves the realm on the matrix's topology and binary, and the
 # next thing anyone measures (a bench, a manual login, the next suite run's first test) is measuring
 # a configuration nobody chose. Same failure the playerbots restart caused mid-suite, just at the end.
-_ORIG_PID=$(pgrep -x gateway | head -1)
+_ORIG_PID=$(pgrep -x lyracore-gatewa | head -1)
 if [ -n "${_ORIG_PID:-}" ]; then
   _ORIG_BIN=$(readlink -f "/proc/$_ORIG_PID/exe" 2>/dev/null); _ORIG_BIN=${_ORIG_BIN% (deleted)}
   mapfile -t _ORIG_ENV < <(tr '\0' '\n' < "/proc/$_ORIG_PID/environ" 2>/dev/null | grep -E '^(GW_[A-Z_]*|RUST_LOG)=')
 fi
 restore_original_gateway() {
   [ -n "${_ORIG_BIN:-}" ] && [ -x "${_ORIG_BIN:-}" ] || return 0
-  pkill -x gateway 2>/dev/null; sleep 1
+  pkill -x lyracore-gatewa 2>/dev/null; sleep 1
   setsid nohup env "${_ORIG_ENV[@]}" "$_ORIG_BIN" </dev/null >/tmp/gw_restored.log 2>&1 &
   local i
   for i in $(seq 1 25); do
@@ -210,23 +210,23 @@ restore_original_gateway() {
 }
 trap restore_original_gateway EXIT
 gw_start() { # $1 = step to abort after ("" = a clean gateway)
-  pkill -x gateway 2>/dev/null   # -x, never -f: `-f` self-matches the launching shell (danger-zones §3)
+  pkill -x lyracore-gatewa 2>/dev/null   # -x, never -f: `-f` self-matches the launching shell (danger-zones §3)
   sleep 1
   : >"$GWLOG"
   # Bash < 4.4 errors on "${arr[@]}" for an empty array under `set -u`; the ${a[@]+...} guard is the
   # portable way to say "expand only if non-empty".
   local -a inject=()
-  [ -n "${1:-}" ] && inject=(GW_TRANSFER_ABORT_AFTER="$1")
-  # GW_REALM_CORE IS PART OF THE PRODUCTION SHAPE (issue #100). Without it `realm_core()` falls back
+  [ -n "${1:-}" ] && inject=(LYRACORE_TRANSFER_ABORT_AFTER="$1")
+  # LYRACORE_REALM_CORE IS PART OF THE PRODUCTION SHAPE (issue #100). Without it `realm_core()` falls back
   # to the DEFAULT shard, so the character→shard index every routing decision consults is
-  # spacetime-core's own copy rather than realm-core's — i.e. the matrix was validating a topology
+  # lyracore's own copy rather than realm-core's — i.e. the matrix was validating a topology
   # the server does not run in, and #81 (a routing defect found BY this matrix) lived in exactly that
   # code. Also makes `publish_shard_index`, a step the matrix injects a crash after, write to a real
   # target instead of a no-op.
-  setsid nohup env GW_AOI=1 GW_SHARD_MAP="$SHARD_MAP" GW_REALM_CORE="$REALM_CORE" \
-    GW_COORDINATOR_TOKEN="$TOKEN" \
-    RUST_LOG=info,gateway::world=debug ${inject[@]+"${inject[@]}"} \
-    ./target/debug/gateway </dev/null >"$GWLOG" 2>&1 &
+  setsid nohup env LYRACORE_AOI=1 LYRACORE_SHARD_MAP="$SHARD_MAP" LYRACORE_REALM_CORE="$REALM_CORE" \
+    LYRACORE_COORDINATOR_TOKEN="$TOKEN" \
+    RUST_LOG=info,lyracore_gateway::world=debug ${inject[@]+"${inject[@]}"} \
+    ./target/debug/lyracore-gateway </dev/null >"$GWLOG" 2>&1 &
   local i
   for i in $(seq 1 25); do
     grep -q 'world listening' "$GWLOG" && { sleep 2; return 0; }
@@ -236,7 +236,7 @@ gw_start() { # $1 = step to abort after ("" = a clean gateway)
   tail -5 "$GWLOG" >&2
   return 1
 }
-gw_dead() { ! pgrep -x gateway >/dev/null 2>&1; }
+gw_dead() { ! pgrep -x lyracore-gatewa >/dev/null 2>&1; }
 wait_for_gw_death() { # $1=secs
   local i
   for i in $(seq 1 "$1"); do gw_dead && return 0; sleep 1; done
@@ -278,7 +278,7 @@ bring_home() {
   # Only ever drop the copy on the shard that is NOT home, and only when home still holds one — so a
   # bug here can never destroy the last durable copy of the fixture. `$guid` is always Ginger's,
   # resolved by name on '$DB' and checked non-empty before the matrix starts, so this can never name
-  # another character — which matters now the destination can be `spacetime-world-1`, a database
+  # another character — which matters now the destination can be `lyracore-world-1`, a database
   # holding a real continent and a second fixture (Kaltest, guid 12).
   #
   # An UNREADABLE destination refuses rather than deletes: `db_count` answers -1 on a failed query,
@@ -377,7 +377,7 @@ bring_home() {
 
 # ---------- preflight ----------
 cargo build -q -p wire-client || { echo "[xcrash] wire-client build failed" >&2; exit 2; }
-cargo build -q -p spacetime-core-gateway || { echo "[xcrash] gateway build failed" >&2; exit 2; }
+cargo build -q -p lyracore-gateway || { echo "[xcrash] gateway build failed" >&2; exit 2; }
 [ -n "$TOKEN" ] || { echo "[xcrash] no spacetimedb_token in ~/.config/spacetime/cli.toml" >&2; exit 2; }
 
 if ! spacetime sql "$IDB" "SELECT COUNT(*) AS n FROM game_character" >/dev/null 2>&1; then
@@ -404,7 +404,7 @@ echo "[xcrash] boundary=$BOUNDARY  Ginger=$GINGER  world='$DB'  destination='$ID
 declare -a MATRIX=()
 for STEP in "${STEPS[@]}"; do
   echo
-  echo "──────── GW_TRANSFER_ABORT_AFTER=$STEP ────────"
+  echo "──────── LYRACORE_TRANSFER_ABORT_AFTER=$STEP ────────"
   STEP_FAILED=0
   note() { echo "[xcrash][$STEP] $*"; }
   bad()  { echo "[xcrash][$STEP] ASSERT FAIL: $*" >&2; STEP_FAILED=1; FAILED=1; }
@@ -458,7 +458,7 @@ for STEP in "${STEPS[@]}"; do
       tail -8 "$GWLOG" >&2
     fi
   else
-    bad "gateway still alive 45s after the portal fired — GW_TRANSFER_ABORT_AFTER=$STEP never triggered (typo'd step name? transfer never routed cross-database? check $GWLOG for 'names no transfer step')"
+    bad "gateway still alive 45s after the portal fired — LYRACORE_TRANSFER_ABORT_AFTER=$STEP never triggered (typo'd step name? transfer never routed cross-database? check $GWLOG for 'names no transfer step')"
     grep -E 'transfer |names no transfer step' "$GWLOG" | tail -5 >&2
   fi
   stay_stop

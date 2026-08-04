@@ -9,7 +9,7 @@
 # navigation): debug_accept_quest -> debug_kill_nearest (the real kill-credit path) -> debug_turn_in.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-DB=spacetime-core
+DB=lyracore
 source tools/wire-client/scenario-lib.sh
 
 QCHAR=Realquesttester

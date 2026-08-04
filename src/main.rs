@@ -40,14 +40,20 @@ fn main() -> Result<()> {
     // No mode at all is the M1 login smoke (we already printed M1 OK). A mode NOBODY claims
     // must bail: a silent Ok(()) here turns a renamed/typo'd mode into a green suite entry.
     let Some(mode) = mode else { return Ok(()) };
-    let mcx = modes::ModeCtx { account: &account, password: &password, char_name: &char_name };
+    let mcx = modes::ModeCtx {
+        account: &account,
+        password: &password,
+        char_name: &char_name,
+    };
     if modes::dispatch(&mode, &mut c, &mut args, &mcx)? {
         return Ok(());
     }
 
     let spell_id: u32 = match mode.parse() {
         Ok(id) => id,
-        Err(_) => bail!("unknown mode {mode:?} — no family dispatcher claimed it and it is not an M2 spell-id"),
+        Err(_) => bail!(
+            "unknown mode {mode:?} — no family dispatcher claimed it and it is not an M2 spell-id"
+        ),
     };
 
     // ---- M2: the orchestrator spawns a mob at Ginger's feet (she must be live) and writes
@@ -72,9 +78,9 @@ fn main() -> Result<()> {
     let target_deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
     let mob = loop {
         match c.recv() {
-            Ok(_) => {}                                             // drained; gateway stays happy
-            Err(e) if wire_client::is_read_timeout(&e) => {}        // quiet pad — keep waiting
-            Err(e) => return Err(e),                                // real stream break
+            Ok(_) => {}                                      // drained; gateway stays happy
+            Err(e) if wire_client::is_read_timeout(&e) => {} // quiet pad — keep waiting
+            Err(e) => return Err(e),                         // real stream break
         }
         if let Ok(s) = std::fs::read_to_string(&target_file) {
             if let Ok(g) = s.trim().parse::<u64>() {
@@ -152,7 +158,11 @@ fn main() -> Result<()> {
             Smsg::SMSG_SPELL_GO(g) if g.caster.guid() == c.self_guid => {
                 go_spell = Some(g.spell);
                 go_hits = g.hits.iter().map(|h| h.guid()).collect();
-                go_unit = g.targets.target_flags.get_unit().map(|u| u.unit_target.guid());
+                go_unit = g
+                    .targets
+                    .target_flags
+                    .get_unit()
+                    .map(|u| u.unit_target.guid());
                 go_at = Some(std::time::Instant::now());
             }
             Smsg::SMSG_SPELLNONMELEEDAMAGELOG(d) => {
@@ -194,7 +204,11 @@ fn main() -> Result<()> {
         }
         // Pushback-mode retry: the cast completed (GO) with no DELAYED slide — the mob whiffed the
         // window. Open a fresh window (up to 3 total) instead of failing on swing-timing luck.
-        if expect_interrupt && delayed_count == 0 && go_spell == Some(spell_id) && pushback_attempts < 5 {
+        if expect_interrupt
+            && delayed_count == 0
+            && go_spell == Some(spell_id)
+            && pushback_attempts < 5
+        {
             pushback_attempts += 1;
             go_spell = None;
             println!("[wire] pushback window {pushback_attempts} saw no DELAYED — re-casting…");
@@ -212,7 +226,9 @@ fn main() -> Result<()> {
         // least one DELAYED slide arrived, and the cast still completed with GO.
         let mut fails: Vec<String> = vec![];
         if begin_timer != Some(1700) {
-            fails.push(format!("begin SMSG_SPELL_START.timer = {begin_timer:?}, want Some(1700)"));
+            fails.push(format!(
+                "begin SMSG_SPELL_START.timer = {begin_timer:?}, want Some(1700)"
+            ));
         }
         if delayed_count == 0 {
             fails.push("NO SMSG_SPELL_DELAYED — the mob's mid-cast damage produced no pushback slide (039)".into());
@@ -237,13 +253,17 @@ fn main() -> Result<()> {
 
     let mut fails: Vec<String> = vec![];
     if begin_timer != Some(1700) {
-        fails.push(format!("begin SMSG_SPELL_START.timer = {begin_timer:?}, want Some(1700)"));
+        fails.push(format!(
+            "begin SMSG_SPELL_START.timer = {begin_timer:?}, want Some(1700)"
+        ));
     }
     if completion_start {
         fails.push("UNEXPECTED completion SMSG_SPELL_START(timer=0) — a TIMED completion must send GO ALONE (the begin START already opened the bar). A 2nd START(0) resets the cast bar to a zero-length cast → 'stuck on full'. The relay gates the START on !is_completion.".into());
     }
     if go_spell != Some(spell_id) {
-        fails.push(format!("SMSG_SPELL_GO.spell = {go_spell:?}, want Some({spell_id})"));
+        fails.push(format!(
+            "SMSG_SPELL_GO.spell = {go_spell:?}, want Some({spell_id})"
+        ));
     }
     if go_unit != Some(mob) {
         fails.push(format!(
@@ -251,7 +271,9 @@ fn main() -> Result<()> {
         ));
     }
     if go_hits != vec![mob] {
-        fails.push(format!("SMSG_SPELL_GO.hits = {go_hits:x?}, want [{mob:#x}]"));
+        fails.push(format!(
+            "SMSG_SPELL_GO.hits = {go_hits:x?}, want [{mob:#x}]"
+        ));
     }
     // STALE-ASSERT FIX (2026-07-16): the relay sends SMSG_SPELL_COOLDOWN ONLY for a spell with a
     // REAL cooldown (mangos parity — a per-cast cooldown=0 packet STUCK the client's action button:

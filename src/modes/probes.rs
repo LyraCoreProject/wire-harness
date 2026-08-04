@@ -122,8 +122,14 @@ fn char_enum_gear(
     let (k, world_addr) = logon(account, password)?;
     let mut c = WireClient::connect_world(&world_addr, account, k)?;
     let chars = c.char_enum_gear()?;
-    let Some((_, _, display_ids)) = chars.iter().find(|(_, n, _)| n.eq_ignore_ascii_case(char_name)) else {
-        bail!("char-enum-gear: character {char_name:?} not found in SMSG_CHAR_ENUM ({} chars)", chars.len());
+    let Some((_, _, display_ids)) = chars
+        .iter()
+        .find(|(_, n, _)| n.eq_ignore_ascii_case(char_name))
+    else {
+        bail!(
+            "char-enum-gear: character {char_name:?} not found in SMSG_CHAR_ENUM ({} chars)",
+            chars.len()
+        );
     };
     let got = display_ids.get(slot).copied().unwrap_or(0);
     println!("[probe] SMSG_CHAR_ENUM {char_name} slot {slot} display_id={got}");
@@ -138,11 +144,15 @@ fn char_enum_gear(
         None => got != 0,
     };
     if pass {
-        let desc = want.map(|w| format!("=={w}")).unwrap_or_else(|| "!=0".into());
+        let desc = want
+            .map(|w| format!("=={w}"))
+            .unwrap_or_else(|| "!=0".into());
         println!("[wire] CHAR-ENUM-GEAR PASS \u{2713}  {char_name} slot {slot} display_id={got} ({desc})");
         return Ok(());
     }
-    let desc = want.map(|w| format!("want {w}, got {got}")).unwrap_or_else(|| format!("want non-zero, got 0 (naked)"));
+    let desc = want
+        .map(|w| format!("want {w}, got {got}"))
+        .unwrap_or_else(|| format!("want non-zero, got 0 (naked)"));
     bail!("char-enum-gear: {char_name} slot {slot}: {desc}");
 }
 
@@ -162,7 +172,10 @@ fn char_create_gear(
     eprintln!("[wire] char-create-gear: create {char_name}, check slot {slot} WITHOUT logging in…");
     let (k, world_addr) = logon(account, password)?;
     let mut c = WireClient::connect_world(&world_addr, account, k)?;
-    if c.char_enum()?.iter().any(|(_, n, _)| n.eq_ignore_ascii_case(char_name)) {
+    if c.char_enum()?
+        .iter()
+        .any(|(_, n, _)| n.eq_ignore_ascii_case(char_name))
+    {
         bail!("char-create-gear: {char_name:?} already exists — pass a throwaway name (it may have logged in before, which would mask the creation-time grant)");
     }
     let guid = c.create_or_find_char(char_name, Class::Warrior)?;
@@ -228,7 +241,7 @@ fn char_delete(
 // — no character, no world entry: the #180 gate sits before either). Requires:
 //   - the N accounts already provisioned (`gateway provision`, or `scripts/run-capacity-bench.sh`'s
 //     provisioning step for a larger N) — this probe does not provision anything itself;
-//   - the gateway running with a small `GW_MAX_SESSIONS` (< N), so some of these are forced to
+//   - the gateway running with a small `LYRACORE_MAX_SESSIONS` (< N), so some of these are forced to
 //     queue. Against an unconfigured gateway every connection admits immediately and this still
 //     passes (`queue_positions_seen` empty for all of them) — a legitimate, if less interesting, run.
 //
@@ -246,7 +259,7 @@ fn login_queue_probe(
         .ok_or_else(|| anyhow!("usage: login-queue <N> — missing/invalid <N>"))?;
     eprintln!(
         "[wire] login-queue: {n} concurrent world logins as {account_prefix}0..{account_prefix}{} \
-         (accounts must already be provisioned; gateway should be running with a small GW_MAX_SESSIONS)",
+         (accounts must already be provisioned; gateway should be running with a small LYRACORE_MAX_SESSIONS)",
         n.saturating_sub(1)
     );
 
@@ -271,7 +284,9 @@ fn login_queue_probe(
                     println!("[probe] login-queue[{i}]: admitted immediately (no AuthWaitQueue)");
                 } else {
                     queued_count += 1;
-                    println!("[probe] login-queue[{i}]: queued at positions {positions:?} -> admitted");
+                    println!(
+                        "[probe] login-queue[{i}]: queued at positions {positions:?} -> admitted"
+                    );
                     if positions.windows(2).any(|w| w[1] > w[0]) {
                         fails.push(format!(
                             "login-queue[{i}]: position sequence {positions:?} went UP at some point \
@@ -306,9 +321,17 @@ fn initial_spells(
     args: &mut dyn Iterator<Item = String>,
     _mcx: &ModeCtx<'_>,
 ) -> Result<()> {
-    println!("[probe] SMSG_INITIAL_SPELLS ({} spells) = {:?}", c.initial_spells.len(), c.initial_spells);
+    println!(
+        "[probe] SMSG_INITIAL_SPELLS ({} spells) = {:?}",
+        c.initial_spells.len(),
+        c.initial_spells
+    );
     let want: Vec<u32> = args.filter_map(|s: String| s.parse().ok()).collect();
-    let missing: Vec<u32> = want.iter().copied().filter(|id| !c.initial_spells.contains(id)).collect();
+    let missing: Vec<u32> = want
+        .iter()
+        .copied()
+        .filter(|id| !c.initial_spells.contains(id))
+        .collect();
     if !missing.is_empty() {
         eprintln!("[wire] FAIL: missing initial spells {missing:?}");
         std::process::exit(1);
@@ -327,17 +350,33 @@ fn init_factions(
     args: &mut dyn Iterator<Item = String>,
     mcx: &ModeCtx<'_>,
 ) -> Result<()> {
-    let ModeCtx { account, password, char_name } = *mcx;
-    let index: usize = args.next().and_then(|s| s.parse().ok()).expect("usage: init-factions <index> <want_standing>");
-    let want: i32 = args.next().and_then(|s| s.parse().ok()).expect("usage: init-factions <index> <want_standing>");
+    let ModeCtx {
+        account,
+        password,
+        char_name,
+    } = *mcx;
+    let index: usize = args
+        .next()
+        .and_then(|s| s.parse().ok())
+        .expect("usage: init-factions <index> <want_standing>");
+    let want: i32 = args
+        .next()
+        .and_then(|s| s.parse().ok())
+        .expect("usage: init-factions <index> <want_standing>");
     // Optional (195B): also assert the slot's AT_WAR flag bit (0x02) — pass 1/0. Absent = don't check.
     let want_atwar: Option<u8> = args.next().and_then(|s| s.parse().ok());
-    eprintln!("[wire] init-factions: relogging {char_name} to capture a fresh SMSG_INITIALIZE_FACTIONS…");
+    eprintln!(
+        "[wire] init-factions: relogging {char_name} to capture a fresh SMSG_INITIALIZE_FACTIONS…"
+    );
     let (k2, world_addr2) = logon(account, password)?;
     let mut c2 = WireClient::connect_world(&world_addr2, account, k2)?;
     let guid = c2.create_or_find_char(char_name, Class::Warlock)?;
     c2.player_login(guid)?;
-    println!("[probe] SMSG_INITIALIZE_FACTIONS ({} slots) slot[{index}]={:?}", c2.init_factions.len(), c2.init_factions.get(index));
+    println!(
+        "[probe] SMSG_INITIALIZE_FACTIONS ({} slots) slot[{index}]={:?}",
+        c2.init_factions.len(),
+        c2.init_factions.get(index)
+    );
     let got = c2.init_factions.get(index).copied().unwrap_or(0);
     if got != want {
         bail!("init-factions: slot[{index}] = {got}, want {want}");
@@ -428,8 +467,12 @@ fn event_stream(
         if lang != 0xFFFF_FFFF {
             continue;
         }
-        let text = String::from_utf8_lossy(&b[17..]).trim_matches('\0').to_string();
-        let Some(pos) = text.find("STC\tv1|") else { continue };
+        let text = String::from_utf8_lossy(&b[17..])
+            .trim_matches('\0')
+            .to_string();
+        let Some(pos) = text.find("STC\tv1|") else {
+            continue;
+        };
         let mut it = text[pos + 4..].splitn(5, '|');
         let (_v, cmd) = (it.next(), it.next().unwrap_or(""));
         let (_seq, _part) = (it.next(), it.next());
@@ -445,7 +488,10 @@ fn event_stream(
         println!("[wire] EVENT-STREAM PASS \u{2713} two distinct live state frames for def {def}");
         Ok(())
     } else {
-        bail!("event-stream: {} distinct state frame(s) for def {def} within {secs}s", seen.len());
+        bail!(
+            "event-stream: {} distinct state frame(s) for def {def} within {secs}s",
+            seen.len()
+        );
     }
 }
 
@@ -455,7 +501,10 @@ fn opcode_watch(
     _mcx: &ModeCtx<'_>,
 ) -> Result<()> {
     use std::time::{Duration, Instant};
-    let want: u16 = args.next().and_then(|s| s.parse().ok()).expect("usage: opcode-watch <opcode-decimal> [secs]");
+    let want: u16 = args
+        .next()
+        .and_then(|s| s.parse().ok())
+        .expect("usage: opcode-watch <opcode-decimal> [secs]");
     let secs: u64 = args.next().and_then(|s| s.parse().ok()).unwrap_or(15);
     c.set_recv_timeout(Duration::from_millis(300))?;
     let t0 = Instant::now();
@@ -483,8 +532,14 @@ fn values_watch(
     _mcx: &ModeCtx<'_>,
 ) -> Result<()> {
     use std::time::{Duration, Instant};
-    let guid: u64 = args.next().and_then(|s| s.parse().ok()).expect("usage: values-watch <guid> <field_index> [secs] [expect_value]");
-    let field: u16 = args.next().and_then(|s| s.parse().ok()).expect("field_index");
+    let guid: u64 = args
+        .next()
+        .and_then(|s| s.parse().ok())
+        .expect("usage: values-watch <guid> <field_index> [secs] [expect_value]");
+    let field: u16 = args
+        .next()
+        .and_then(|s| s.parse().ok())
+        .expect("field_index");
     let secs: u64 = args.next().and_then(|s| s.parse().ok()).unwrap_or(15);
     // Optional EXPECTED VALUE. Without it this passes on the first sighting of the field — which is
     // this watcher's OWN login snapshot, since entering the world writes the entity row and relays
@@ -502,7 +557,8 @@ fn values_watch(
                 }
                 for &(idx, v) in &u.fields {
                     println!("[values] guid={guid:#x} field {idx} = {v} ({v:#x})");
-                    if idx == field && expect.is_none_or(|want| want == v) {
+                    // MSRV 1.80 (`Option::is_none_or` needs 1.82): `map_or(true, ..)` is equivalent.
+                    if idx == field && expect.map_or(true, |want| want == v) {
                         println!("[wire] VALUES-WATCH PASS \u{2713} field {field} arrived");
                         return Ok(());
                     }
@@ -515,7 +571,9 @@ fn values_watch(
             "values-watch: no VALUES update carried field {field} = {want} ({want:#x}) for \
              {guid:#x} within {secs}s"
         ),
-        None => bail!("values-watch: no VALUES update carried field {field} for {guid:#x} within {secs}s"),
+        None => bail!(
+            "values-watch: no VALUES update carried field {field} for {guid:#x} within {secs}s"
+        ),
     }
 }
 
@@ -529,14 +587,19 @@ fn walkmelee(
     _mcx: &ModeCtx<'_>,
 ) -> Result<()> {
     use std::time::{Duration, Instant};
-    use wow_world_messages::vanilla::{CMSG_ATTACKSWING, CMSG_ATTACKSTOP};
-    let mob: u64 = args.next().and_then(|s| s.parse().ok()).expect("usage: walkmelee <mob> <x> <y> <z>");
+    use wow_world_messages::vanilla::{CMSG_ATTACKSTOP, CMSG_ATTACKSWING};
+    let mob: u64 = args
+        .next()
+        .and_then(|s| s.parse().ok())
+        .expect("usage: walkmelee <mob> <x> <y> <z>");
     let mx: f32 = args.next().and_then(|s| s.parse().ok()).expect("mob x");
     let my: f32 = args.next().and_then(|s| s.parse().ok()).expect("mob y");
     let mz: f32 = args.next().and_then(|s| s.parse().ok()).expect("mob z");
     c.walk_to((mx - 12.0, my, mz), (mx - 3.0, my, mz), 7.0)?; // real vanilla run speed
     c.set_selection(mob)?;
-    c.send(&CMSG_ATTACKSWING { guid: Guid::new(mob) })?;
+    c.send(&CMSG_ATTACKSWING {
+        guid: Guid::new(mob),
+    })?;
     c.set_recv_timeout(Duration::from_millis(300))?;
     let t0 = Instant::now();
     let mut own_swing = false;
@@ -548,7 +611,9 @@ fn walkmelee(
     let mut last_swing_send = Instant::now();
     while t0.elapsed() < Duration::from_secs(20) && !own_swing {
         if last_swing_send.elapsed() >= Duration::from_secs(2) {
-            let _ = c.send(&CMSG_ATTACKSWING { guid: Guid::new(mob) });
+            let _ = c.send(&CMSG_ATTACKSWING {
+                guid: Guid::new(mob),
+            });
             last_swing_send = Instant::now();
         }
         if let Ok(Smsg::SMSG_ATTACKERSTATEUPDATE(a)) = c.recv() {
@@ -559,7 +624,9 @@ fn walkmelee(
     }
     let _ = c.send(&CMSG_ATTACKSTOP {});
     if !own_swing {
-        bail!("walkmelee FAIL: no own swing after walking into reach (walk_to position not tracked?)");
+        bail!(
+            "walkmelee FAIL: no own swing after walking into reach (walk_to position not tracked?)"
+        );
     }
     println!("[wire] WALKMELEE PASS \u{2713} walked 12yd -> 3yd and the swing fired");
     Ok(())
@@ -601,7 +668,7 @@ fn seamwalk(
     args: &mut dyn Iterator<Item = String>,
     _mcx: &ModeCtx<'_>,
 ) -> Result<()> {
-    use game_shared::spatial::grid_cell;
+    use lyracore_shared::spatial::grid_cell;
     use std::time::Duration;
     let mut f = || -> f32 {
         args.next()
@@ -666,7 +733,7 @@ fn seamwalk(
                     }
                     Ok(_) => drained += 1,
                     Err(e) if wire_client::is_read_timeout(&e) => break, // quiet — leg done
-                    Err(e) => return Err(e),                            // a real socket failure
+                    Err(e) => return Err(e),                             // a real socket failure
                 }
             }
         }
@@ -694,7 +761,11 @@ fn seamwalk(
     if !ported.is_empty() {
         bail!(
             "seamwalk FAIL: {} sent a wire-level transfer packet ({}) — {}",
-            if expect_handoff { "the handoff" } else { "the crossing" },
+            if expect_handoff {
+                "the handoff"
+            } else {
+                "the crossing"
+            },
             ported.join(", "),
             if expect_handoff {
                 "a warm handoff must be invisible on the wire, exactly like a dormant no-op"
@@ -716,7 +787,11 @@ fn seamwalk(
              items disappear even though the destination holds the byte-identical rows; this is \
              the #72 self-relay-during-warm-handoff defect",
             destroyed_own_items.len(),
-            destroyed_own_items.iter().map(|g| g.to_string()).collect::<Vec<_>>().join(", "),
+            destroyed_own_items
+                .iter()
+                .map(|g| g.to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
         );
     }
     // The session surviving every leg is the other half of "nothing went wrong on the wire": a
@@ -746,10 +821,20 @@ fn atwar(
     args: &mut dyn Iterator<Item = String>,
     _mcx: &ModeCtx<'_>,
 ) -> Result<()> {
-    use wow_world_messages::vanilla::{CMSG_SET_FACTION_ATWAR, Faction, FactionFlag};
-    let index: u16 = args.next().and_then(|s| s.parse().ok()).expect("usage: atwar <rep_index> <0|1>");
-    let on: u8 = args.next().and_then(|s| s.parse().ok()).expect("usage: atwar <rep_index> <0|1>");
-    let flags = if on != 0 { FactionFlag::new_at_war() } else { FactionFlag::empty() };
+    use wow_world_messages::vanilla::{Faction, FactionFlag, CMSG_SET_FACTION_ATWAR};
+    let index: u16 = args
+        .next()
+        .and_then(|s| s.parse().ok())
+        .expect("usage: atwar <rep_index> <0|1>");
+    let on: u8 = args
+        .next()
+        .and_then(|s| s.parse().ok())
+        .expect("usage: atwar <rep_index> <0|1>");
+    let flags = if on != 0 {
+        FactionFlag::new_at_war()
+    } else {
+        FactionFlag::empty()
+    };
     // gtker types the wire u16 as the closed `Faction` enum (keyed on faction IDS, another face of
     // the field-names-lie) — an index with no variant would silently serialize as 0, so fail LOUD.
     let faction = Faction::try_from(index)
@@ -769,10 +854,7 @@ fn query_item(
     args: &mut dyn Iterator<Item = String>,
     _mcx: &ModeCtx<'_>,
 ) -> Result<()> {
-    let entry: u32 = args
-        .next()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(1448); // Blackrock Gauntlets — stat_armor=105, stat_strength=3
+    let entry: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(1448); // Blackrock Gauntlets — stat_armor=105, stat_strength=3
     let want_armor: i32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(105);
     // Optional 3rd arg: assert spell slot 1's id (the on-use spell that drives the green "Use:" text).
     let want_spell: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -833,7 +915,10 @@ fn played_time_live(
     let (t2, _) = c.played_time_request()?;
     println!("[probe] second SMSG_PLAYED_TIME total_played_time={t2}");
     if t2 > t1 {
-        println!("[wire] PLAYED-TIME-LIVE PASS \u{2713}  {t1} -> {t2} (+{})", t2 - t1);
+        println!(
+            "[wire] PLAYED-TIME-LIVE PASS \u{2713}  {t1} -> {t2} (+{})",
+            t2 - t1
+        );
         return Ok(());
     }
     bail!("PLAYED-TIME-LIVE FAIL: total did not increase across the sleep ({t1} -> {t2})");
@@ -850,9 +935,16 @@ fn levelup_info(
     args: &mut dyn Iterator<Item = String>,
     _mcx: &ModeCtx<'_>,
 ) -> Result<()> {
-    let ready = require_path_arg(args, "levelup-info <ready_file> [expect_mana]", "ready_file")?;
+    let ready = require_path_arg(
+        args,
+        "levelup-info <ready_file> [expect_mana]",
+        "ready_file",
+    )?;
     let expect_mana: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(1);
-    eprintln!("[levelup] in-world as guid {:#x}; signalling orchestrator…", c.self_guid);
+    eprintln!(
+        "[levelup] in-world as guid {:#x}; signalling orchestrator…",
+        c.self_guid
+    );
     std::fs::write(&ready, "1").ok();
     let done = c.recv_for(std::time::Duration::from_secs(60), |m| match m {
         Smsg::SMSG_LEVELUP_INFO(m) => {
@@ -923,7 +1015,11 @@ fn questgiver(
     });
     println!(
         "[probe] done — {}",
-        if saw { "gateway answered the questgiver hello" } else { "gateway sent NOTHING (handler aborted / wrong path)" }
+        if saw {
+            "gateway answered the questgiver hello"
+        } else {
+            "gateway sent NOTHING (handler aborted / wrong path)"
+        }
     );
     Ok(())
 }
@@ -948,8 +1044,7 @@ fn gossip(
         match c.recv() {
             Ok(Smsg::SMSG_GOSSIP_MESSAGE(g)) => {
                 saw_gossip = true;
-                let opts: Vec<String> =
-                    g.gossips.iter().map(|o| o.message.clone()).collect();
+                let opts: Vec<String> = g.gossips.iter().map(|o| o.message.clone()).collect();
                 let text_id = g.title_text_id;
                 println!(
                     "[probe] SMSG_GOSSIP_MESSAGE guid={:#x} title={:#x} quests={} options={:?}",
@@ -965,7 +1060,9 @@ fn gossip(
                 }
             }
             Ok(Smsg::SMSG_GOSSIP_COMPLETE) => println!("[probe] SMSG_GOSSIP_COMPLETE"),
-            Ok(Smsg::SMSG_QUESTGIVER_QUEST_LIST(_)) => println!("[probe] SMSG_QUESTGIVER_QUEST_LIST"),
+            Ok(Smsg::SMSG_QUESTGIVER_QUEST_LIST(_)) => {
+                println!("[probe] SMSG_QUESTGIVER_QUEST_LIST")
+            }
             Ok(_) => {}
             Err(_) => break,
         }
@@ -983,16 +1080,25 @@ fn gossip(
     // option's action was a broadcast_text id, so the TRAINER match never fired).
     if args.next().as_deref() == Some("select") {
         use wow_world_messages::vanilla::CMSG_GOSSIP_SELECT_OPTION;
-        let idx: u32 = args.next().and_then(|s| s.parse().ok()).expect("select <index>");
+        let idx: u32 = args
+            .next()
+            .and_then(|s| s.parse().ok())
+            .expect("select <index>");
         eprintln!("[wire] gossip-probe: CMSG_GOSSIP_SELECT_OPTION({idx}) -> {npc:#x}");
-        c.send(&CMSG_GOSSIP_SELECT_OPTION { guid: Guid::new(npc), gossip_list_id: idx, unknown: None })?;
+        c.send(&CMSG_GOSSIP_SELECT_OPTION {
+            guid: Guid::new(npc),
+            gossip_list_id: idx,
+            unknown: None,
+        })?;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
         while std::time::Instant::now() < deadline {
             match c.recv() {
                 Ok(Smsg::SMSG_TRAINER_LIST(t)) => {
                     println!(
                         "[probe] SMSG_TRAINER_LIST guid={:#x} spells={} greeting={:?}",
-                        t.guid.guid(), t.spells.len(), t.greeting
+                        t.guid.guid(),
+                        t.spells.len(),
+                        t.greeting
                     );
                     for sp in &t.spells {
                         println!(
@@ -1003,9 +1109,16 @@ fn gossip(
                     // Optional trailing: `buy <spell_id>` — exercise the purchase and report.
                     if args.next().as_deref() == Some("buy") {
                         use wow_world_messages::vanilla::CMSG_TRAINER_BUY_SPELL;
-                        let id: u32 = args.next().and_then(|s| s.parse().ok()).expect("buy <spell_id>");
-                        c.send(&CMSG_TRAINER_BUY_SPELL { guid: Guid::new(npc), id })?;
-                        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+                        let id: u32 = args
+                            .next()
+                            .and_then(|s| s.parse().ok())
+                            .expect("buy <spell_id>");
+                        c.send(&CMSG_TRAINER_BUY_SPELL {
+                            guid: Guid::new(npc),
+                            id,
+                        })?;
+                        let deadline =
+                            std::time::Instant::now() + std::time::Duration::from_secs(4);
                         while std::time::Instant::now() < deadline {
                             match c.recv() {
                                 Ok(Smsg::SMSG_TRAINER_BUY_SUCCEEDED(r)) => {
@@ -1017,7 +1130,10 @@ fn gossip(
                                     return Ok(());
                                 }
                                 Ok(Smsg::SMSG_TRAINER_BUY_FAILED(r)) => {
-                                    println!("[probe] BUY FAILED spell={} error={:?}", r.id, r.error);
+                                    println!(
+                                        "[probe] BUY FAILED spell={} error={:?}",
+                                        r.id, r.error
+                                    );
                                     return Ok(());
                                 }
                                 Ok(Smsg::SMSG_LEARNED_SPELL(r)) => {
@@ -1033,7 +1149,9 @@ fn gossip(
                     return Ok(());
                 }
                 Ok(Smsg::SMSG_GOSSIP_COMPLETE) => {
-                    println!("[probe] SMSG_GOSSIP_COMPLETE (window closed — option routed nowhere)");
+                    println!(
+                        "[probe] SMSG_GOSSIP_COMPLETE (window closed — option routed nowhere)"
+                    );
                     return Ok(());
                 }
                 Ok(_) => {}
@@ -1046,7 +1164,7 @@ fn gossip(
 }
 
 // ---- ghost-reveal probe (PIECE 2): a viewer who dies + becomes a GHOST should get the spirit-healer
-// entity CREATE'd (the GW_AOI=0 on_update reveal). The orchestrator kills+repops via debug reducers
+// entity CREATE'd (the LYRACORE_AOI=0 on_update reveal). The orchestrator kills+repops via debug reducers
 // (the char's small guid). PASS = healer hidden while alive, then revealed on the ghost transition.
 fn ghost(
     c: &mut WireClient,
@@ -1059,14 +1177,18 @@ fn ghost(
         .expect("usage: … ghost <healer_guid> <ready_file>");
     let ready = require_path_arg(args, "ghost <healer_guid> <ready_file>", "ready_file")?;
     let before = c.seen_guids.contains(&healer);
-    println!("[ghost] healer {healer:#x} visible while ALIVE: {before}  (want false — the alive-gate)");
+    println!(
+        "[ghost] healer {healer:#x} visible while ALIVE: {before}  (want false — the alive-gate)"
+    );
     std::fs::write(&ready, "1").ok();
     eprintln!("[ghost] ready — waiting for kill+repop, then the reveal CREATE…");
     // recv() records every CREATE into seen_guids en route; matching the healer's own CREATE
     // closes the window as soon as the reveal lands.
     let _ = c.recv_for(std::time::Duration::from_secs(15), |m| match m {
         Smsg::SMSG_UPDATE_OBJECT(u)
-            if u.objects.iter().any(|o| wire_client::create_object_guid(o) == Some(healer)) =>
+            if u.objects
+                .iter()
+                .any(|o| wire_client::create_object_guid(o) == Some(healer)) =>
         {
             Some(())
         }
@@ -1099,7 +1221,11 @@ fn stay(
     args: &mut dyn Iterator<Item = String>,
     _mcx: &ModeCtx<'_>,
 ) -> Result<()> {
-    let sentinel = require_path_arg(args, "stay <sentinel_file> [deadline_secs]", "sentinel_file")?;
+    let sentinel = require_path_arg(
+        args,
+        "stay <sentinel_file> [deadline_secs]",
+        "sentinel_file",
+    )?;
     // An ABSENT deadline defaults to 60 (every pre-existing 1-arg caller). A PRESENT-but-malformed
     // deadline is a hard error, NOT a default: silently falling back to 60 would recreate the exact
     // silent mid-poll self-exit this arg exists to fix (a typo'd call site would reintroduce the
@@ -1144,7 +1270,7 @@ fn logout_probe(
 // ---- ding probe: verify mid-session L10 ding pushes PLAYER_CHARACTER_POINTS1=1 ----
 // Usage: wire-client [account] [password] [char-name] ding <ready_file>
 // The orchestrator (test-ding.sh) must first set the char to L9, wait for its ready file,
-// then call `spacetime call spacetime-core debug_set_level <guid> 10`.
+// then call `spacetime call lyracore debug_set_level <guid> 10`.
 // Pass: an SMSG_UPDATE_OBJECT arrives that contains BOTH a level=10 word [0x0a 00 00 00]
 // AND a character_points1=1 word [0x01 00 00 00] — the levelup VALUES packet (#032 fix).
 fn ding(
@@ -1153,7 +1279,10 @@ fn ding(
     _mcx: &ModeCtx<'_>,
 ) -> Result<()> {
     let ready = require_path_arg(args, "ding <ready_file>", "ready_file")?;
-    eprintln!("[ding] in-world as {} (guid {}), signalling orchestrator…", c.self_guid, c.self_guid);
+    eprintln!(
+        "[ding] in-world as {} (guid {}), signalling orchestrator…",
+        c.self_guid, c.self_guid
+    );
     std::fs::write(&ready, "1").ok();
 
     // SMSG_UPDATE_OBJECT opcode (vanilla 1.12) = 0x00A9 = 169.
@@ -1162,7 +1291,7 @@ fn ding(
     // directly rather than going through the gtker decode path.
     const SMSG_UPDATE_OBJECT: u16 = 0x00A9;
     let level10_word = [0x0au8, 0x00, 0x00, 0x00]; // level=10 as little-endian u32
-    let cp1_word = [0x01u8, 0x00, 0x00, 0x00];     // character_points1=1 as little-endian u32
+    let cp1_word = [0x01u8, 0x00, 0x00, 0x00]; // character_points1=1 as little-endian u32
     let done = c.recv_raw_for(std::time::Duration::from_secs(30), |opcode, payload| {
         if opcode != SMSG_UPDATE_OBJECT {
             return None;
@@ -1215,9 +1344,17 @@ fn repop(
         .and_then(|s| s.parse().ok())
         .expect("usage: … repop <char-guid> <ready_file>");
     let ready = require_path_arg(args, "repop <char-guid> <ready_file>", "ready_file")?;
-    eprintln!("[repop] in-world as {char_name} (guid {:#x}); signalling orchestrator…", c.self_guid);
+    eprintln!(
+        "[repop] in-world as {char_name} (guid {:#x}); signalling orchestrator…",
+        c.self_guid
+    );
     // Signal ready, then wait for the orchestrator to kill the character (it consumes the file).
-    signal_and_wait_consumed(c, &ready, 30, "repop: orchestrator never confirmed the kill")?;
+    signal_and_wait_consumed(
+        c,
+        &ready,
+        30,
+        "repop: orchestrator never confirmed the kill",
+    )?;
     eprintln!("[repop] sending CMSG_REPOP_REQUEST for char_guid={char_guid:#x}…");
     c.repop_request()?;
 
@@ -1228,7 +1365,10 @@ fn repop(
     let want = std::time::Duration::from_secs(30);
     match got_delay {
         Some(d) if d == want => {
-            println!("[wire] REPOP-DELAY PASS \u{2713}  SMSG_CORPSE_RECLAIM_DELAY(delay={}ms) received", d.as_millis());
+            println!(
+                "[wire] REPOP-DELAY PASS \u{2713}  SMSG_CORPSE_RECLAIM_DELAY(delay={}ms) received",
+                d.as_millis()
+            );
             Ok(())
         }
         Some(d) => bail!("repop-delay: got delay={:?}, want {:?}", d, want),
@@ -1265,7 +1405,10 @@ fn swing_flow(
 ) -> Result<()> {
     use std::time::{Duration, Instant};
     use wow_world_messages::vanilla::CMSG_ATTACKSWING;
-    let mob: u64 = args.next().and_then(|s| s.parse().ok()).expect("usage: swing-flow <mob_guid> <spell_id> <queue|seal> [x y z]");
+    let mob: u64 = args
+        .next()
+        .and_then(|s| s.parse().ok())
+        .expect("usage: swing-flow <mob_guid> <spell_id> <queue|seal> [x y z]");
     let spell: u32 = args.next().and_then(|s| s.parse().ok()).expect("spell id");
     let seal_mode = args.next().as_deref() == Some("seal");
     // Optional [x y z]: heartbeat ourselves next to the mob first — movement is client-authoritative,
@@ -1275,7 +1418,9 @@ fn swing_flow(
         args.next().and_then(|s| s.parse::<f32>().ok()),
         args.next().and_then(|s| s.parse::<f32>().ok()),
     ) {
-        use wow_world_messages::vanilla::{MovementInfo, MovementInfo_MovementFlags, Vector3d, MSG_MOVE_HEARTBEAT_Client};
+        use wow_world_messages::vanilla::{
+            MSG_MOVE_HEARTBEAT_Client, MovementInfo, MovementInfo_MovementFlags, Vector3d,
+        };
         // Stand 2 yd WEST of the given point (pass the MOB's coords) facing +x (orientation 0), so
         // the module's is_facing gate passes — a swing at a target behind you is silently skipped
         // (that gate ate this probe's every swing on the first attempt: 20 "white swings" that were
@@ -1292,7 +1437,10 @@ fn swing_flow(
             })?;
             std::thread::sleep(Duration::from_millis(120));
         }
-        println!("[flow] repositioned to ({}, {y}, {z}) facing +x at the mob", x - 2.0);
+        println!(
+            "[flow] repositioned to ({}, {y}, {z}) facing +x at the mob",
+            x - 2.0
+        );
     }
 
     if seal_mode {
@@ -1307,7 +1455,9 @@ fn swing_flow(
         std::thread::sleep(Duration::from_millis(300));
     }
     c.set_selection(mob)?;
-    c.send(&CMSG_ATTACKSWING { guid: Guid::new(mob) })?;
+    c.send(&CMSG_ATTACKSWING {
+        guid: Guid::new(mob),
+    })?;
     c.set_recv_timeout(Duration::from_millis(400))?;
 
     let t0 = Instant::now();
@@ -1349,7 +1499,11 @@ fn swing_flow(
                     let ms = t.elapsed().as_millis();
                     println!("[flow] SPELL_GO({spell}) {ms}ms after cast");
                     // Within one recv-timeout of the cast = sent at queue time (the old bug).
-                    if ms < 500 { premature_go = true; } else { go_at_swing = true; }
+                    if ms < 500 {
+                        premature_go = true;
+                    } else {
+                        go_at_swing = true;
+                    }
                 } else {
                     premature_go = true; // GO with no cast outstanding
                     println!("[flow] UNEXPECTED SPELL_GO({spell}) with no cast outstanding");
@@ -1357,9 +1511,16 @@ fn swing_flow(
             }
             Ok(Smsg::SMSG_SPELLNONMELEEDAMAGELOG(l)) if l.spell == spell => {
                 proc_logs += 1;
-                println!("[flow] SPELLNONMELEEDAMAGELOG({spell}) dmg={} school={:?}", l.damage, l.school);
-                if !seal_mode && go_at_swing { break; } // queue verified end-to-end
-                if seal_mode && proc_logs >= 2 { break; } // two proc lines = seal verified
+                println!(
+                    "[flow] SPELLNONMELEEDAMAGELOG({spell}) dmg={} school={:?}",
+                    l.damage, l.school
+                );
+                if !seal_mode && go_at_swing {
+                    break;
+                } // queue verified end-to-end
+                if seal_mode && proc_logs >= 2 {
+                    break;
+                } // two proc lines = seal verified
             }
             Ok(_) => {}
             Err(_) => {} // recv timeout tick — keep polling until the deadline
@@ -1369,10 +1530,14 @@ fn swing_flow(
         "[flow] RESULT swings={swings} premature_go={premature_go} go_at_swing={go_at_swing} proc_logs={proc_logs} stray_seal_go={stray_seal_go}"
     );
     if seal_mode {
-        if proc_logs == 0 || stray_seal_go > 0 { bail!("seal-flow FAIL"); }
+        if proc_logs == 0 || stray_seal_go > 0 {
+            bail!("seal-flow FAIL");
+        }
         println!("[flow] SEAL PASS — named holy proc lines, no stray GO");
     } else {
-        if premature_go || !go_at_swing || proc_logs == 0 { bail!("queue-flow FAIL"); }
+        if premature_go || !go_at_swing || proc_logs == 0 {
+            bail!("queue-flow FAIL");
+        }
         println!("[flow] QUEUE PASS — no GO at cast, GO+named damage at the swing");
     }
     Ok(())
@@ -1398,22 +1563,37 @@ fn armor_audit(
                 for o in &u.objects {
                     let (guid, mask, kind) = match o {
                         Object::Values { guid1, mask1 } => (guid1.guid(), mask1, "VALUES"),
-                        Object::CreateObject { guid3, mask2, .. } => (guid3.guid(), mask2, "CREATE"),
-                        Object::CreateObject2 { guid3, mask2, .. } => (guid3.guid(), mask2, "CREATE2"),
+                        Object::CreateObject { guid3, mask2, .. } => {
+                            (guid3.guid(), mask2, "CREATE")
+                        }
+                        Object::CreateObject2 { guid3, mask2, .. } => {
+                            (guid3.guid(), mask2, "CREATE2")
+                        }
                         _ => continue,
                     };
                     if guid != me {
                         continue;
                     }
                     let (armor, str_, ap) = match mask {
-                        UpdateMask::Unit(m) => (m.unit_normal_resistance(), m.unit_strength(), m.unit_attack_power()),
-                        UpdateMask::Player(m) => (m.unit_normal_resistance(), m.unit_strength(), m.unit_attack_power()),
+                        UpdateMask::Unit(m) => (
+                            m.unit_normal_resistance(),
+                            m.unit_strength(),
+                            m.unit_attack_power(),
+                        ),
+                        UpdateMask::Player(m) => (
+                            m.unit_normal_resistance(),
+                            m.unit_strength(),
+                            m.unit_attack_power(),
+                        ),
                         _ => (None, None, None),
                     };
                     if armor.is_some() || str_.is_some() || ap.is_some() {
                         println!(
                             "[armor] t={}ms {kind} armor={:?} str={:?} ap={:?}",
-                            t0.elapsed().as_millis(), armor, str_, ap
+                            t0.elapsed().as_millis(),
+                            armor,
+                            str_,
+                            ap
                         );
                     }
                 }
@@ -1434,13 +1614,19 @@ fn fall_probe(
     args: &mut dyn Iterator<Item = String>,
     _mcx: &ModeCtx<'_>,
 ) -> Result<()> {
-    use wow_world_messages::vanilla::{MovementInfo, MovementInfo_MovementFlags, Vector3d, MSG_MOVE_FALL_LAND_Client};
+    use wow_world_messages::vanilla::{
+        MSG_MOVE_FALL_LAND_Client, MovementInfo, MovementInfo_MovementFlags, Vector3d,
+    };
     let ms: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(2000);
     c.send(&MSG_MOVE_FALL_LAND_Client {
         info: MovementInfo {
             flags: MovementInfo_MovementFlags::empty(),
             timestamp: 1,
-            position: Vector3d { x: -8949.95, y: -132.49, z: 83.5 },
+            position: Vector3d {
+                x: -8949.95,
+                y: -132.49,
+                z: 83.5,
+            },
             orientation: 0.0,
             fall_time: f32::from_bits(ms),
         },
@@ -1450,7 +1636,12 @@ fn fall_probe(
     while t0.elapsed() < std::time::Duration::from_secs(4) {
         match c.recv() {
             Ok(Smsg::SMSG_ENVIRONMENTAL_DAMAGE_LOG(l)) => {
-                println!("[fall] ENV_DAMAGE_LOG type={:?} dmg={} guid={:#x}", l.damage_type, l.damage, l.guid.guid());
+                println!(
+                    "[fall] ENV_DAMAGE_LOG type={:?} dmg={} guid={:#x}",
+                    l.damage_type,
+                    l.damage,
+                    l.guid.guid()
+                );
                 return Ok(());
             }
             Ok(_) => {}
@@ -1471,7 +1662,10 @@ fn engage_retreat(
     _mcx: &ModeCtx<'_>,
 ) -> Result<()> {
     use std::time::{Duration, Instant};
-    use wow_world_messages::vanilla::{CMSG_ATTACKSWING, MovementInfo, MovementInfo_MovementFlags, Vector3d, MSG_MOVE_HEARTBEAT_Client};
+    use wow_world_messages::vanilla::{
+        MSG_MOVE_HEARTBEAT_Client, MovementInfo, MovementInfo_MovementFlags, Vector3d,
+        CMSG_ATTACKSWING,
+    };
     let mob: u64 = args.next().and_then(|s| s.parse().ok()).expect("mob guid");
     let x: f32 = args.next().and_then(|s| s.parse().ok()).expect("x");
     let y: f32 = args.next().and_then(|s| s.parse().ok()).expect("y");
@@ -1492,7 +1686,9 @@ fn engage_retreat(
     // adjacent (2 yd west, facing +x — the is_facing lesson), engage, trade a couple swings
     hb(c, x - 2.0, y, 1)?;
     c.set_selection(mob)?;
-    c.send(&CMSG_ATTACKSWING { guid: Guid::new(mob) })?;
+    c.send(&CMSG_ATTACKSWING {
+        guid: Guid::new(mob),
+    })?;
     c.set_recv_timeout(Duration::from_millis(300))?;
     let t0 = Instant::now();
     while t0.elapsed() < Duration::from_secs(4) {
@@ -1531,8 +1727,14 @@ fn watch_casts(
     let t0 = std::time::Instant::now();
     while t0.elapsed() < std::time::Duration::from_secs(secs) {
         match c.recv() {
-            Ok(Smsg::SMSG_SPELL_START(m)) => println!("[watch] START caster={:#x} spell={}", m.caster.guid(), m.spell),
-            Ok(Smsg::SMSG_SPELL_GO(m)) => println!("[watch] GO caster={:#x} spell={}", m.caster.guid(), m.spell),
+            Ok(Smsg::SMSG_SPELL_START(m)) => println!(
+                "[watch] START caster={:#x} spell={}",
+                m.caster.guid(),
+                m.spell
+            ),
+            Ok(Smsg::SMSG_SPELL_GO(m)) => {
+                println!("[watch] GO caster={:#x} spell={}", m.caster.guid(), m.spell)
+            }
             Ok(_) => {}
             Err(_) => {}
         }
@@ -1548,8 +1750,13 @@ fn channel_probe(
     args: &mut dyn Iterator<Item = String>,
     _mcx: &ModeCtx<'_>,
 ) -> Result<()> {
-    use wow_world_messages::vanilla::{CMSG_JOIN_CHANNEL, CMSG_MESSAGECHAT, CMSG_MESSAGECHAT_ChatType, Language, SMSG_MESSAGECHAT_ChatType};
-    let name = args.next().expect("usage: channel <name> [say <msg>] [secs]");
+    use wow_world_messages::vanilla::{
+        CMSG_MESSAGECHAT_ChatType, Language, SMSG_MESSAGECHAT_ChatType, CMSG_JOIN_CHANNEL,
+        CMSG_MESSAGECHAT,
+    };
+    let name = args
+        .next()
+        .expect("usage: channel <name> [say <msg>] [secs]");
     let mut say: Option<String> = None;
     let mut secs = 10u64;
     while let Some(a) = args.next() {
@@ -1559,18 +1766,26 @@ fn channel_probe(
             secs = n;
         }
     }
-    c.send(&CMSG_JOIN_CHANNEL { channel_name: name.clone(), channel_password: String::new() })?;
+    c.send(&CMSG_JOIN_CHANNEL {
+        channel_name: name.clone(),
+        channel_password: String::new(),
+    })?;
     c.set_recv_timeout(std::time::Duration::from_millis(400))?;
     let t0 = std::time::Instant::now();
     let mut sent = say.is_none();
     while t0.elapsed() < std::time::Duration::from_secs(secs) {
         match c.recv() {
             Ok(Smsg::SMSG_CHANNEL_NOTIFY(n)) => {
-                println!("[chan] NOTIFY {:?} channel={}", n.notify_type, n.channel_name);
+                println!(
+                    "[chan] NOTIFY {:?} channel={}",
+                    n.notify_type, n.channel_name
+                );
                 if !sent {
                     if let Some(msg) = &say {
                         c.send(&CMSG_MESSAGECHAT {
-                            chat_type: CMSG_MESSAGECHAT_ChatType::Channel { channel: name.clone() },
+                            chat_type: CMSG_MESSAGECHAT_ChatType::Channel {
+                                channel: name.clone(),
+                            },
                             language: Language::Universal,
                             message: msg.clone(),
                         })?;
@@ -1579,8 +1794,18 @@ fn channel_probe(
                 }
             }
             Ok(Smsg::SMSG_MESSAGECHAT(m)) => {
-                if let SMSG_MESSAGECHAT_ChatType::Channel { channel_name, player, .. } = &m.chat_type {
-                    println!("[chan] MSG channel={} from={:#x} text={:?}", channel_name, player.guid(), m.message);
+                if let SMSG_MESSAGECHAT_ChatType::Channel {
+                    channel_name,
+                    player,
+                    ..
+                } = &m.chat_type
+                {
+                    println!(
+                        "[chan] MSG channel={} from={:#x} text={:?}",
+                        channel_name,
+                        player.guid(),
+                        m.message
+                    );
                 }
             }
             Ok(_) => {}
@@ -1601,11 +1826,16 @@ fn raw_audit(
     let secs: u64 = args.next().and_then(|s| s.parse().ok()).unwrap_or(8);
     // Optional "move": stream MSG_MOVE_HEARTBEATs while auditing (254 — self-echo detection).
     let moving = args.next().as_deref() == Some("move");
-    println!("[audit] initial seen_guids: {:x?} moving={moving}", c.seen_guids);
+    println!(
+        "[audit] initial seen_guids: {:x?} moving={moving}",
+        c.seen_guids
+    );
     c.set_recv_timeout(std::time::Duration::from_millis(250))?;
     let t0 = std::time::Instant::now();
     if moving {
-        use wow_world_messages::vanilla::{MovementInfo, MovementInfo_MovementFlags, Vector3d, MSG_MOVE_HEARTBEAT_Client};
+        use wow_world_messages::vanilla::{
+            MSG_MOVE_HEARTBEAT_Client, MovementInfo, MovementInfo_MovementFlags, Vector3d,
+        };
         let (sx, sy, sz) = (-8940.0f32, -120.0f32, 78.0f32); // the Northshire test pad
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
         let mut step = 0f32;
@@ -1615,17 +1845,28 @@ fn raw_audit(
                 info: MovementInfo {
                     flags: MovementInfo_MovementFlags::empty(),
                     timestamp: t0.elapsed().as_millis() as u32,
-                    position: Vector3d { x: sx + step * 2.0, y: sy, z: sz },
+                    position: Vector3d {
+                        x: sx + step * 2.0,
+                        y: sy,
+                        z: sz,
+                    },
                     orientation: 0.0,
                     fall_time: 0.0,
                 },
             })?;
             let _ = c.recv_raw_for(std::time::Duration::from_millis(480), |op, payload| {
                 if op == 0x00A9 {
-                    println!("[audit] t={}ms MOVING UPDATE_OBJECT len={}", t0.elapsed().as_millis(), payload.len());
+                    println!(
+                        "[audit] t={}ms MOVING UPDATE_OBJECT len={}",
+                        t0.elapsed().as_millis(),
+                        payload.len()
+                    );
                 }
                 if op == 0x00AA {
-                    println!("[audit] t={}ms MOVING DESTROY_OBJECT", t0.elapsed().as_millis());
+                    println!(
+                        "[audit] t={}ms MOVING DESTROY_OBJECT",
+                        t0.elapsed().as_millis()
+                    );
                 }
                 if (0x00B5..=0x00EE).contains(&op) {
                     let mask = payload[0];
@@ -1637,7 +1878,11 @@ fn raw_audit(
                             off += 1;
                         }
                     }
-                    println!("[audit] t={}ms SELF-WINDOW MOVE-OP 0x{op:04X} guid={g:#x} len={}", t0.elapsed().as_millis(), payload.len());
+                    println!(
+                        "[audit] t={}ms SELF-WINDOW MOVE-OP 0x{op:04X} guid={g:#x} len={}",
+                        t0.elapsed().as_millis(),
+                        payload.len()
+                    );
                 }
                 None::<()>
             });
@@ -1646,7 +1891,11 @@ fn raw_audit(
     }
     let _ = c.recv_raw_for(std::time::Duration::from_secs(secs), |op, payload| {
         if op == 0x00A9 {
-            println!("[audit] t={}ms UPDATE_OBJECT len={}", t0.elapsed().as_millis(), payload.len());
+            println!(
+                "[audit] t={}ms UPDATE_OBJECT len={}",
+                t0.elapsed().as_millis(),
+                payload.len()
+            );
         }
         // 254: MSG_MOVE_* / SMSG_MONSTER_MOVE arrival timing — rhythmic relay gaps show here.
         if op == 0x00DD {
@@ -1661,19 +1910,31 @@ fn raw_audit(
                     off += 1;
                 }
             }
-            println!("[audit] t={}ms MONSTER_MOVE guid={g:#x} len={}", t0.elapsed().as_millis(), payload.len());
+            println!(
+                "[audit] t={}ms MONSTER_MOVE guid={g:#x} len={}",
+                t0.elapsed().as_millis(),
+                payload.len()
+            );
         }
         // Item-gain feedback (185/#15): surface the push-result + quest-item toast opcodes.
         if op == 0x0166 {
             let item = u32::from_le_bytes([payload[25], payload[26], payload[27], payload[28]]);
             let count = u32::from_le_bytes([payload[37], payload[38], payload[39], payload[40]]);
-            println!("[audit] ITEM_PUSH_RESULT len={} item={item} count={count}", payload.len());
+            println!(
+                "[audit] ITEM_PUSH_RESULT len={} item={item} count={count}",
+                payload.len()
+            );
         }
         if op == 0x019A {
             println!("[audit] QUESTUPDATE_ADD_ITEM len={}", payload.len());
         }
         if op == 0x0150 {
-            let amount = u32::from_le_bytes([payload[payload.len()-5], payload[payload.len()-4], payload[payload.len()-3], payload[payload.len()-2]]);
+            let amount = u32::from_le_bytes([
+                payload[payload.len() - 5],
+                payload[payload.len() - 4],
+                payload[payload.len() - 3],
+                payload[payload.len() - 2],
+            ]);
             println!("[audit] SPELLHEALLOG len={} amount~{amount}", payload.len());
         }
         None::<()>
@@ -1691,7 +1952,9 @@ fn name_query(
     use wow_world_messages::vanilla::CMSG_NAME_QUERY;
     let guid: u64 = args.next().and_then(|s| s.parse().ok()).expect("guid");
     let want: String = args.next().expect("want name");
-    c.send(&CMSG_NAME_QUERY { guid: Guid::new(guid) })?;
+    c.send(&CMSG_NAME_QUERY {
+        guid: Guid::new(guid),
+    })?;
     let got = c.recv_for(std::time::Duration::from_secs(5), |m| match m {
         Smsg::SMSG_NAME_QUERY_RESPONSE(r) if r.guid.guid() == guid => {
             Some(r.character_name.clone())
@@ -1721,11 +1984,26 @@ fn bindpoint(
     args: &mut dyn Iterator<Item = String>,
     mcx: &ModeCtx<'_>,
 ) -> Result<()> {
-    let ModeCtx { account, password, char_name } = *mcx;
-    let want_x: f32 = args.next().and_then(|s| s.parse().ok()).expect("usage: … bindpoint <home_x> <home_y> <home_z>");
-    let want_y: f32 = args.next().and_then(|s| s.parse().ok()).expect("usage: … bindpoint <home_x> <home_y> <home_z>");
-    let want_z: f32 = args.next().and_then(|s| s.parse().ok()).expect("usage: … bindpoint <home_x> <home_y> <home_z>");
-    eprintln!("[bindpoint] want home=({want_x},{want_y},{want_z}) — verifying SMSG_BINDPOINTUPDATE…");
+    let ModeCtx {
+        account,
+        password,
+        char_name,
+    } = *mcx;
+    let want_x: f32 = args
+        .next()
+        .and_then(|s| s.parse().ok())
+        .expect("usage: … bindpoint <home_x> <home_y> <home_z>");
+    let want_y: f32 = args
+        .next()
+        .and_then(|s| s.parse().ok())
+        .expect("usage: … bindpoint <home_x> <home_y> <home_z>");
+    let want_z: f32 = args
+        .next()
+        .and_then(|s| s.parse().ok())
+        .expect("usage: … bindpoint <home_x> <home_y> <home_z>");
+    eprintln!(
+        "[bindpoint] want home=({want_x},{want_y},{want_z}) — verifying SMSG_BINDPOINTUPDATE…"
+    );
 
     // Re-login manually so we can capture SMSG_BINDPOINTUPDATE from the post-login burst.
     // (The `login_as`/`player_login` helper drains the burst without exposing that packet.)
@@ -1739,7 +2017,9 @@ fn bindpoint(
         .ok_or_else(|| anyhow!("bindpoint: character {char_name:?} not found"))?;
     eprintln!("[bindpoint] found {char_name} guid={guid}; sending CMSG_PLAYER_LOGIN…");
     use wow_world_messages::vanilla::CMSG_PLAYER_LOGIN;
-    c2.send(&CMSG_PLAYER_LOGIN { guid: Guid::new(guid) })?;
+    c2.send(&CMSG_PLAYER_LOGIN {
+        guid: Guid::new(guid),
+    })?;
 
     // Drain the login burst, capturing SMSG_BINDPOINTUPDATE; the burst is complete (and the
     // window closes) once the self CREATE_OBJECT arrives.
@@ -1747,11 +2027,16 @@ fn bindpoint(
     let _ = c2.recv_for(std::time::Duration::from_secs(10), |m| {
         if let Smsg::SMSG_BINDPOINTUPDATE(b) = m {
             bind = Some((b.position.x, b.position.y, b.position.z));
-            eprintln!("[bindpoint] SMSG_BINDPOINTUPDATE: x={} y={} z={}", b.position.x, b.position.y, b.position.z);
+            eprintln!(
+                "[bindpoint] SMSG_BINDPOINTUPDATE: x={} y={} z={}",
+                b.position.x, b.position.y, b.position.z
+            );
         }
         match m {
             Smsg::SMSG_UPDATE_OBJECT(u)
-                if u.objects.iter().any(|o| wire_client::create_object_guid(o) == Some(guid)) =>
+                if u.objects
+                    .iter()
+                    .any(|o| wire_client::create_object_guid(o) == Some(guid)) =>
             {
                 Some(())
             }
@@ -1761,7 +2046,9 @@ fn bindpoint(
     match bind {
         None => bail!("bindpoint: SMSG_BINDPOINTUPDATE never received in login burst"),
         Some((got_x, got_y, got_z)) => {
-            eprintln!("[bindpoint] got=({got_x},{got_y},{got_z}) want=({want_x},{want_y},{want_z})");
+            eprintln!(
+                "[bindpoint] got=({got_x},{got_y},{got_z}) want=({want_x},{want_y},{want_z})"
+            );
             if (got_x - want_x).abs() > 0.5 || (got_y - want_y).abs() > 0.5 {
                 bail!(
                     "bindpoint: SMSG_BINDPOINTUPDATE carries login position, not home!\n  got  x={got_x} y={got_y} z={got_z}\n  want x={want_x} y={want_y} z={want_z}"
@@ -1795,11 +2082,14 @@ fn autoshot(
 ) -> Result<()> {
     use std::time::{Duration, Instant};
     use wow_world_messages::vanilla::{
-        CMSG_ATTACKSWING, CMSG_ATTACKSTOP, CMSG_CANCEL_AUTO_REPEAT_SPELL, MovementInfo,
-        MovementInfo_MovementFlags, Vector3d, MSG_MOVE_HEARTBEAT_Client,
+        MSG_MOVE_HEARTBEAT_Client, MovementInfo, MovementInfo_MovementFlags, Vector3d,
+        CMSG_ATTACKSTOP, CMSG_ATTACKSWING, CMSG_CANCEL_AUTO_REPEAT_SPELL,
     };
     const AUTO_SHOT: u32 = 75;
-    let mob: u64 = args.next().and_then(|s| s.parse().ok()).expect("usage: autoshot <mob_guid> <loop|melee|reject> <mob_x> <mob_y> <mob_z>");
+    let mob: u64 = args
+        .next()
+        .and_then(|s| s.parse().ok())
+        .expect("usage: autoshot <mob_guid> <loop|melee|reject> <mob_x> <mob_y> <mob_z>");
     let mode = args.next().expect("mode: loop|melee|reject");
     let mx: f32 = args.next().and_then(|s| s.parse().ok()).expect("mob x");
     let my: f32 = args.next().and_then(|s| s.parse().ok()).expect("mob y");
@@ -1807,13 +2097,21 @@ fn autoshot(
 
     // loop mode stands farther out: the wolf charges after the first LANDED shot and a point-blank
     // due shot tears the loop down (min-range) — 25 yd buys ≥2 shot cycles before it closes.
-    let stand_off = match mode.as_str() { "reject" => 45.0, "loop" | "moving" => 25.0, _ => 15.0 };
+    let stand_off = match mode.as_str() {
+        "reject" => 45.0,
+        "loop" | "moving" => 25.0,
+        _ => 15.0,
+    };
     for i in 0..3u32 {
         c.send(&MSG_MOVE_HEARTBEAT_Client {
             info: MovementInfo {
                 flags: MovementInfo_MovementFlags::empty(),
                 timestamp: i * 100,
-                position: Vector3d { x: mx - stand_off, y: my, z: mz },
+                position: Vector3d {
+                    x: mx - stand_off,
+                    y: my,
+                    z: mz,
+                },
                 orientation: 0.0, // facing +x = facing the mob (is_facing gate)
                 fall_time: 0.0,
             },
@@ -1833,7 +2131,8 @@ fn autoshot(
     let self_guid = c.self_guid;
     let (mut start_seen, mut start_timer, mut start_ammo) = (false, u32::MAX, false);
     let mut cast_result = 0u32;
-    let (mut gos, mut go_misses, mut dmg_logs, mut self_melee_asu, mut cancels) = (0u32, 0u32, 0u32, 0u32, 0u32);
+    let (mut gos, mut go_misses, mut dmg_logs, mut self_melee_asu, mut cancels) =
+        (0u32, 0u32, 0u32, 0u32, 0u32);
     let mut last_go_at: Option<Instant> = None;
     let mut first_impact_gap_ms: Option<u128> = None; // GO->damage-log gap of the FIRST shot (fired at the known 25yd standoff; later gaps shrink as the wolf charges)
     let mut melee_pair_sent_at: Option<Instant> = None;
@@ -1845,7 +2144,12 @@ fn autoshot(
                 start_seen = true;
                 start_timer = s.timer;
                 start_ammo = s.flags.get_ammo().is_some();
-                println!("[shot] SPELL_START(75) timer={} ammo_block={} @{}ms", s.timer, start_ammo, t0.elapsed().as_millis());
+                println!(
+                    "[shot] SPELL_START(75) timer={} ammo_block={} @{}ms",
+                    s.timer,
+                    start_ammo,
+                    t0.elapsed().as_millis()
+                );
             }
             Ok(Smsg::SMSG_CAST_RESULT(_)) => {
                 cast_result += 1;
@@ -1854,12 +2158,20 @@ fn autoshot(
             Ok(Smsg::SMSG_SPELL_GO(g)) if g.spell == AUTO_SHOT => {
                 gos += 1;
                 go_misses += g.misses.len() as u32;
-                println!("[shot] SPELL_GO(75) #{gos} hits={} misses={} ammo={} @{}ms", g.hits.len(), g.misses.len(), g.flags.get_ammo().is_some(), t0.elapsed().as_millis());
+                println!(
+                    "[shot] SPELL_GO(75) #{gos} hits={} misses={} ammo={} @{}ms",
+                    g.hits.len(),
+                    g.misses.len(),
+                    g.flags.get_ammo().is_some(),
+                    t0.elapsed().as_millis()
+                );
                 last_go_at = Some(Instant::now());
                 if mode == "melee" && melee_pair_sent_at.is_none() {
                     // Emulate the client's melee press DURING the repeat loop: swing then cancel,
                     // back-to-back (the live-captured 5875 order).
-                    c.send(&CMSG_ATTACKSWING { guid: Guid::new(mob) })?;
+                    c.send(&CMSG_ATTACKSWING {
+                        guid: Guid::new(mob),
+                    })?;
                     c.send(&CMSG_CANCEL_AUTO_REPEAT_SPELL {})?;
                     melee_pair_sent_at = Some(Instant::now());
                     println!("[shot] >> sent ATTACKSWING + CANCEL_AUTO_REPEAT_SPELL pair");
@@ -1868,26 +2180,51 @@ fn autoshot(
             Ok(Smsg::SMSG_SPELLNONMELEEDAMAGELOG(l)) if l.spell == AUTO_SHOT => {
                 dmg_logs += 1;
                 let gap = last_go_at.map(|t| t.elapsed().as_millis()).unwrap_or(0);
-                if first_impact_gap_ms.is_none() { first_impact_gap_ms = Some(gap); }
-                println!("[shot] SPELLNONMELEEDAMAGELOG(75) dmg={} @{}ms (impact gap {}ms after its GO)", l.damage, t0.elapsed().as_millis(), gap);
+                if first_impact_gap_ms.is_none() {
+                    first_impact_gap_ms = Some(gap);
+                }
+                println!(
+                    "[shot] SPELLNONMELEEDAMAGELOG(75) dmg={} @{}ms (impact gap {}ms after its GO)",
+                    l.damage,
+                    t0.elapsed().as_millis(),
+                    gap
+                );
             }
             Ok(Smsg::SMSG_ATTACKERSTATEUPDATE(a)) if a.attacker.guid() == self_guid => {
                 if let Some(t) = melee_pair_sent_at {
                     self_melee_after_pair += 1;
-                    println!("[shot] self MELEE swing dmg={} {}ms after pair", a.total_damage, t.elapsed().as_millis());
-                    if self_melee_after_pair >= 2 { break; }
+                    println!(
+                        "[shot] self MELEE swing dmg={} {}ms after pair",
+                        a.total_damage,
+                        t.elapsed().as_millis()
+                    );
+                    if self_melee_after_pair >= 2 {
+                        break;
+                    }
                 } else {
                     self_melee_asu += 1;
-                    println!("[shot] UNEXPECTED self ATTACKERSTATEUPDATE during ranged (dmg={})", a.total_damage);
+                    println!(
+                        "[shot] UNEXPECTED self ATTACKERSTATEUPDATE during ranged (dmg={})",
+                        a.total_damage
+                    );
                 }
             }
             Ok(Smsg::SMSG_CANCEL_AUTO_REPEAT) => {
                 cancels += 1;
-                println!("[shot] SMSG_CANCEL_AUTO_REPEAT (server-initiated) @{}ms", t0.elapsed().as_millis());
-                if mode == "loop" && gos >= 2 { break; } // min-range teardown after a healthy loop = done
+                println!(
+                    "[shot] SMSG_CANCEL_AUTO_REPEAT (server-initiated) @{}ms",
+                    t0.elapsed().as_millis()
+                );
+                if mode == "loop" && gos >= 2 {
+                    break;
+                } // min-range teardown after a healthy loop = done
             }
             Ok(Smsg::SMSG_ATTACKSTOP(s)) => {
-                println!("[shot] ATTACKSTOP player={:?} @{}ms", s.player, t0.elapsed().as_millis());
+                println!(
+                    "[shot] ATTACKSTOP player={:?} @{}ms",
+                    s.player,
+                    t0.elapsed().as_millis()
+                );
             }
             Ok(_) => {}
             Err(_) => {}
@@ -1903,8 +2240,12 @@ fn autoshot(
             if !start_seen || start_timer != 0 || !start_ammo {
                 bail!("autoshot-loop FAIL: activation START wrong (seen={start_seen} timer={start_timer} ammo={start_ammo})");
             }
-            if gos < 2 { bail!("autoshot-loop FAIL: loop did not repeat (gos={gos})"); }
-            if dmg_logs == 0 && go_misses < 2 { bail!("autoshot-loop FAIL: no SPELLNONMELEEDAMAGELOG (and not all-miss)"); }
+            if gos < 2 {
+                bail!("autoshot-loop FAIL: loop did not repeat (gos={gos})");
+            }
+            if dmg_logs == 0 && go_misses < 2 {
+                bail!("autoshot-loop FAIL: no SPELLNONMELEEDAMAGELOG (and not all-miss)");
+            }
             // Projectile travel (097): the FIRST shot fires from the known 25 yd standoff → the
             // arrow flies ~625ms (40 yd/s); its damage log must trail its GO by roughly that.
             // Later shots fire at shrinking distance (the wolf charges), so only the first is pinned.
@@ -1913,16 +2254,22 @@ fn autoshot(
                     bail!("autoshot-loop FAIL: first-shot damage log {gap}ms after its GO (expected ~625ms for 25yd)");
                 }
             }
-            if self_melee_asu > 0 { bail!("autoshot-loop FAIL: melee ATTACKERSTATEUPDATE sent for ranged shots"); }
+            if self_melee_asu > 0 {
+                bail!("autoshot-loop FAIL: melee ATTACKERSTATEUPDATE sent for ranged shots");
+            }
             println!("[shot] LOOP PASS \u{2713}");
         }
         "melee" => {
-            if self_melee_after_pair == 0 { bail!("autoshot-melee FAIL: no melee swing after one ATTACKSWING+CANCEL press"); }
+            if self_melee_after_pair == 0 {
+                bail!("autoshot-melee FAIL: no melee swing after one ATTACKSWING+CANCEL press");
+            }
             println!("[shot] MELEE-SWAP PASS \u{2713} one press engaged melee");
         }
         "reject" => {
             if cast_result == 0 || start_seen || gos > 0 {
-                bail!("autoshot-reject FAIL: cast_result={cast_result} start={start_seen} gos={gos}");
+                bail!(
+                    "autoshot-reject FAIL: cast_result={cast_result} start={start_seen} gos={gos}"
+                );
             }
             println!("[shot] REJECT PASS \u{2713} out-of-range activation refused, nothing armed");
         }
@@ -1943,9 +2290,16 @@ fn talent_probe(
 ) -> Result<()> {
     use std::time::{Duration, Instant};
     use wow_world_messages::vanilla::{Talent, CMSG_LEARN_TALENT};
-    let talent_id: u32 = args.next().and_then(|s| s.parse().ok()).expect("usage: talent <talent_id>");
-    let talent = Talent::try_from(talent_id).map_err(|_| anyhow!("talent id {talent_id} not in the 1.12 Talent enum"))?;
-    c.send(&CMSG_LEARN_TALENT { talent, requested_rank: 0 })?;
+    let talent_id: u32 = args
+        .next()
+        .and_then(|s| s.parse().ok())
+        .expect("usage: talent <talent_id>");
+    let talent = Talent::try_from(talent_id)
+        .map_err(|_| anyhow!("talent id {talent_id} not in the 1.12 Talent enum"))?;
+    c.send(&CMSG_LEARN_TALENT {
+        talent,
+        requested_rank: 0,
+    })?;
     c.set_recv_timeout(Duration::from_millis(400))?;
     let t0 = Instant::now();
     let (mut learned, mut superceded, mut values) = (0u32, 0u32, 0u32);
@@ -1963,7 +2317,10 @@ fn talent_probe(
             }
             Ok((0x00A9, body)) => {
                 values += 1;
-                println!("[talent] SMSG_UPDATE_OBJECT partial VALUES ({} bytes)", body.len());
+                println!(
+                    "[talent] SMSG_UPDATE_OBJECT partial VALUES ({} bytes)",
+                    body.len()
+                );
             }
             Ok(_) => {}
             Err(_) => {}
@@ -1973,8 +2330,12 @@ fn talent_probe(
         }
     }
     println!("[talent] RESULT learned={learned} superceded={superceded} values_frames={values}");
-    if learned == 0 && superceded == 0 { bail!("talent FAIL: no rank-spell LEARNED/SUPERCEDED relayed"); }
-    if values == 0 { bail!("talent FAIL: no CHARACTER_POINTS1 VALUES push"); }
+    if learned == 0 && superceded == 0 {
+        bail!("talent FAIL: no rank-spell LEARNED/SUPERCEDED relayed");
+    }
+    if values == 0 {
+        bail!("talent FAIL: no CHARACTER_POINTS1 VALUES push");
+    }
     println!("[talent] PASS \u{2713} pane-refresh packets on the wire");
     Ok(())
 }
@@ -1982,11 +2343,18 @@ fn talent_probe(
 // The `autoshot moving` body (097): assert vanilla's defer-while-moving. Kites BACKWARD while
 // "running" so the aggroed wolf can't close to melee mid-test (a point-blank due shot would
 // legitimately cancel the loop and mask the thing under test).
-fn autoshot_moving(c: &mut WireClient, _mob: u64, mx: f32, my: f32, mz: f32, stand_off: f32) -> Result<()> {
+fn autoshot_moving(
+    c: &mut WireClient,
+    _mob: u64,
+    mx: f32,
+    my: f32,
+    mz: f32,
+    stand_off: f32,
+) -> Result<()> {
     use std::time::{Duration, Instant};
     use wow_world_messages::vanilla::{
-        CMSG_CANCEL_AUTO_REPEAT_SPELL, MovementInfo, MovementInfo_MovementFlags, Vector3d,
-        MSG_MOVE_HEARTBEAT_Client, MSG_MOVE_STOP_Client,
+        MSG_MOVE_HEARTBEAT_Client, MSG_MOVE_STOP_Client, MovementInfo, MovementInfo_MovementFlags,
+        Vector3d, CMSG_CANCEL_AUTO_REPEAT_SPELL,
     };
     const AUTO_SHOT: u32 = 75;
     // Wait for the first shot to fire before starting to run.
@@ -1994,10 +2362,15 @@ fn autoshot_moving(c: &mut WireClient, _mob: u64, mx: f32, my: f32, mz: f32, sta
     let tw = Instant::now();
     while tw.elapsed() < Duration::from_secs(4) {
         if let Ok(Smsg::SMSG_SPELL_GO(g)) = c.recv() {
-            if g.spell == AUTO_SHOT { fired = true; break; }
+            if g.spell == AUTO_SHOT {
+                fired = true;
+                break;
+            }
         }
     }
-    if !fired { bail!("autoshot-moving FAIL: first shot never fired"); }
+    if !fired {
+        bail!("autoshot-moving FAIL: first shot never fired");
+    }
     println!("[shot] first shot fired; RUNNING (kiting backward) for 3s…");
     let run_start = Instant::now();
     let mut gos_while_moving = 0u32;
@@ -2010,7 +2383,11 @@ fn autoshot_moving(c: &mut WireClient, _mob: u64, mx: f32, my: f32, mz: f32, sta
             info: MovementInfo {
                 flags: MovementInfo_MovementFlags::new_backward(),
                 timestamp: 1_000_000 + i * 150,
-                position: Vector3d { x: px, y: my, z: mz },
+                position: Vector3d {
+                    x: px,
+                    y: my,
+                    z: mz,
+                },
                 orientation: 0.0, // still facing the wolf (+x)
                 fall_time: 0.0,
             },
@@ -2018,7 +2395,9 @@ fn autoshot_moving(c: &mut WireClient, _mob: u64, mx: f32, my: f32, mz: f32, sta
         let tick = Instant::now();
         while tick.elapsed() < Duration::from_millis(150) {
             if let Ok(Smsg::SMSG_SPELL_GO(g)) = c.recv() {
-                if g.spell == AUTO_SHOT { gos_while_moving += 1; }
+                if g.spell == AUTO_SHOT {
+                    gos_while_moving += 1;
+                }
             }
         }
     }
@@ -2026,7 +2405,11 @@ fn autoshot_moving(c: &mut WireClient, _mob: u64, mx: f32, my: f32, mz: f32, sta
         info: MovementInfo {
             flags: MovementInfo_MovementFlags::empty(),
             timestamp: 2_000_000,
-            position: Vector3d { x: px, y: my, z: mz },
+            position: Vector3d {
+                x: px,
+                y: my,
+                z: mz,
+            },
             orientation: 0.0,
             fall_time: 0.0,
         },
@@ -2036,14 +2419,23 @@ fn autoshot_moving(c: &mut WireClient, _mob: u64, mx: f32, my: f32, mz: f32, sta
     let ts = Instant::now();
     while ts.elapsed() < Duration::from_secs(4) {
         if let Ok(Smsg::SMSG_SPELL_GO(g)) = c.recv() {
-            if g.spell == AUTO_SHOT { resumed_ms = Some(ts.elapsed().as_millis()); break; }
+            if g.spell == AUTO_SHOT {
+                resumed_ms = Some(ts.elapsed().as_millis());
+                break;
+            }
         }
     }
     let _ = c.send(&CMSG_CANCEL_AUTO_REPEAT_SPELL {});
     println!("[shot] RESULT mode=moving gos_while_moving={gos_while_moving} resumed_after_stop_ms={resumed_ms:?}");
-    if gos_while_moving > 0 { bail!("autoshot-moving FAIL: {gos_while_moving} shot(s) fired WHILE RUNNING"); }
-    let Some(ms) = resumed_ms else { bail!("autoshot-moving FAIL: loop never resumed after stopping"); };
-    if ms > 3200 { bail!("autoshot-moving FAIL: resume took {ms}ms (expected ≤ ~re-arm + timer)"); }
+    if gos_while_moving > 0 {
+        bail!("autoshot-moving FAIL: {gos_while_moving} shot(s) fired WHILE RUNNING");
+    }
+    let Some(ms) = resumed_ms else {
+        bail!("autoshot-moving FAIL: loop never resumed after stopping");
+    };
+    if ms > 3200 {
+        bail!("autoshot-moving FAIL: resume took {ms}ms (expected ≤ ~re-arm + timer)");
+    }
     println!("[shot] MOVING PASS \u{2713} deferred while running, resumed {ms}ms after stop");
     Ok(())
 }
@@ -2061,10 +2453,13 @@ fn groundcast(
 ) -> Result<()> {
     use std::time::{Duration, Instant};
     use wow_world_messages::vanilla::{
-        MovementInfo, MovementInfo_MovementFlags, Object, ObjectType, Vector3d,
-        MSG_MOVE_HEARTBEAT_Client,
+        MSG_MOVE_HEARTBEAT_Client, MovementInfo, MovementInfo_MovementFlags, Object, ObjectType,
+        Vector3d,
     };
-    let spell: u32 = args.next().and_then(|s| s.parse().ok()).expect("usage: groundcast <spell_id> <x> <y> <z> [dest]");
+    let spell: u32 = args
+        .next()
+        .and_then(|s| s.parse().ok())
+        .expect("usage: groundcast <spell_id> <x> <y> <z> [dest]");
     let x: f32 = args.next().and_then(|s| s.parse().ok()).expect("x");
     let y: f32 = args.next().and_then(|s| s.parse().ok()).expect("y");
     let z: f32 = args.next().and_then(|s| s.parse().ok()).expect("z");
@@ -2099,23 +2494,45 @@ fn groundcast(
             Ok(Smsg::SMSG_SPELL_GO(g)) if g.spell == spell => {
                 go_seen = true;
                 go_hits = g.hits.len();
-                println!("[ground] SPELL_GO({spell}) hits={} @{}ms", g.hits.len(), t0.elapsed().as_millis());
+                println!(
+                    "[ground] SPELL_GO({spell}) hits={} @{}ms",
+                    g.hits.len(),
+                    t0.elapsed().as_millis()
+                );
             }
             Ok(Smsg::SMSG_UPDATE_OBJECT(u)) => {
                 for o in &u.objects {
-                    if let Object::CreateObject2 { object_type: ObjectType::DynamicObject, guid3, .. } = o {
+                    if let Object::CreateObject2 {
+                        object_type: ObjectType::DynamicObject,
+                        guid3,
+                        ..
+                    } = o
+                    {
                         dynobj_creates += 1;
-                        println!("[ground] DYNAMICOBJECT CREATE guid={:#x} @{}ms", guid3.guid(), t0.elapsed().as_millis());
+                        println!(
+                            "[ground] DYNAMICOBJECT CREATE guid={:#x} @{}ms",
+                            guid3.guid(),
+                            t0.elapsed().as_millis()
+                        );
                     }
                 }
             }
             Ok(Smsg::SMSG_SPELLNONMELEEDAMAGELOG(l)) if l.spell == spell => {
                 ticks += 1;
-                println!("[ground] tick dmg={} on {:#x} @{}ms", l.damage, l.target.guid(), t0.elapsed().as_millis());
+                println!(
+                    "[ground] tick dmg={} on {:#x} @{}ms",
+                    l.damage,
+                    l.target.guid(),
+                    t0.elapsed().as_millis()
+                );
             }
             Ok(Smsg::SMSG_DESTROY_OBJECT(d)) if d.guid.guid() >> 48 == 0xF100 => {
                 reaps += 1;
-                println!("[ground] swirl DESTROY guid={:#x} @{}ms", d.guid.guid(), t0.elapsed().as_millis());
+                println!(
+                    "[ground] swirl DESTROY guid={:#x} @{}ms",
+                    d.guid.guid(),
+                    t0.elapsed().as_millis()
+                );
             }
             Ok(_) => {}
             Err(_) => {}
@@ -2125,21 +2542,31 @@ fn groundcast(
         }
     }
     println!("[ground] RESULT go_seen={go_seen} go_hits={go_hits} dynobj_creates={dynobj_creates} ticks={ticks} reaps={reaps}");
-    if !go_seen { bail!("groundcast FAIL: no SPELL_GO (cast rejected? mana?)"); }
+    if !go_seen {
+        bail!("groundcast FAIL: no SPELL_GO (cast rejected? mana?)");
+    }
     if dest_mode {
         // The clicked-ground nuke (Flamestrike eff0) must HIT the mobs at the click.
-        if go_hits == 0 { bail!("groundcast FAIL: dest-mode GO hit nobody — the nuke didn't anchor on the click"); }
+        if go_hits == 0 {
+            bail!("groundcast FAIL: dest-mode GO hit nobody — the nuke didn't anchor on the click");
+        }
     } else if go_hits != 0 {
         bail!("groundcast FAIL: GO hit list not empty ({go_hits}) — caster impact animation");
     }
-    if dynobj_creates == 0 { bail!("groundcast FAIL: no DYNAMICOBJECT CREATE (no swirl)"); }
+    if dynobj_creates == 0 {
+        bail!("groundcast FAIL: no DYNAMICOBJECT CREATE (no swirl)");
+    }
     // dest mode: >=1 damage log proves the dest pipeline delivers feedback (the nuke one-shots a
     // low-level mob and a survivor CHASES out of the 5 yd patch before the 2s first tick — patch
     // TICK mechanics are pinned by the self-anchored Consecration run, same engine). Self mode
     // keeps >=2 (the caster stands in the area with the mob, ticks accumulate).
     let min_ticks = if dest_mode { 1 } else { 2 };
-    if ticks < min_ticks { bail!("groundcast FAIL: only {ticks} tick damage log(s) — feedback missing or no hostile in radius"); }
-    if reaps == 0 { bail!("groundcast FAIL: swirl never reaped (no DESTROY)"); }
+    if ticks < min_ticks {
+        bail!("groundcast FAIL: only {ticks} tick damage log(s) — feedback missing or no hostile in radius");
+    }
+    if reaps == 0 {
+        bail!("groundcast FAIL: swirl never reaped (no DESTROY)");
+    }
     println!("[ground] GROUNDCAST PASS \u{2713}");
     Ok(())
 }
@@ -2155,10 +2582,13 @@ fn backswing(
 ) -> Result<()> {
     use std::time::{Duration, Instant};
     use wow_world_messages::vanilla::{
-        CMSG_ATTACKSWING, CMSG_ATTACKSTOP, MovementInfo, MovementInfo_MovementFlags, Vector3d,
-        MSG_MOVE_HEARTBEAT_Client,
+        MSG_MOVE_HEARTBEAT_Client, MovementInfo, MovementInfo_MovementFlags, Vector3d,
+        CMSG_ATTACKSTOP, CMSG_ATTACKSWING,
     };
-    let mob: u64 = args.next().and_then(|s| s.parse().ok()).expect("usage: backswing <mob_guid> <x> <y> <z>");
+    let mob: u64 = args
+        .next()
+        .and_then(|s| s.parse().ok())
+        .expect("usage: backswing <mob_guid> <x> <y> <z>");
     let mx: f32 = args.next().and_then(|s| s.parse().ok()).expect("mob x");
     let my: f32 = args.next().and_then(|s| s.parse().ok()).expect("mob y");
     let mz: f32 = args.next().and_then(|s| s.parse().ok()).expect("mob z");
@@ -2167,7 +2597,11 @@ fn backswing(
             info: MovementInfo {
                 flags: MovementInfo_MovementFlags::empty(),
                 timestamp: ts,
-                position: Vector3d { x: mx - 3.0, y: my, z: mz },
+                position: Vector3d {
+                    x: mx - 3.0,
+                    y: my,
+                    z: mz,
+                },
                 orientation: o,
                 fall_time: 0.0,
             },
@@ -2178,7 +2612,9 @@ fn backswing(
         std::thread::sleep(Duration::from_millis(120));
     }
     c.set_selection(mob)?;
-    c.send(&CMSG_ATTACKSWING { guid: Guid::new(mob) })?;
+    c.send(&CMSG_ATTACKSWING {
+        guid: Guid::new(mob),
+    })?;
     c.set_recv_timeout(Duration::from_millis(300))?;
     println!("[back] attack toggled, back turned; watching 4s for (wrong) retaliation…");
     let t0 = Instant::now();
@@ -2187,7 +2623,10 @@ fn backswing(
         match c.recv() {
             Ok(Smsg::SMSG_ATTACKSTART(a)) if a.attacker.guid() == mob => {
                 wolf_hits_while_backturned += 1;
-                println!("[back] mob ATTACKSTART @{}ms (should NOT happen)", t0.elapsed().as_millis());
+                println!(
+                    "[back] mob ATTACKSTART @{}ms (should NOT happen)",
+                    t0.elapsed().as_millis()
+                );
             }
             Ok(Smsg::SMSG_ATTACKERSTATEUPDATE(a)) if a.attacker.guid() == mob => {
                 wolf_hits_while_backturned += 1;
@@ -2205,20 +2644,36 @@ fn backswing(
     while t1.elapsed() < Duration::from_secs(6) {
         match c.recv() {
             Ok(Smsg::SMSG_ATTACKERSTATEUPDATE(a)) => {
-                if a.attacker.guid() == c.self_guid { own_swing += 1; }
-                if a.attacker.guid() == mob { retaliated += 1; }
+                if a.attacker.guid() == c.self_guid {
+                    own_swing += 1;
+                }
+                if a.attacker.guid() == mob {
+                    retaliated += 1;
+                }
             }
-            Ok(Smsg::SMSG_ATTACKSTART(a)) if a.attacker.guid() == mob => { retaliated += 1; }
+            Ok(Smsg::SMSG_ATTACKSTART(a)) if a.attacker.guid() == mob => {
+                retaliated += 1;
+            }
             _ => {}
         }
-        if own_swing > 0 && retaliated > 0 { break; }
+        if own_swing > 0 && retaliated > 0 {
+            break;
+        }
     }
     let _ = c.send(&CMSG_ATTACKSTOP {});
     println!("[back] RESULT backturned_retaliation={wolf_hits_while_backturned} own_swings_after_turn={own_swing} retaliation_after_turn={retaliated}");
-    if wolf_hits_while_backturned > 0 { bail!("backswing FAIL: mob retaliated against a swing that never fired"); }
-    if own_swing == 0 { bail!("backswing FAIL: no own swing after turning (probe geometry?)"); }
-    if retaliated == 0 { bail!("backswing FAIL: mob never retaliated after a REAL swing landed"); }
-    println!("[back] BACKSWING PASS \u{2713} no aggro while back-turned; retaliation after a real swing");
+    if wolf_hits_while_backturned > 0 {
+        bail!("backswing FAIL: mob retaliated against a swing that never fired");
+    }
+    if own_swing == 0 {
+        bail!("backswing FAIL: no own swing after turning (probe geometry?)");
+    }
+    if retaliated == 0 {
+        bail!("backswing FAIL: mob never retaliated after a REAL swing landed");
+    }
+    println!(
+        "[back] BACKSWING PASS \u{2713} no aggro while back-turned; retaliation after a real swing"
+    );
     Ok(())
 }
 
@@ -2230,10 +2685,18 @@ fn setbutton(
     _mcx: &ModeCtx<'_>,
 ) -> Result<()> {
     use wow_world_messages::vanilla::CMSG_SET_ACTION_BUTTON;
-    let button: u8 = args.next().and_then(|s| s.parse().ok()).expect("usage: setbutton <slot> <action> <type>");
+    let button: u8 = args
+        .next()
+        .and_then(|s| s.parse().ok())
+        .expect("usage: setbutton <slot> <action> <type>");
     let action: u16 = args.next().and_then(|s| s.parse().ok()).expect("action");
     let action_type: u8 = args.next().and_then(|s| s.parse().ok()).expect("type");
-    c.send(&CMSG_SET_ACTION_BUTTON { button, action, misc: 0, action_type })?;
+    c.send(&CMSG_SET_ACTION_BUTTON {
+        button,
+        action,
+        misc: 0,
+        action_type,
+    })?;
     std::thread::sleep(std::time::Duration::from_millis(800)); // let the reducer land before logout
     println!("[btn] sent SET_ACTION_BUTTON slot={button} action={action} type={action_type}");
     Ok(())
@@ -2247,7 +2710,10 @@ fn fishcast(
     _mcx: &ModeCtx<'_>,
 ) -> Result<()> {
     use std::time::{Duration, Instant};
-    let spell: u32 = args.next().and_then(|s| s.parse().ok()).expect("usage: fishcast <spell_id>");
+    let spell: u32 = args
+        .next()
+        .and_then(|s| s.parse().ok())
+        .expect("usage: fishcast <spell_id>");
     c.cast_spell(spell, 0)?;
     c.set_recv_timeout(Duration::from_millis(300))?;
     // ALL-RAW drain: the 234 assert needs the TYPE-less PLAYER_SKILL_INFO partial, which gtker's
@@ -2287,8 +2753,12 @@ fn fishcast(
         }
     }
     println!("[fish] RESULT start={start} go={go} live_skill_values={skill_values}");
-    if !start || !go { bail!("fishcast FAIL: START/GO clear missing (start={start} go={go})"); }
-    if !skill_values { bail!("fishcast FAIL: no live PLAYER_SKILL_INFO values for Fishing (234)"); }
+    if !start || !go {
+        bail!("fishcast FAIL: START/GO clear missing (start={start} go={go})");
+    }
+    if !skill_values {
+        bail!("fishcast FAIL: no live PLAYER_SKILL_INFO values for Fishing (234)");
+    }
     println!("[fish] FISHCAST PASS \u{2713} (incl. live skill-pane values)");
     Ok(())
 }
@@ -2304,8 +2774,10 @@ fn petsummon(
 ) -> Result<()> {
     use std::time::{Duration, Instant};
     use wow_world_messages::vanilla::{Object, UpdateMask};
-    let spell: u32 =
-        args.next().and_then(|s| s.parse().ok()).expect("usage: petsummon <spell_id>");
+    let spell: u32 = args
+        .next()
+        .and_then(|s| s.parse().ok())
+        .expect("usage: petsummon <spell_id>");
     let self_guid = c.self_guid;
     c.cast_spell(spell, 0)?;
     c.set_recv_timeout(Duration::from_millis(300))?;
@@ -2365,10 +2837,17 @@ fn casttime(
 ) -> Result<()> {
     use std::time::{Duration, Instant};
     use wow_world_messages::vanilla::{
-        CMSG_CANCEL_CAST, MovementInfo, MovementInfo_MovementFlags, Vector3d, MSG_MOVE_HEARTBEAT_Client,
+        MSG_MOVE_HEARTBEAT_Client, MovementInfo, MovementInfo_MovementFlags, Vector3d,
+        CMSG_CANCEL_CAST,
     };
-    let spell: u32 = args.next().and_then(|s| s.parse().ok()).expect("usage: casttime <spell> <target> <x> <y> <z>");
-    let target: u64 = args.next().and_then(|s| s.parse().ok()).expect("target guid");
+    let spell: u32 = args
+        .next()
+        .and_then(|s| s.parse().ok())
+        .expect("usage: casttime <spell> <target> <x> <y> <z>");
+    let target: u64 = args
+        .next()
+        .and_then(|s| s.parse().ok())
+        .expect("target guid");
     let mx: f32 = args.next().and_then(|s| s.parse().ok()).expect("x");
     let my: f32 = args.next().and_then(|s| s.parse().ok()).expect("y");
     let mz: f32 = args.next().and_then(|s| s.parse().ok()).expect("z");
@@ -2377,7 +2856,11 @@ fn casttime(
             info: MovementInfo {
                 flags: MovementInfo_MovementFlags::empty(),
                 timestamp: i * 100,
-                position: Vector3d { x: mx - 20.0, y: my, z: mz },
+                position: Vector3d {
+                    x: mx - 20.0,
+                    y: my,
+                    z: mz,
+                },
                 orientation: 0.0,
                 fall_time: 0.0,
             },
@@ -2397,7 +2880,9 @@ fn casttime(
         }
     }
     let _ = c.send(&CMSG_CANCEL_CAST { id: spell });
-    let Some(t) = timer else { bail!("casttime FAIL: no SMSG_SPELL_START for {spell}") };
+    let Some(t) = timer else {
+        bail!("casttime FAIL: no SMSG_SPELL_START for {spell}")
+    };
     println!("[casttime] START timer = {t}ms");
     Ok(())
 }

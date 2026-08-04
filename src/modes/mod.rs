@@ -130,8 +130,14 @@ pub(crate) fn extract_chat_text(m: &SMSG_MESSAGECHAT) -> Option<String> {
 pub(crate) fn extract_chat_sender(m: &SMSG_MESSAGECHAT) -> Option<u64> {
     use wow_world_messages::vanilla::SMSG_MESSAGECHAT_ChatType;
     match &m.chat_type {
-        SMSG_MESSAGECHAT_ChatType::Say { speech_bubble_credit, .. }
-        | SMSG_MESSAGECHAT_ChatType::Yell { speech_bubble_credit, .. } => Some(speech_bubble_credit.guid()),
+        SMSG_MESSAGECHAT_ChatType::Say {
+            speech_bubble_credit,
+            ..
+        }
+        | SMSG_MESSAGECHAT_ChatType::Yell {
+            speech_bubble_credit,
+            ..
+        } => Some(speech_bubble_credit.guid()),
         _ => None,
     }
 }

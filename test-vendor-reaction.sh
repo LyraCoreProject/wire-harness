@@ -9,7 +9,7 @@
 # seeded by debug_seed_scenario_fixtures). Standing moves via debug_grant_reputation.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-DB=spacetime-core
+DB=lyracore
 WC=./target/debug/wire-client
 source tools/wire-client/scenario-lib.sh
 

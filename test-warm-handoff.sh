@@ -5,11 +5,11 @@ set -u
 cd "$(dirname "$0")"
 . ./scenario-lib.sh
 WC=../../target/debug/wire-client
-DB=spacetime-core
-WORLD2=spacetime-world-2
+DB=lyracore
+WORLD2=lyracore-world-2
 
 # The live seam (docs/region-sharding.md / SESSION-HANDOFF): region 2 (Goldshire, gx 530-545,
-# gy 330-345) owned by spacetime-world-2; the rest of map 0 (region 1) by spacetime-core.
+# gy 330-345) owned by lyracore-world-2; the rest of map 0 (region 1) by lyracore.
 # Two real imported spawns straddling the boundary, ~126yd apart:
 #   region1 (core):  x=-9424.66 y=129.056  z=59.8005  (gx529)
 #   region2 (world2): x=-9549.82 y=112.997 z=59.0065  (gx533 — several cells past the seam)

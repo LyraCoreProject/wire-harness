@@ -6,7 +6,7 @@
 # gateway log. Marker-count based: the log accumulates across runs, so only the DELTA counts.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-DB=spacetime-core
+DB=lyracore
 WC=./target/debug/wire-client
 GWLOG=${GWLOG:-/tmp/gw.log}
 source tools/wire-client/scenario-lib.sh

@@ -5,7 +5,7 @@
 # the AT_WAR flag bit -> flip it off -> relog probe asserts the bit cleared. Fully headless.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-DB=spacetime-core
+DB=lyracore
 WC=./target/debug/wire-client
 source tools/wire-client/scenario-lib.sh
 

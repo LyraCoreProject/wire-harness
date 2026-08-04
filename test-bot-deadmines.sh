@@ -30,7 +30,7 @@ DM_TRIGGER=78 # "Deadmines - Entering" → map 36 (-14.57, -385.48, 62.46)
 # crashed mid-instance left her exactly there.
 ginger_home() {
   local holder
-  for holder in spacetime-instances; do
+  for holder in lyracore-instances; do
     [ "$holder" = "$DB" ] && continue
     [ "$(sql1 "SELECT COUNT(*) AS n FROM game_character WHERE guid = $GINGER" "$holder")" = "1" ] || continue
     echo "[orch] Ginger is on '$holder' — bringing her home to '$DB'"
@@ -76,7 +76,7 @@ scall debug_enter_areatrigger "$GINGER" $DM_TRIGGER
 # database realm resolves to $DB on the first candidate and behaves exactly as before.
 INST=""; GMAP=""; IDB=$DB
 for i in $(seq 1 15); do
-  for CAND in "$DB" spacetime-instances; do
+  for CAND in "$DB" lyracore-instances; do
     ROW=$(sqlq "SELECT map_id, instance_id FROM game_world_entity WHERE guid = $GINGER" "$CAND" | sed -n 3p | tr -d ' ')
     GMAP=${ROW%%|*}; INST=${ROW##*|}
     if [ "$GMAP" = "36" ] && [ -n "$INST" ] && [ "$INST" != "0" ]; then IDB=$CAND; break 2; fi

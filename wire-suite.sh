@@ -22,9 +22,9 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 source scripts/import-manifest.sh
 
-DB=spacetime-core
+DB=lyracore
 WC=./target/debug/wire-client
-GW_PORT=8085
+LYRACORE_PORT=8085
 LOGDIR="${WS_LOGDIR:-/tmp/wire-suite}"
 mkdir -p "$LOGDIR"
 
@@ -84,8 +84,8 @@ if ! sqlq "SELECT username FROM game_account" >/dev/null; then
   echo "[suite] FATAL: spacetime node/database '$DB' unreachable (is the local node up + module published?)" >&2
   exit 2
 fi
-if ! (exec 3<>"/dev/tcp/127.0.0.1/$GW_PORT") 2>/dev/null; then
-  echo "[suite] FATAL: gateway world port $GW_PORT closed (start it per docs/danger-zones.md §3)" >&2
+if ! (exec 3<>"/dev/tcp/127.0.0.1/$LYRACORE_PORT") 2>/dev/null; then
+  echo "[suite] FATAL: gateway world port $LYRACORE_PORT closed (start it per docs/danger-zones.md §3)" >&2
   exit 2
 fi
 cargo build -q -p wire-client || { echo "[suite] FATAL: wire-client build failed" >&2; exit 2; }
@@ -96,7 +96,7 @@ TOKEN=$(awk -F'"' '/^[[:space:]]*spacetimedb_token[[:space:]]*=/{print $2; exit}
 for acct in TEST TEST2; do
   if [ -z "$(sqlq "SELECT username FROM game_account WHERE username = '$acct'" | grep -o "$acct")" ]; then
     printf '%s\n' test123 \
-      | GW_COORDINATOR_TOKEN="$TOKEN" ./target/debug/gateway provision "$acct" --password-stdin \
+      | LYRACORE_COORDINATOR_TOKEN="$TOKEN" ./target/debug/lyracore-gateway provision "$acct" --password-stdin \
           >/dev/null 2>&1 || true
   fi
   if [ -z "$(sqlq "SELECT username FROM game_account WHERE username = '$acct'" | grep -o "$acct")" ]; then
@@ -106,8 +106,8 @@ for acct in TEST TEST2; do
 done
 # Characters: the wire client creates-on-login; `logout` mode is the cheapest clean round-trip.
 # Ginger goes through ensure_ginger_home (issue #213), not a bare char_guid check — she is not
-# guaranteed to still be ON spacetime-core (a region-boundary login can transfer her live row to
-# spacetime-world-2; a duplicate created by an old create-on-miss fallback can also shadow her at
+# guaranteed to still be ON lyracore (a region-boundary login can transfer her live row to
+# lyracore-world-2; a duplicate created by an old create-on-miss fallback can also shadow her at
 # login) and every test below assumes she is. dfsdfsd has no such shard-drift history (say-range/
 # move-relay keep her pinned near Ginger's canonical spot) so the plain check still covers her.
 [ -z "$(char_guid dfsdfsd)" ] && timeout 60 "$WC" TEST2 test123 dfsdfsd logout >/dev/null 2>&1
@@ -220,8 +220,8 @@ t_cast_interrupt() {
 }
 
 t_ghost_reveal() {
-  [ "${HAS_HEALER:-0}" -ge 1 ] || skip "no spirit healer (entry 6491) spawned — world-import-gated; test also requires a GW_AOI=0 gateway (isolates the on_update reveal path)"
-  [ "${GW_AOI:-1}" = "0" ] || skip "gateway running with GW_AOI=1 — this test isolates the on_update reveal and needs GW_AOI=0 (see its header)"
+  [ "${HAS_HEALER:-0}" -ge 1 ] || skip "no spirit healer (entry 6491) spawned — world-import-gated; test also requires a LYRACORE_AOI=0 gateway (isolates the on_update reveal path)"
+  [ "${LYRACORE_AOI:-1}" = "0" ] || skip "gateway running with LYRACORE_AOI=1 — this test isolates the on_update reveal and needs LYRACORE_AOI=0 (see its header)"
   bash tools/wire-client/test-ghost-reveal.sh
 }
 
@@ -262,7 +262,7 @@ t_levelup_info() {
 
 # ---- multi-client AOI/relay regression + soak (work-item 141) ----
 t_aoi_relay() {
-  [ "${GW_AOI:-1}" = "1" ] || skip "gateway must run with GW_AOI=1 (grid-scoped subscriptions) for the AOI boundary assertions"
+  [ "${LYRACORE_AOI:-1}" = "1" ] || skip "gateway must run with LYRACORE_AOI=1 (grid-scoped subscriptions) for the AOI boundary assertions"
   bash tools/wire-client/test-aoi-relay.sh
 }
 # Suite gate runs a 60s soak (SOAK_SECS overrides); the >=10-minute acceptance run is recorded in
@@ -322,7 +322,7 @@ t_exploration() { bash tools/wire-client/test-exploration.sh; }
 t_rest_state() { bash tools/wire-client/test-rest-state.sh; }
 # ---- #19 AC#3: deterministic crash at each of the seven cross-database transfer steps. Self-SKIPs
 # (77) on a single-database node. Deliberately LAST in ALL_TESTS: it OWNS the gateway process for
-# its duration (seven kill/restart cycles) and leaves it running with GW_SHARD_MAP set, so anything
+# its duration (seven kill/restart cycles) and leaves it running with LYRACORE_SHARD_MAP set, so anything
 # scheduled after it would be running against a differently-configured gateway. ----
 t_transfer_crash_matrix() { bash tools/wire-client/test-transfer-crash-matrix.sh; }
 

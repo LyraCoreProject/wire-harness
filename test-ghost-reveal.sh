@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Spirit-healer REVEAL-ON-GHOST wire test. A viewer who dies + repops (ghost) must get the spirit-healer
 # entity CREATE'd via the on_update reveal WITHOUT relog. Isolates the on_update path, so run the gateway
-# with GW_AOI UNSET (=0) — under GW_AOI=1 the grid re-entry would reveal it regardless.
+# with LYRACORE_AOI UNSET (=0) — under LYRACORE_AOI=1 the grid re-entry would reveal it regardless.
 # Usage: tools/wire-client/test-ghost-reveal.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -10,7 +10,7 @@ CHAR="Ginger"
 # Run-scoped handshake path (work-item 161): defined ONCE here, passed as a wire-client arg.
 GHOST_READY=/tmp/wc_ghost_ready_$$
 # ensure_ginger_home (issue #213), not a bare char_guid: Ginger is the shared long-lived fixture and
-# is not guaranteed to still be on spacetime-core (region-boundary logins can transfer her live row
+# is not guaranteed to still be on lyracore (region-boundary logins can transfer her live row
 # to another shard; a stale duplicate from an old create-on-miss fallback can also shadow her at
 # login) — self-heals both before handing back a guid.
 CGUID=$(ensure_ginger_home "$CHAR")

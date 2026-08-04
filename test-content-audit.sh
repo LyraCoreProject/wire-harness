@@ -8,7 +8,7 @@
 # (missing giver / bad objective) or a class ability (unmapped effect) fails HERE, headlessly.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-DB=spacetime-core
+DB=lyracore
 FAILED=0
 ok()   { echo "[audit] OK: $*"; }
 fail() { echo "[audit] FAIL: $*" >&2; FAILED=1; }

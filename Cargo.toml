@@ -3,7 +3,11 @@ name = "wire-client"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
-publish = false
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+# NOT renamed to `lyracore-*` on purpose: #244–#246 extract this as a SERVER-AGNOSTIC standalone
+# 1.12.1 wire harness that can test any core, so a LyraCore-branded name would be wrong for it.
 # The capacity benchmark (issue #18) added a SECOND binary to this crate, which made the bare
 # `cargo run -p wire-client` that ~6 test scripts use ambiguous — every one of them failed with
 # "could not determine which binary to run". Name the default so those scripts keep working;
@@ -15,7 +19,7 @@ default-run = "wire-client"
 # Reuses the SAME protocol crates the gateway depends on (gateway/Cargo.toml).
 
 [dependencies]
-game-shared.workspace = true
+lyracore-shared.workspace = true
 wow_srp = "0.7"
 wow_login_messages = { version = "0.5", features = ["sync"] }
 wow_world_messages = { version = "0.3", features = ["vanilla", "sync"] }

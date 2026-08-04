@@ -11,9 +11,9 @@ scenario_preflight soak
 
 SOAK_SECS="${SOAK_SECS:-600}"
 PAD_X=-8920; PAD_Y=-180; PAD_Z=82
-GW_LOG=/tmp/gw.log
+LYRACORE_LOG=/tmp/gw.log
 
-gw_errs()  { grep -ciE "decode|desync|ERROR" "$GW_LOG" 2>/dev/null || echo 0; }
+gw_errs()  { grep -ciE "decode|desync|ERROR" "$LYRACORE_LOG" 2>/dev/null || echo 0; }
 mod_panics() { spacetime logs "$DB" 2>/dev/null | grep -c "panicked" || echo 0; }
 
 # stage: full vitals + mana for the periodic casts, a couple of wolves for ambient combat, and the

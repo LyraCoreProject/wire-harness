@@ -11,7 +11,7 @@ scenario_preflight exploration
 # Resolve by NAME, never a hardcoded guid (see test-rest-state.sh's note): a stale hardcode reads
 # every assertion against a character that does not exist, and reports `got ''` rather than failing.
 GINGER=$(char_guid Ginger)
-[ -n "$GINGER" ] || { echo "[exploration] no Ginger character on spacetime-core" >&2; exit 1; }
+[ -n "$GINGER" ] || { echo "[exploration] no Ginger character on lyracore" >&2; exit 1; }
 GOLDSHIRE_X=-9461; GOLDSHIRE_Y=47 # Goldshire subzone (area_bit 548, exploration_level 5 → 70 XP at L5)
 FAILED=0
 chk(){ if [ "$2" = "$3" ]; then echo "  OK   $1 ($2)"; else echo "  FAIL $1: got '$2' want '$3'"; FAILED=1; fi }

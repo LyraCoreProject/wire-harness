@@ -1,4 +1,4 @@
-//! Headless 1.12.1 (build 5875) wire test-client for the spacetime-core gateway.
+//! Headless 1.12.1 (build 5875) wire test-client for the lyracore gateway.
 //!
 //! Speaks the real WoW protocol — SRP6 logon (port 3724) then the encrypted world session
 //! (port 8085) — so tests can drive CMSG and ASSERT on decoded SMSG, instead of QAing
@@ -6,7 +6,7 @@
 //! `gateway/src/logon/mod.rs` tests + `gateway/src/world/tests.rs::client_handshake`,
 //! lifted onto real `TcpStream`s. All blocking std I/O — no async.
 
-pub use game_shared::values_mask;
+pub use lyracore_shared::values_mask;
 
 use std::io::{Cursor, Read};
 use std::net::{Shutdown, TcpStream};
@@ -33,16 +33,16 @@ use wow_srp::PublicKey;
 
 // --- world tier ---
 use wow_world_messages::vanilla::opcodes::ServerOpcodeMessage as WorldSmsg;
+use wow_world_messages::vanilla::ClientMessage;
 use wow_world_messages::vanilla::{
-    Class, Gender, Language, LogoutResult, Race, SpellCastTargets,
+    CMSG_MESSAGECHAT_ChatType, Class, Gender, Language, LogoutResult, Race, SpellCastTargets,
     SpellCastTargets_SpellCastTargetFlags, SpellCastTargets_SpellCastTargetFlags_DestLocation,
     SpellCastTargets_SpellCastTargetFlags_Unit, Vector3d as CastVector3d, WorldResult,
-    CMSG_AUTH_SESSION, CMSG_CAST_SPELL, CMSG_CHAR_CREATE, CMSG_CHAR_DELETE, CMSG_CHAR_ENUM, CMSG_GOSSIP_HELLO,
-    CMSG_ITEM_QUERY_SINGLE, CMSG_LOGOUT_REQUEST, CMSG_MESSAGECHAT, CMSG_MESSAGECHAT_ChatType,
-    CMSG_NPC_TEXT_QUERY, CMSG_PLAYED_TIME, CMSG_PLAYER_LOGIN, CMSG_REPOP_REQUEST, CMSG_SET_SELECTION, CMSG_WHO,
-    MSG_MOVE_WORLDPORT_ACK, SMSG_AUTH_RESPONSE,
+    CMSG_AUTH_SESSION, CMSG_CAST_SPELL, CMSG_CHAR_CREATE, CMSG_CHAR_DELETE, CMSG_CHAR_ENUM,
+    CMSG_GOSSIP_HELLO, CMSG_ITEM_QUERY_SINGLE, CMSG_LOGOUT_REQUEST, CMSG_MESSAGECHAT,
+    CMSG_NPC_TEXT_QUERY, CMSG_PLAYED_TIME, CMSG_PLAYER_LOGIN, CMSG_REPOP_REQUEST,
+    CMSG_SET_SELECTION, CMSG_WHO, MSG_MOVE_WORLDPORT_ACK, SMSG_AUTH_RESPONSE,
 };
-use wow_world_messages::vanilla::ClientMessage;
 use wow_world_messages::Guid;
 
 const LOGON_PORT: u16 = 3724;
@@ -86,18 +86,44 @@ struct DecodedFrame {
     actual_body_len: usize,
 }
 
+/// A frame this session is in the middle of assembling from the wire, spanning however many
+/// [`read_guarded_world_message`] calls it takes to get all the bytes (issue #209 fix): the header
+/// has already been read in full and decrypted EXACTLY ONCE (`header_raw`/`opcode`/`payload_len`),
+/// `parser_dec` is the pre-header-decrypt cipher clone the generated decoder needs, and `body` is
+/// however many of `payload_len` raw (still-encrypted) body bytes have been pulled off the socket
+/// so far. Kept on [`FrameLog`] so a read timeout mid-body doesn't lose it.
+struct PendingFrame {
+    opcode: u16,
+    payload_len: usize,
+    header_raw: [u8; 4],
+    parser_dec: DecrypterHalf,
+    body: Vec<u8>,
+}
+
 /// Per-session crash-capture state (issue #209 probe, deliverable 1): a ring buffer of the last
 /// [`CRASH_RING_CAPACITY`] successfully-decoded frames, plus whatever [`read_guarded_world_message`]
 /// read of the CURRENT (possibly failing) frame's header/body before it gave up. [`WireClient::recv`]
 /// updates this on every attempt and — only at the point a decode failure actually ends the session
 /// (the panic path, the huge-alloc guard, or the accumulated-skip desync bailout) — dumps it under
 /// `crash_dump_dir()`, turning "it crashed" into the exact byte sequence that did it.
+///
+/// Also carries the #209 read-timeout fix's resumable-read state: `pending_header` (bytes of the
+/// 4-byte header collected so far, when a header read is in flight) and `pending_frame` (the rest,
+/// once the header is complete). Both survive across separate [`read_guarded_world_message`] calls
+/// — the shape a caller like `recv_for` produces when it swallows a socket-timeout `Err` and retries
+/// — so a timeout landing mid multi-byte read never drops already-consumed bytes onto the floor.
+/// Losing those bytes was issue #209's actual bug: the next call would resume reading from whatever
+/// stream position the partial read left off at, decrypt THOSE (wrong) 4 bytes as if they were a
+/// fresh header, and permanently desync the header-cipher's `index`/`previous_value` state from the
+/// real byte stream — every later frame decodes as garbage from that point on.
 struct FrameLog {
     label: String,
     ring: std::collections::VecDeque<DecodedFrame>,
     last_header_raw: [u8; 4],
     last_opcode: Option<u16>,
     last_body_preview: Vec<u8>,
+    pending_header: Vec<u8>,
+    pending_frame: Option<PendingFrame>,
 }
 
 impl FrameLog {
@@ -108,6 +134,8 @@ impl FrameLog {
             last_header_raw: [0; 4],
             last_opcode: None,
             last_body_preview: Vec::new(),
+            pending_header: Vec::new(),
+            pending_frame: None,
         }
     }
 
@@ -124,7 +152,11 @@ impl FrameLog {
         if self.ring.len() == CRASH_RING_CAPACITY {
             self.ring.pop_front();
         }
-        self.ring.push_back(DecodedFrame { opcode, declared_body_len, actual_body_len });
+        self.ring.push_back(DecodedFrame {
+            opcode,
+            declared_body_len,
+            actual_body_len,
+        });
     }
 
     /// Best-effort diagnostic dump for a decode failure that is about to end the session. Never
@@ -146,9 +178,17 @@ impl FrameLog {
         use std::fmt::Write as _;
         let _ = writeln!(out, "session: {}", self.label);
         let _ = writeln!(out, "error: {err:#}");
-        let _ = writeln!(out, "last {} decoded frames (oldest first):", self.ring.len());
+        let _ = writeln!(
+            out,
+            "last {} decoded frames (oldest first):",
+            self.ring.len()
+        );
         for f in &self.ring {
-            let mismatch = if f.declared_body_len != f.actual_body_len { "  <-- MISMATCH" } else { "" };
+            let mismatch = if f.declared_body_len != f.actual_body_len {
+                "  <-- MISMATCH"
+            } else {
+                ""
+            };
             let _ = writeln!(
                 out,
                 "  opcode=0x{:04X} declared_body_len={} actual_body_len={}{mismatch}",
@@ -163,7 +203,9 @@ impl FrameLog {
         let _ = writeln!(
             out,
             "failing frame opcode: {}",
-            self.last_opcode.map(|o| format!("0x{o:04X}")).unwrap_or_else(|| "<unknown>".into())
+            self.last_opcode
+                .map(|o| format!("0x{o:04X}"))
+                .unwrap_or_else(|| "<unknown>".into())
         );
         let _ = writeln!(
             out,
@@ -183,7 +225,11 @@ fn hex_bytes(bytes: &[u8]) -> String {
     if bytes.is_empty() {
         return "<empty>".to_string();
     }
-    bytes.iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(" ")
+    bytes
+        .iter()
+        .map(|b| format!("{b:02X}"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Filenames must survive account names like `BENCH0042` unmodified and never escape
@@ -191,7 +237,13 @@ fn hex_bytes(bytes: &[u8]) -> String {
 fn sanitize_label(label: &str) -> String {
     label
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -221,7 +273,11 @@ struct UnsafeServerFrame {
 
 impl std::fmt::Display for UnsafeServerFrame {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "unsafe inbound server frame: opcode=0x{:04X} ", self.opcode)?;
+        write!(
+            f,
+            "unsafe inbound server frame: opcode=0x{:04X} ",
+            self.opcode
+        )?;
         write!(f, "payload[0..{}]=", self.payload_prefix.len())?;
         if self.payload_prefix.is_empty() {
             f.write_str("<empty>")?;
@@ -255,9 +311,47 @@ fn unsafe_frame(opcode: u16, payload_prefix: &[u8], reason: impl Into<String>) -
     })
 }
 
-/// Read the encrypted header and only the first few payload bytes before invoking the generated
-/// decoder. The rest of the payload streams straight through; cloning the pre-header cipher state
-/// lets the decoder see the original encrypted header while the live state advances exactly once.
+/// Fill `acc` up to `target` bytes by reading from `r`, appending every successfully-read chunk
+/// immediately (not just on full completion).
+///
+/// This is the issue #209 fix's core primitive: a caller like `recv_for` treats a socket-read
+/// timeout as "the world is quiet, try again" and calls back in — but the ORIGINAL code read every
+/// multi-byte field (the 4-byte header, the body) into a fresh stack buffer via `read_exact`, whose
+/// std impl discards whatever it had already read into that buffer the moment any call errors. A
+/// timeout landing after 1-3 of a header's 4 bytes had already arrived (more likely the fuller a
+/// socket gets under crowd load, since more bytes in flight means more chances a read syscall
+/// returns short before the rest lands within the read-timeout window) meant those bytes were gone:
+/// the retry started a fresh `read_exact` at the CURRENT stream position — now offset by however
+/// many bytes were silently dropped — decrypted THOSE wrong bytes as a header, and the header
+/// cipher's `index`/`previous_value` (a running, per-byte-position stream state) never recovered.
+/// Buffering into `acc`, which the caller persists across retries in [`FrameLog`], means a timeout
+/// only ever pauses a read — it can never rewind or skip the stream.
+fn fill_resumable<R: Read>(r: &mut R, acc: &mut Vec<u8>, target: usize) -> std::io::Result<()> {
+    while acc.len() < target {
+        let mut chunk = vec![0u8; target - acc.len()];
+        let n = r.read(&mut chunk)?;
+        if n == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "connection closed mid-frame",
+            ));
+        }
+        acc.extend_from_slice(&chunk[..n]);
+    }
+    Ok(())
+}
+
+/// Read one full frame (header + body) off the wire and hand it to the generated decoder.
+///
+/// Issue #209 fix: the header and body are each assembled into a persistent buffer on `log`
+/// ([`FrameLog::pending_header`] / [`FrameLog::pending_frame`]) via [`fill_resumable`] rather than a
+/// stack-local `read_exact` — so if this call returns a socket-timeout error partway through either
+/// one, the bytes already read are NOT lost; the next call to this function resumes filling the same
+/// buffer instead of restarting at (and permanently desyncing from) the wrong stream position. The
+/// header is decrypted via `dec.decrypt_server_header` exactly once, only after all 4 raw bytes are
+/// in hand — never partially, never twice. Once the full body is buffered, decoding runs entirely
+/// in memory (a `Cursor`, not the live socket), so nothing past this point can time out or leave the
+/// frame half-consumed.
 ///
 /// `log` records the attempt (issue #209 crash-capture, deliverable 1) regardless of outcome: the
 /// header/opcode/body-preview are stashed BEFORE the decode is attempted (so a header/payload read
@@ -268,44 +362,75 @@ fn read_guarded_world_message<R: Read>(
     dec: &mut DecrypterHalf,
     log: &mut FrameLog,
 ) -> Result<WorldSmsg> {
-    let mut parser_dec = dec.clone();
-    let mut encrypted_header = [0u8; 4];
-    r.read_exact(&mut encrypted_header)
-        .map_err(|e| anyhow!("world frame header: {e}"))?;
-    let header = dec.decrypt_server_header(encrypted_header);
-    if header.size < 2 {
-        log.record_attempt(encrypted_header, header.opcode, &[]);
-        return Err(unsafe_frame(
-            header.opcode,
-            &[],
-            format!(
-                "invalid server-frame size {} (the size must include the 2-byte opcode)",
-                header.size
-            ),
-        ));
-    }
+    if log.pending_frame.is_none() {
+        // Header phase: resume (or start) filling the 4 raw header bytes. On error, whatever was
+        // read this call and any prior call is already in `log.pending_header` — nothing lost.
+        fill_resumable(r, &mut log.pending_header, 4)
+            .map_err(|e| anyhow!("world frame header: {e}"))?;
 
-    let payload_len = usize::from(header.size - 2);
-    let preview_len = payload_len.min(FRAME_DIAGNOSTIC_BYTES);
-    let mut preview = vec![0u8; preview_len];
-    r.read_exact(&mut preview)
-        .map_err(|e| anyhow!("world frame payload: {e}"))?;
-    log.record_attempt(encrypted_header, header.opcode, &preview);
+        // Clone BEFORE the real `dec` advances — the generated decoder re-derives the header from
+        // this pre-advance clone as part of its own decode, exactly as the pre-#209-fix code did.
+        let parser_dec = dec.clone();
+        let mut header_raw = [0u8; 4];
+        header_raw.copy_from_slice(&log.pending_header);
+        log.pending_header.clear();
 
-    if header.opcode == SMSG_COMPRESSED_MOVES_OPCODE {
-        if payload_len < 4 {
+        let header = dec.decrypt_server_header(header_raw);
+        if header.size < 2 {
+            log.record_attempt(header_raw, header.opcode, &[]);
             return Err(unsafe_frame(
                 header.opcode,
+                &[],
+                format!(
+                    "invalid server-frame size {} (the size must include the 2-byte opcode)",
+                    header.size
+                ),
+            ));
+        }
+        let payload_len = usize::from(header.size - 2);
+        log.pending_frame = Some(PendingFrame {
+            opcode: header.opcode,
+            payload_len,
+            header_raw,
+            parser_dec,
+            body: Vec::new(),
+        });
+    }
+
+    // Body phase: resume (or start) filling `payload_len` raw body bytes. Left in `log.pending_frame`
+    // (not yet taken) so a timeout here keeps the header decrypt result AND the partial body.
+    {
+        let pf = log.pending_frame.as_mut().expect("just ensured Some above");
+        fill_resumable(r, &mut pf.body, pf.payload_len)
+            .map_err(|e| anyhow!("world frame payload: {e}"))?;
+    }
+    // The full frame is in memory now — take ownership; a later call starts the NEXT frame fresh.
+    let PendingFrame {
+        opcode,
+        payload_len,
+        header_raw,
+        mut parser_dec,
+        body,
+    } = log.pending_frame.take().expect("just ensured Some above");
+
+    let preview_len = payload_len.min(FRAME_DIAGNOSTIC_BYTES);
+    let preview = body[..preview_len].to_vec();
+    log.record_attempt(header_raw, opcode, &preview);
+
+    if opcode == SMSG_COMPRESSED_MOVES_OPCODE {
+        if payload_len < 4 {
+            return Err(unsafe_frame(
+                opcode,
                 &preview,
                 format!(
                     "compressed-moves payload is {payload_len} bytes; the decompressed-size prefix needs 4"
                 ),
             ));
         }
-        let declared = u32::from_le_bytes(preview[..4].try_into().unwrap()) as usize;
+        let declared = u32::from_le_bytes(body[..4].try_into().unwrap()) as usize;
         if declared > MAX_DECOMPRESSED_FRAME_BYTES {
             return Err(unsafe_frame(
-                header.opcode,
+                opcode,
                 &preview,
                 format!(
                     "declares {declared} decompressed bytes; limit is {MAX_DECOMPRESSED_FRAME_BYTES}"
@@ -314,22 +439,24 @@ fn read_guarded_world_message<R: Read>(
         }
     }
 
-    let remaining = payload_len - preview_len;
     let consumed = std::rc::Rc::new(std::cell::Cell::new(0usize));
-    let tail = CountingRead { inner: r.take(remaining as u64), consumed: consumed.clone() };
-    let mut frame = Cursor::new(encrypted_header).chain(Cursor::new(preview.as_slice())).chain(tail);
+    let counting_body = CountingRead {
+        inner: Cursor::new(body),
+        consumed: consumed.clone(),
+    };
+    let mut frame = Cursor::new(header_raw).chain(counting_body);
     let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         WorldSmsg::read_encrypted(&mut frame, &mut parser_dec)
     }));
     match decoded {
         Ok(Ok(m)) => {
-            let actual_body_len = preview_len + consumed.get();
-            log.record_decoded(header.opcode, payload_len, actual_body_len);
+            let actual_body_len = consumed.get();
+            log.record_decoded(opcode, payload_len, actual_body_len);
             Ok(m)
         }
         Ok(Err(e)) => Err(anyhow::Error::new(e)),
         Err(payload) => Err(unsafe_frame(
-            header.opcode,
+            opcode,
             &preview,
             format!("decoder panicked: {}", panic_message(payload.as_ref())),
         )),
@@ -360,7 +487,12 @@ pub fn logon_at(logon_addr: &str, account: &str, password: &str) -> Result<([u8;
 
     CMD_AUTH_LOGON_CHALLENGE_Client {
         protocol_version: ProtocolVersion::Three,
-        version: Version { major: 1, minor: 12, patch: 1, build: 5875 },
+        version: Version {
+            major: 1,
+            minor: 12,
+            patch: 1,
+            build: 5875,
+        },
         platform: Platform::X86,
         os: Os::Windows,
         locale: Locale::EnUs,
@@ -463,12 +595,7 @@ pub struct WireClient {
 impl WireClient {
     /// One-shot bring-up: logon -> world handshake -> create-or-find `char_name` of
     /// `class` -> player login. Leaves the client in-world.
-    pub fn login_as(
-        account: &str,
-        password: &str,
-        char_name: &str,
-        class: Class,
-    ) -> Result<Self> {
+    pub fn login_as(account: &str, password: &str, char_name: &str, class: Class) -> Result<Self> {
         let (k, world_addr) = logon(account, password)?;
         let mut c = Self::connect_world(&world_addr, account, k)?;
         let guid = c.create_or_find_char(char_name, class)?;
@@ -485,11 +612,11 @@ impl WireClient {
     /// the read timeout for the duration of the wait (a queued connection can legitimately sit for
     /// as long as it takes seats to free, which is NOT bounded by the normal 10s packet-arrival
     /// timeout every other read in this client uses). Every pre-#180 caller sees no behavior change
-    /// at all: an unlimited gateway (`GW_MAX_SESSIONS` unset) never sends `AuthWaitQueue`, so the
+    /// at all: an unlimited gateway (`LYRACORE_MAX_SESSIONS` unset) never sends `AuthWaitQueue`, so the
     /// loop body below never runs and `queue_positions_seen` stays empty.
     pub fn connect_world(world_addr: &str, account: &str, k: [u8; 40]) -> Result<Self> {
-        let mut stream =
-            TcpStream::connect(world_addr).with_context(|| format!("connect world {world_addr}"))?;
+        let mut stream = TcpStream::connect(world_addr)
+            .with_context(|| format!("connect world {world_addr}"))?;
         stream.set_read_timeout(Some(Duration::from_secs(10)))?;
 
         let server_seed = match WorldSmsg::read_unencrypted(&mut stream)? {
@@ -562,10 +689,15 @@ impl WireClient {
     /// spawn inside the 5 yd standstill melee reach). Vanilla run speed is 7.0 yd/s; the server's
     /// NaN/teleport guards see a plausible stream, and its `last_move_ms`/moving flags behave as
     /// for a real runner. Blocks for the walk duration.
-    pub fn walk_to(&mut self, from: (f32, f32, f32), to: (f32, f32, f32), speed: f32) -> Result<()> {
+    pub fn walk_to(
+        &mut self,
+        from: (f32, f32, f32),
+        to: (f32, f32, f32),
+        speed: f32,
+    ) -> Result<()> {
         use wow_world_messages::vanilla::{
-            MovementInfo, MovementInfo_MovementFlags, Vector3d, MSG_MOVE_HEARTBEAT_Client,
-            MSG_MOVE_START_FORWARD_Client, MSG_MOVE_STOP_Client,
+            MSG_MOVE_HEARTBEAT_Client, MSG_MOVE_START_FORWARD_Client, MSG_MOVE_STOP_Client,
+            MovementInfo, MovementInfo_MovementFlags, Vector3d,
         };
         let (dx, dy, dz) = (to.0 - from.0, to.1 - from.1, to.2 - from.2);
         let dist = (dx * dx + dy * dy + dz * dz).sqrt();
@@ -583,7 +715,9 @@ impl WireClient {
             orientation,
             fall_time: 0.0,
         };
-        self.send(&MSG_MOVE_START_FORWARD_Client { info: info(from.0, from.1, from.2, true, 0) })?;
+        self.send(&MSG_MOVE_START_FORWARD_Client {
+            info: info(from.0, from.1, from.2, true, 0),
+        })?;
         const STEP_MS: u32 = 200;
         let mut t = STEP_MS;
         while t < total_ms {
@@ -594,7 +728,9 @@ impl WireClient {
             std::thread::sleep(Duration::from_millis(STEP_MS as u64));
             t += STEP_MS;
         }
-        self.send(&MSG_MOVE_STOP_Client { info: info(to.0, to.1, to.2, false, total_ms) })?;
+        self.send(&MSG_MOVE_STOP_Client {
+            info: info(to.0, to.1, to.2, false, total_ms),
+        })?;
         Ok(())
     }
 
@@ -693,6 +829,21 @@ impl WireClient {
                     {
                         return Err(anyhow!("recv: socket read timeout: {e}"));
                     }
+                    // A CLOSED connection ("connection closed mid-frame" — [`fill_resumable`] hitting
+                    // EOF) is also terminal, and for the same reason a timeout is: this is a "broken
+                    // stream", not a "nothing yet". Issue #209 fix, found live: without this, a
+                    // connection that ends for ANY reason (a graceful peer close, a session the
+                    // gateway shed under load — nothing to do with #209's decode-corruption at all)
+                    // fell into the `skipped`/dump path below. A closed socket's reads return
+                    // instantly (no blocking), so a caller that keeps calling `recv()` once per poll
+                    // tick for the rest of a benchmark's hold window hit the 64-skip threshold on
+                    // EVERY call and wrote a fresh crash dump EVERY time — one dead session produced
+                    // thousands of files, burying the (correctly now-absent) real corruption signal
+                    // under noise that has nothing to do with it. No dump here: an ended stream is
+                    // not decode evidence worth capturing.
+                    if msg.contains("connection closed") {
+                        return Err(anyhow!("recv: connection closed: {e}"));
+                    }
                     skipped += 1;
                     if skipped > 64 {
                         // 64 STRAIGHT ordinary `read_encrypted` errors (as opposed to the ONE-shot
@@ -783,8 +934,10 @@ impl WireClient {
                     }
                     // #72: ITEM and CONTAINER creates are this session's own item/bag objects (the
                     // login burst, plus anything gained mid-session) — see `item_guids`'s field doc.
-                    if matches!(create_object_type(o), Some(ObjectType::Item | ObjectType::Container))
-                        && !self.item_guids.contains(&g)
+                    if matches!(
+                        create_object_type(o),
+                        Some(ObjectType::Item | ObjectType::Container)
+                    ) && !self.item_guids.contains(&g)
                     {
                         self.item_guids.push(g);
                     }
@@ -797,8 +950,13 @@ impl WireClient {
     pub fn char_enum(&mut self) -> Result<Vec<(u64, String, Class)>> {
         self.send(&CMSG_CHAR_ENUM {})?;
         let m = self.recv_until(|m| matches!(m, WorldSmsg::SMSG_CHAR_ENUM(_)))?;
-        let WorldSmsg::SMSG_CHAR_ENUM(e) = m else { unreachable!() };
-        Ok(e.characters.iter().map(|c| (c.guid.guid(), c.name.clone(), c.class)).collect())
+        let WorldSmsg::SMSG_CHAR_ENUM(e) = m else {
+            unreachable!()
+        };
+        Ok(e.characters
+            .iter()
+            .map(|c| (c.guid.guid(), c.name.clone(), c.class))
+            .collect())
     }
 
     /// Request the character list and return the raw equipment display_ids for each character.
@@ -808,7 +966,9 @@ impl WireClient {
     pub fn char_enum_gear(&mut self) -> Result<Vec<(u64, String, Vec<u32>)>> {
         self.send(&CMSG_CHAR_ENUM {})?;
         let m = self.recv_until(|m| matches!(m, WorldSmsg::SMSG_CHAR_ENUM(_)))?;
-        let WorldSmsg::SMSG_CHAR_ENUM(e) = m else { unreachable!() };
+        let WorldSmsg::SMSG_CHAR_ENUM(e) = m else {
+            unreachable!()
+        };
         Ok(e.characters
             .iter()
             .map(|c| {
@@ -829,14 +989,16 @@ impl WireClient {
     ///
     /// The race decides which DATABASE the character is born on, which is why this exists. A new
     /// character is placed at its race's `game_start_position`, and those straddle the continent
-    /// split: Human is Elwynn on map 0 (`spacetime-core`), Orc and Troll are the Valley of Trials on
-    /// map 1 (`spacetime-world-1`). So a benchmark that wants to load the KALIMDOR writer cannot use
+    /// split: Human is Elwynn on map 0 (`lyracore`), Orc and Troll are the Valley of Trials on
+    /// map 1 (`lyracore-world-1`). So a benchmark that wants to load the KALIMDOR writer cannot use
     /// the default — 200 Humans created against a world-1 gateway are all born on map 0 and every
     /// one of them immediately transfers to core, measuring the shard it was trying to leave alone
     /// (work-item #71).
     pub fn create_or_find_char_as(&mut self, name: &str, class: Class, race: Race) -> Result<u64> {
-        if let Some((g, _, _)) =
-            self.char_enum()?.into_iter().find(|(_, n, _)| n.eq_ignore_ascii_case(name))
+        if let Some((g, _, _)) = self
+            .char_enum()?
+            .into_iter()
+            .find(|(_, n, _)| n.eq_ignore_ascii_case(name))
         {
             return Ok(g);
         }
@@ -852,7 +1014,9 @@ impl WireClient {
             facial_hair: 0,
         })?;
         let m = self.recv_until(|m| matches!(m, WorldSmsg::SMSG_CHAR_CREATE(_)))?;
-        let WorldSmsg::SMSG_CHAR_CREATE(r) = m else { unreachable!() };
+        let WorldSmsg::SMSG_CHAR_CREATE(r) = m else {
+            unreachable!()
+        };
         match r.result {
             WorldResult::CharCreateSuccess | WorldResult::CharCreateNameInUse => {}
             other => bail!("char create failed: {other:?}"),
@@ -866,16 +1030,22 @@ impl WireClient {
 
     /// Delete `guid` (`CMSG_CHAR_DELETE`, work-item 081) and return the resulting `WorldResult`.
     pub fn char_delete(&mut self, guid: u64) -> Result<WorldResult> {
-        self.send(&CMSG_CHAR_DELETE { guid: Guid::new(guid) })?;
+        self.send(&CMSG_CHAR_DELETE {
+            guid: Guid::new(guid),
+        })?;
         let m = self.recv_until(|m| matches!(m, WorldSmsg::SMSG_CHAR_DELETE(_)))?;
-        let WorldSmsg::SMSG_CHAR_DELETE(r) = m else { unreachable!() };
+        let WorldSmsg::SMSG_CHAR_DELETE(r) = m else {
+            unreachable!()
+        };
         Ok(r.result)
     }
 
     /// Enter the world as `guid`, draining the post-login burst up to (and including) the
     /// self CREATE_OBJECT. Sets `self_guid`.
     pub fn player_login(&mut self, guid: u64) -> Result<()> {
-        self.send(&CMSG_PLAYER_LOGIN { guid: Guid::new(guid) })?;
+        self.send(&CMSG_PLAYER_LOGIN {
+            guid: Guid::new(guid),
+        })?;
         // The burst starts with SMSG_LOGIN_VERIFY_WORLD and ends with the self CREATE_OBJECT.
         self.recv_until(|m| matches!(m, WorldSmsg::SMSG_LOGIN_VERIFY_WORLD(_)))?;
         self.self_guid = guid;
@@ -885,16 +1055,20 @@ impl WireClient {
             let m = self.recv()?;
             match &m {
                 WorldSmsg::SMSG_INITIAL_SPELLS(s) => {
-                    self.initial_spells =
-                        s.initial_spells.iter().map(|e| u32::from(e.spell_id)).collect();
+                    self.initial_spells = s
+                        .initial_spells
+                        .iter()
+                        .map(|e| u32::from(e.spell_id))
+                        .collect();
                 }
                 WorldSmsg::SMSG_INITIALIZE_FACTIONS(f) => {
                     self.init_factions = f.factions.iter().map(|s| s.standing as i32).collect();
-                    self.init_faction_flags =
-                        f.factions.iter().map(|s| s.flag.as_int()).collect();
+                    self.init_faction_flags = f.factions.iter().map(|s| s.flag.as_int()).collect();
                 }
                 WorldSmsg::SMSG_UPDATE_OBJECT(u)
-                    if u.objects.iter().any(|o| create_object_guid(o) == Some(guid)) =>
+                    if u.objects
+                        .iter()
+                        .any(|o| create_object_guid(o) == Some(guid)) =>
                 {
                     break
                 }
@@ -906,26 +1080,35 @@ impl WireClient {
 
     /// Select a target by guid (CMSG_SET_SELECTION).
     pub fn set_selection(&mut self, target: u64) -> Result<()> {
-        self.send(&CMSG_SET_SELECTION { target: Guid::new(target) })
+        self.send(&CMSG_SET_SELECTION {
+            target: Guid::new(target),
+        })
     }
 
     /// Right-click a gossip NPC (CMSG_GOSSIP_HELLO) — the gateway should reply with
     /// SMSG_GOSSIP_MESSAGE (its quests for a gossip+questgiver like McBride).
     pub fn gossip_hello(&mut self, npc: u64) -> Result<()> {
-        self.send(&CMSG_GOSSIP_HELLO { guid: Guid::new(npc) })
+        self.send(&CMSG_GOSSIP_HELLO {
+            guid: Guid::new(npc),
+        })
     }
 
     /// Right-click a QUESTGIVER-ONLY NPC (CMSG_QUESTGIVER_HELLO) — the real protocol the client uses
     /// when an NPC has npc_flags QUESTGIVER but NOT GOSSIP (e.g. Deputy Willem). Reply: SMSG_QUESTGIVER_QUEST_LIST.
     pub fn questgiver_hello(&mut self, npc: u64) -> Result<()> {
-        self.send(&wow_world_messages::vanilla::CMSG_QUESTGIVER_HELLO { guid: Guid::new(npc) })
+        self.send(&wow_world_messages::vanilla::CMSG_QUESTGIVER_HELLO {
+            guid: Guid::new(npc),
+        })
     }
 
     /// Send `CMSG_NPC_TEXT_QUERY` for `text_id` and wait for `SMSG_NPC_TEXT_UPDATE`. Returns the
     /// text in slot 0 (the greeting slot the gateway always fills). Used to verify per-NPC text.
     pub fn npc_text_query(&mut self, text_id: u32, npc_guid: u64) -> Result<String> {
         use wow_world_messages::vanilla::opcodes::ServerOpcodeMessage as Smsg;
-        self.send(&CMSG_NPC_TEXT_QUERY { text_id, guid: Guid::new(npc_guid) })?;
+        self.send(&CMSG_NPC_TEXT_QUERY {
+            text_id,
+            guid: Guid::new(npc_guid),
+        })?;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while std::time::Instant::now() < deadline {
             match self.recv()? {
@@ -950,7 +1133,10 @@ impl WireClient {
         use wow_world_messages::vanilla::opcodes::ServerOpcodeMessage as Smsg;
         // The vanilla packet carries both item entry and a guid (the item object guid when the
         // client holds the item; 0 when querying "cold" without the object — both are accepted).
-        self.send(&CMSG_ITEM_QUERY_SINGLE { item: item_entry, guid: Guid::new(0) })?;
+        self.send(&CMSG_ITEM_QUERY_SINGLE {
+            item: item_entry,
+            guid: Guid::new(0),
+        })?;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while std::time::Instant::now() < deadline {
             match self.recv()? {
@@ -967,7 +1153,15 @@ impl WireClient {
                     let spell1 = found.spells[0].spell;
                     let trig1 = u32::from(found.spells[0].spell_trigger.as_int());
                     let bonding = found.bonding.as_int();
-                    return Ok((found.armor, found.block, found.sell_price.as_int(), stats, spell1, trig1, bonding));
+                    return Ok((
+                        found.armor,
+                        found.block,
+                        found.sell_price.as_int(),
+                        stats,
+                        spell1,
+                        trig1,
+                        bonding,
+                    ));
                 }
                 _ => continue,
             }
@@ -985,7 +1179,8 @@ impl WireClient {
                 WorldSmsg::SMSG_LOGOUT_RESPONSE(r) => {
                     if r.result == LogoutResult::Success {
                         // Drain SMSG_LOGOUT_COMPLETE (it's sent in the same batch).
-                        let deadline2 = std::time::Instant::now() + std::time::Duration::from_secs(3);
+                        let deadline2 =
+                            std::time::Instant::now() + std::time::Duration::from_secs(3);
                         while std::time::Instant::now() < deadline2 {
                             match self.recv()? {
                                 WorldSmsg::SMSG_LOGOUT_COMPLETE => break,
@@ -1037,9 +1232,18 @@ impl WireClient {
         while std::time::Instant::now() < deadline {
             match self.recv()? {
                 WorldSmsg::SMSG_WHO(r) => {
-                    let players: Vec<(String, u8, u8, u8)> = r.players.iter().map(|p| {
-                        (p.name.clone(), p.level.as_int(), p.class.as_int(), p.race.as_int())
-                    }).collect();
+                    let players: Vec<(String, u8, u8, u8)> = r
+                        .players
+                        .iter()
+                        .map(|p| {
+                            (
+                                p.name.clone(),
+                                p.level.as_int(),
+                                p.class.as_int(),
+                                p.race.as_int(),
+                            )
+                        })
+                        .collect();
                     return Ok((r.online_players, players));
                 }
                 _ => continue,
@@ -1054,7 +1258,9 @@ impl WireClient {
             spell: spell_id,
             targets: SpellCastTargets {
                 target_flags: SpellCastTargets_SpellCastTargetFlags::new_unit(
-                    SpellCastTargets_SpellCastTargetFlags_Unit { unit_target: Guid::new(target) },
+                    SpellCastTargets_SpellCastTargetFlags_Unit {
+                        unit_target: Guid::new(target),
+                    },
                 ),
             },
         })
@@ -1158,15 +1364,13 @@ mod tests {
     }
 
     fn client_receiving_frames_labeled(frames: &[(u16, &[u8])], label: &str) -> WireClient {
-        let (_, crypto) = ProofSeed::new()
-            .into_client_header_crypto(&ns("TEST").unwrap(), [7; 40], 0x1234_5678);
+        let (_, crypto) =
+            ProofSeed::new().into_client_header_crypto(&ns("TEST").unwrap(), [7; 40], 0x1234_5678);
         let (mut enc, dec) = crypto.split();
 
         let mut wire = Vec::new();
         for (opcode, payload) in frames {
-            wire.extend_from_slice(
-                &enc.encrypt_server_header((payload.len() + 2) as u16, *opcode),
-            );
+            wire.extend_from_slice(&enc.encrypt_server_header((payload.len() + 2) as u16, *opcode));
             wire.extend_from_slice(payload);
         }
 
@@ -1202,9 +1406,14 @@ mod tests {
         payload.push(0); // invalid zlib is immaterial: the size prefix must reject first
         let mut client = client_receiving_frame(SMSG_COMPRESSED_MOVES_OPCODE, &payload);
 
-        let error = client.recv().expect_err("an oversized decompressed frame must fail the session");
+        let error = client
+            .recv()
+            .expect_err("an oversized decompressed frame must fail the session");
         let diagnostic = error.to_string();
-        assert!(diagnostic.contains("opcode=0x02FB"), "missing opcode: {diagnostic}");
+        assert!(
+            diagnostic.contains("opcode=0x02FB"),
+            "missing opcode: {diagnostic}"
+        );
         assert!(
             diagnostic.contains("payload[0..5]=01 00 40 00 00"),
             "missing frame preview: {diagnostic}"
@@ -1221,14 +1430,22 @@ mod tests {
         payload.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
         let mut client = client_receiving_frame(SMSG_COMPRESSED_MOVES_OPCODE, &payload);
 
-        let error = client.recv().expect_err("corrupt zlib must fail only this session");
+        let error = client
+            .recv()
+            .expect_err("corrupt zlib must fail only this session");
         let diagnostic = error.to_string();
-        assert!(diagnostic.contains("opcode=0x02FB"), "missing opcode: {diagnostic}");
+        assert!(
+            diagnostic.contains("opcode=0x02FB"),
+            "missing opcode: {diagnostic}"
+        );
         assert!(
             diagnostic.contains("payload[0..8]=20 00 00 00 DE AD BE EF"),
             "missing frame preview: {diagnostic}"
         );
-        assert!(diagnostic.contains("decoder panicked"), "missing panic diagnosis: {diagnostic}");
+        assert!(
+            diagnostic.contains("decoder panicked"),
+            "missing panic diagnosis: {diagnostic}"
+        );
     }
 
     #[test]
@@ -1237,8 +1454,14 @@ mod tests {
             (0x004D, &[]), // SMSG_LOGOUT_COMPLETE
             (0x004F, &[]), // SMSG_LOGOUT_CANCEL_ACK
         ]);
-        assert!(matches!(client.recv().unwrap(), WorldSmsg::SMSG_LOGOUT_COMPLETE));
-        assert!(matches!(client.recv().unwrap(), WorldSmsg::SMSG_LOGOUT_CANCEL_ACK));
+        assert!(matches!(
+            client.recv().unwrap(),
+            WorldSmsg::SMSG_LOGOUT_COMPLETE
+        ));
+        assert!(matches!(
+            client.recv().unwrap(),
+            WorldSmsg::SMSG_LOGOUT_CANCEL_ACK
+        ));
     }
 
     /// Remove every file this test wrote so re-running the suite doesn't accumulate cruft in the
@@ -1272,15 +1495,23 @@ mod tests {
         corrupt.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
         let mut client = client_receiving_frames_labeled(
             &[
-                (0x004D, &[]),                                 // SMSG_LOGOUT_COMPLETE (clean)
-                (0x004F, &[]),                                 // SMSG_LOGOUT_CANCEL_ACK (clean)
+                (0x004D, &[]),                            // SMSG_LOGOUT_COMPLETE (clean)
+                (0x004F, &[]),                            // SMSG_LOGOUT_CANCEL_ACK (clean)
                 (SMSG_COMPRESSED_MOVES_OPCODE, &corrupt), // the fatal one
             ],
             label,
         );
-        assert!(matches!(client.recv().unwrap(), WorldSmsg::SMSG_LOGOUT_COMPLETE));
-        assert!(matches!(client.recv().unwrap(), WorldSmsg::SMSG_LOGOUT_CANCEL_ACK));
-        let err = client.recv().expect_err("the corrupt frame must end the session");
+        assert!(matches!(
+            client.recv().unwrap(),
+            WorldSmsg::SMSG_LOGOUT_COMPLETE
+        ));
+        assert!(matches!(
+            client.recv().unwrap(),
+            WorldSmsg::SMSG_LOGOUT_CANCEL_ACK
+        ));
+        let err = client
+            .recv()
+            .expect_err("the corrupt frame must end the session");
         assert!(is_unsafe_server_frame(&err));
 
         let dir = crash_dump_dir();
@@ -1290,11 +1521,21 @@ mod tests {
             .flatten()
             .filter(|e| e.file_name().to_string_lossy().starts_with(&prefix))
             .collect();
-        assert_eq!(dumped.len(), 1, "expected exactly one dump file for this session's one failure");
+        assert_eq!(
+            dumped.len(),
+            1,
+            "expected exactly one dump file for this session's one failure"
+        );
         let text = std::fs::read_to_string(dumped[0].path()).unwrap();
 
-        assert!(text.contains(&format!("session: {label}")), "missing session label: {text}");
-        assert!(text.contains("last 2 decoded frames"), "missing ring size header: {text}");
+        assert!(
+            text.contains(&format!("session: {label}")),
+            "missing session label: {text}"
+        );
+        assert!(
+            text.contains("last 2 decoded frames"),
+            "missing ring size header: {text}"
+        );
         assert!(
             text.contains("opcode=0x004D declared_body_len=0 actual_body_len=0"),
             "missing first ring entry: {text}"
@@ -1303,15 +1544,276 @@ mod tests {
             text.contains("opcode=0x004F declared_body_len=0 actual_body_len=0"),
             "missing second ring entry: {text}"
         );
-        assert!(!text.contains("MISMATCH"), "no real mismatch occurred here: {text}");
-        assert!(text.contains("failing frame opcode: 0x02FB"), "missing failing opcode: {text}");
+        assert!(
+            !text.contains("MISMATCH"),
+            "no real mismatch occurred here: {text}"
+        );
+        assert!(
+            text.contains("failing frame opcode: 0x02FB"),
+            "missing failing opcode: {text}"
+        );
         assert!(
             text.contains("failing body[0..8]: 20 00 00 00 DE AD BE EF"),
             "missing failing body preview: {text}"
         );
-        assert!(text.contains("decoder panicked"), "missing the actual error text: {text}");
+        assert!(
+            text.contains("decoder panicked"),
+            "missing the actual error text: {text}"
+        );
 
         cleanup_dumps_labeled(label);
+    }
+
+    /// Mock [`Read`] for the #209 read-timeout-fix tests: a scripted sequence of "read steps" that
+    /// can deliver fewer bytes than requested (a legitimate short read, same as a real socket under
+    /// load) or fail with a `WouldBlock` error (what `TcpStream` read-timeout expiry actually
+    /// produces). Once the script is exhausted it falls back to delivering everything remaining in
+    /// one shot, so a test only has to script the interesting fragmentation points.
+    struct ScriptedReader {
+        data: Vec<u8>,
+        pos: usize,
+        script: std::collections::VecDeque<ReadStep>,
+    }
+
+    enum ReadStep {
+        /// Deliver up to this many bytes (capped by the caller's buffer and what's left).
+        Bytes(usize),
+        /// Fail this call exactly like an expired socket read timeout.
+        Timeout,
+    }
+
+    impl Read for ScriptedReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let take_from = |pos: &mut usize, data: &[u8], buf: &mut [u8], n: usize| {
+                let take = n.min(buf.len()).min(data.len() - *pos);
+                buf[..take].copy_from_slice(&data[*pos..*pos + take]);
+                *pos += take;
+                take
+            };
+            match self.script.pop_front() {
+                Some(ReadStep::Timeout) => Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "would block (scripted timeout)",
+                )),
+                Some(ReadStep::Bytes(n)) => Ok(take_from(&mut self.pos, &self.data, buf, n)),
+                None => Ok(take_from(&mut self.pos, &self.data, buf, buf.len())),
+            }
+        }
+    }
+
+    /// Raw wire bytes for a fixed 3-frame sequence shared by the fragmentation tests below: an
+    /// empty-body frame, an 8-byte-body frame (so body fragmentation has something to bite), then
+    /// another empty-body frame.
+    fn fragmentation_test_wire(enc: &mut EncrypterHalf) -> Vec<u8> {
+        let mut wire = Vec::new();
+        wire.extend_from_slice(&enc.encrypt_server_header(2, 0x004D)); // SMSG_LOGOUT_COMPLETE
+        wire.extend_from_slice(&enc.encrypt_server_header(10, 0x01CD)); // SMSG_PLAYED_TIME
+        wire.extend_from_slice(&1234u32.to_le_bytes());
+        wire.extend_from_slice(&99u32.to_le_bytes());
+        wire.extend_from_slice(&enc.encrypt_server_header(2, 0x004F)); // SMSG_LOGOUT_CANCEL_ACK
+        wire
+    }
+
+    /// Drive [`read_guarded_world_message`] the way `WireClient::recv`'s callers actually do under a
+    /// socket read timeout (`recv_for`, `recv_raw_for`, and the hand-rolled loops `is_read_timeout`
+    /// exists for): swallow a timeout error and call straight back in with the SAME `dec`/`log` —
+    /// exactly the retry shape that exposed issue #209 (a lost partial read permanently desyncing the
+    /// header cipher). Returns the decoded messages in order; panics on any OTHER kind of error.
+    fn drain_with_retries(
+        r: &mut ScriptedReader,
+        dec: &mut DecrypterHalf,
+        log: &mut FrameLog,
+        count: usize,
+    ) -> Vec<WorldSmsg> {
+        let mut out = Vec::new();
+        let mut retries = 0;
+        while out.len() < count {
+            match read_guarded_world_message(r, dec, log) {
+                Ok(m) => out.push(m),
+                Err(e) => {
+                    let msg = e.to_string().to_lowercase();
+                    assert!(
+                        msg.contains("would block"),
+                        "unexpected non-timeout error: {e}"
+                    );
+                    retries += 1;
+                    assert!(
+                        retries < 1000,
+                        "retried too many times — likely an infinite loop"
+                    );
+                }
+            }
+        }
+        out
+    }
+
+    /// Issue #209's actual fix, pinned: fragmenting the exact same wire bytes with 1-byte dribbles
+    /// and timeouts landing mid-header and mid-body — then retrying exactly like a real caller does
+    /// — must decode to the IDENTICAL sequence of messages as reading the same bytes with no
+    /// fragmentation at all. Before the fix, a timeout mid multi-byte read silently dropped the bytes
+    /// already read and resumed at the wrong stream offset, permanently desyncing the header cipher;
+    /// this pins that it no longer does.
+    #[test]
+    fn resumable_read_survives_adversarial_fragmentation_and_matches_the_unfragmented_decode() {
+        let (_, crypto) =
+            ProofSeed::new().into_client_header_crypto(&ns("TEST").unwrap(), [7; 40], 0x1234_5678);
+        let (mut enc, dec) = crypto.split();
+        let wire = fragmentation_test_wire(&mut enc);
+
+        // Baseline: the mock's "script exhausted" fallback delivers everything a single `read()`
+        // call asks for — i.e. no artificial fragmentation at all.
+        let mut baseline_reader = ScriptedReader {
+            data: wire.clone(),
+            pos: 0,
+            script: Default::default(),
+        };
+        let mut baseline_dec = dec.clone();
+        let mut baseline_log = FrameLog::new("BASELINE");
+        let baseline = drain_with_retries(
+            &mut baseline_reader,
+            &mut baseline_dec,
+            &mut baseline_log,
+            3,
+        );
+
+        // Adversarial: 1-byte dribbles, a timeout mid-header (on two different frames), and a
+        // timeout mid-body (twice, on the 8-byte-body frame) — then the script runs out and the
+        // fallback delivers the rest (frame 3's header) in one shot.
+        let script = std::collections::VecDeque::from([
+            ReadStep::Bytes(1), // header1 byte 0
+            ReadStep::Timeout,  // timeout mid-header1
+            ReadStep::Bytes(1), // header1 byte 1
+            ReadStep::Bytes(2), // header1 bytes 2-3 (complete) — empty body, no body read
+            ReadStep::Bytes(1), // header2 byte 0
+            ReadStep::Bytes(1), // header2 byte 1
+            ReadStep::Timeout,  // timeout mid-header2
+            ReadStep::Bytes(2), // header2 bytes 2-3 (complete)
+            ReadStep::Bytes(3), // body2 bytes 0-2 (of 8)
+            ReadStep::Timeout,  // timeout mid-body2
+            ReadStep::Bytes(2), // body2 bytes 3-4
+            ReadStep::Timeout,  // timeout mid-body2 again
+            ReadStep::Bytes(3), // body2 bytes 5-7 (complete)
+        ]);
+        let mut adversarial_reader = ScriptedReader {
+            data: wire,
+            pos: 0,
+            script,
+        };
+        let mut adversarial_dec = dec.clone();
+        let mut adversarial_log = FrameLog::new("ADVERSARIAL");
+        let adversarial = drain_with_retries(
+            &mut adversarial_reader,
+            &mut adversarial_dec,
+            &mut adversarial_log,
+            3,
+        );
+
+        assert_eq!(baseline.len(), 3);
+        assert_eq!(
+            baseline, adversarial,
+            "fragmented decode diverged from the clean decode"
+        );
+        assert!(matches!(baseline[0], WorldSmsg::SMSG_LOGOUT_COMPLETE));
+        assert!(matches!(baseline[2], WorldSmsg::SMSG_LOGOUT_CANCEL_ACK));
+        match &baseline[1] {
+            WorldSmsg::SMSG_PLAYED_TIME(p) => {
+                assert_eq!(p.total_played_time, 1234);
+                assert_eq!(p.level_played_time, 99);
+            }
+            other => panic!("expected SMSG_PLAYED_TIME, got {other:?}"),
+        }
+    }
+
+    /// A single byte at a time, for EVERY byte in the frame (not just at a few chosen points) — the
+    /// most extreme legal fragmentation a real (if pathological) socket could produce, with no
+    /// timeouts involved at all. Guards the resumable-fill loop itself, independent of the
+    /// timeout-retry path the test above exercises.
+    #[test]
+    fn resumable_read_survives_single_byte_dribbles_with_no_timeouts() {
+        let (_, crypto) =
+            ProofSeed::new().into_client_header_crypto(&ns("TEST").unwrap(), [7; 40], 0x1234_5678);
+        let (mut enc, dec) = crypto.split();
+        let wire = fragmentation_test_wire(&mut enc);
+
+        let mut baseline_reader = ScriptedReader {
+            data: wire.clone(),
+            pos: 0,
+            script: Default::default(),
+        };
+        let mut baseline_dec = dec.clone();
+        let mut baseline_log = FrameLog::new("BASELINE-DRIBBLE");
+        let baseline = drain_with_retries(
+            &mut baseline_reader,
+            &mut baseline_dec,
+            &mut baseline_log,
+            3,
+        );
+
+        let script =
+            std::collections::VecDeque::from_iter((0..wire.len()).map(|_| ReadStep::Bytes(1)));
+        let mut dribble_reader = ScriptedReader {
+            data: wire,
+            pos: 0,
+            script,
+        };
+        let mut dribble_dec = dec.clone();
+        let mut dribble_log = FrameLog::new("DRIBBLE");
+        let dribbled =
+            drain_with_retries(&mut dribble_reader, &mut dribble_dec, &mut dribble_log, 3);
+
+        assert_eq!(
+            baseline, dribbled,
+            "byte-at-a-time decode diverged from the clean decode"
+        );
+    }
+
+    /// Found live during the #209 repro (not in the original hunt list): a connection that's
+    /// genuinely CLOSED (the peer hung up — nothing to do with #209's decode-desync) used to fall
+    /// into the same `skipped`/64-strikes bucket as an ordinary undecodable frame. A closed socket's
+    /// reads return instantly (no blocking), so a caller that polls `recv()` once per tick for the
+    /// rest of a benchmark's hold window hit the 64-skip threshold on EVERY call and wrote a fresh
+    /// crash dump EVERY time — one dead session produced thousands of files (observed on the live
+    /// 150-mage repro), burying the real corruption signal (there wasn't any left) under noise. This
+    /// pins that a closed connection fails fast, every time, and is never mistaken for #209 evidence.
+    #[test]
+    fn a_closed_connection_is_terminal_and_does_not_flood_crash_dumps() {
+        let label = "CRASHTEST-closed";
+        cleanup_dumps_labeled(label);
+
+        let mut client = client_receiving_frames_labeled(&[(0x004D, &[])], label); // one clean frame, then the server drops
+        assert!(matches!(
+            client.recv().unwrap(),
+            WorldSmsg::SMSG_LOGOUT_COMPLETE
+        ));
+
+        for _ in 0..10 {
+            let err = client
+                .recv()
+                .expect_err("a closed connection must not be swallowed as a skip");
+            assert!(
+                !is_unsafe_server_frame(&err),
+                "a closed connection is not decode corruption: {err}"
+            );
+            assert!(
+                err.to_string().contains("connection closed"),
+                "unexpected error: {err}"
+            );
+        }
+
+        let dir = crash_dump_dir();
+        let prefix = format!("{}-", sanitize_label(label));
+        let dumped = std::fs::read_dir(&dir)
+            .ok()
+            .map(|it| {
+                it.flatten()
+                    .filter(|e| e.file_name().to_string_lossy().starts_with(&prefix))
+                    .count()
+            })
+            .unwrap_or(0);
+        assert_eq!(
+            dumped, 0,
+            "a closed connection is not decode evidence — it must not write a dump"
+        );
     }
 
     /// The ring buffer is BOUNDED (`CRASH_RING_CAPACITY`) — a long-lived session must not grow its
@@ -1328,9 +1830,13 @@ mod tests {
         let mut client = client_receiving_frames_labeled(&frames, label);
 
         for _ in 0..40 {
-            client.recv().expect("the first 40 frames all decode cleanly");
+            client
+                .recv()
+                .expect("the first 40 frames all decode cleanly");
         }
-        let err = client.recv().expect_err("frame 41 is the fatal corrupt one");
+        let err = client
+            .recv()
+            .expect_err("frame 41 is the fatal corrupt one");
         assert!(is_unsafe_server_frame(&err));
 
         let dir = crash_dump_dir();
@@ -1342,9 +1848,15 @@ mod tests {
             .expect("a dump file must exist");
         let text = std::fs::read_to_string(dumped.path()).unwrap();
 
-        assert!(text.contains("last 32 decoded frames"), "ring must cap at 32: {text}");
+        assert!(
+            text.contains("last 32 decoded frames"),
+            "ring must cap at 32: {text}"
+        );
         let entry_count = text.matches("opcode=0x004D").count();
-        assert_eq!(entry_count, 32, "expected exactly 32 surviving ring entries, got {entry_count}");
+        assert_eq!(
+            entry_count, 32,
+            "expected exactly 32 surviving ring entries, got {entry_count}"
+        );
 
         cleanup_dumps_labeled(label);
     }

@@ -5,10 +5,13 @@
 use anyhow::{bail, Result};
 use wire_client::WireClient;
 use wow_world_messages::vanilla::opcodes::ServerOpcodeMessage as Smsg;
-use wow_world_messages::vanilla::{CMSG_TEXT_EMOTE, TextEmote};
+use wow_world_messages::vanilla::{TextEmote, CMSG_TEXT_EMOTE};
 use wow_world_messages::Guid;
 
-use super::{drain_until_file, extract_chat_sender, extract_chat_text, read_packed_guid, require_path_arg, ModeCtx};
+use super::{
+    drain_until_file, extract_chat_sender, extract_chat_text, read_packed_guid, require_path_arg,
+    ModeCtx,
+};
 
 /// Run `mode` if it belongs to this family. `Ok(true)` = recognized and completed
 /// (bail!/exit on failure inside); `Ok(false)` = not this family's mode.
@@ -41,7 +44,10 @@ fn relay_observer(
 ) -> Result<()> {
     let ready = require_path_arg(args, "relay-observer <ready_file>", "ready_file")?;
     let char_name = mcx.char_name;
-    eprintln!("[relay-observer] in-world as {} (guid {:#x}); signalling ready…", char_name, c.self_guid);
+    eprintln!(
+        "[relay-observer] in-world as {} (guid {:#x}); signalling ready…",
+        char_name, c.self_guid
+    );
     std::fs::write(&ready, "1").ok();
     // Drain until the sender's jump arrives, keeping the socket alive.
     let got_jump = c
@@ -54,7 +60,9 @@ fn relay_observer(
         .is_some();
     std::fs::remove_file(&ready).ok();
     if got_jump {
-        println!("[wire] RELAY-JUMP PASS \u{2713}  observer received MSG_MOVE_JUMP_Server from peer");
+        println!(
+            "[wire] RELAY-JUMP PASS \u{2713}  observer received MSG_MOVE_JUMP_Server from peer"
+        );
         return Ok(());
     }
     bail!("relay-observer: no MSG_MOVE_JUMP_Server (opcode 0xBB) received within 10s");
@@ -68,11 +76,16 @@ fn relay_sender(
     args: &mut dyn Iterator<Item = String>,
     mcx: &ModeCtx<'_>,
 ) -> Result<()> {
-    use wow_world_messages::vanilla::{MovementInfo, MovementInfo_MovementFlags, MSG_MOVE_JUMP_Client};
     use wow_world_messages::vanilla::Vector3d;
+    use wow_world_messages::vanilla::{
+        MSG_MOVE_JUMP_Client, MovementInfo, MovementInfo_MovementFlags,
+    };
     let ready = require_path_arg(args, "relay-sender <ready_file>", "ready_file")?;
     let char_name = mcx.char_name;
-    eprintln!("[relay-sender] in-world as {} (guid {:#x}); waiting for observer…", char_name, c.self_guid);
+    eprintln!(
+        "[relay-sender] in-world as {} (guid {:#x}); waiting for observer…",
+        char_name, c.self_guid
+    );
     // Drain + wait for observer to signal ready. A recv error inside drain_until_file is NOT
     // terminal: with no ambient packet traffic near the pad, recv simply rides its socket
     // read-timeout — treating that as "break" collapsed the whole wait to a single file check
@@ -102,7 +115,11 @@ fn relay_sender(
             info: MovementInfo {
                 flags: MovementInfo_MovementFlags::empty(),
                 timestamp: 0,
-                position: Vector3d { x: -8968.0, y: -129.0, z: 83.39 },
+                position: Vector3d {
+                    x: -8968.0,
+                    y: -129.0,
+                    z: 83.39,
+                },
                 orientation: 0.0,
                 fall_time: 0.0,
             },
@@ -159,9 +176,12 @@ fn aoi_observer(
         // that gap is exactly how a recenter that silently dropped the motion subscription shipped.
         if let Some(rest) = cmd.strip_prefix("walk ") {
             use wow_world_messages::vanilla::{
-                MovementInfo, MovementInfo_MovementFlags, Vector3d, MSG_MOVE_HEARTBEAT_Client,
+                MSG_MOVE_HEARTBEAT_Client, MovementInfo, MovementInfo_MovementFlags, Vector3d,
             };
-            let p: Vec<f32> = rest.split_whitespace().filter_map(|t| t.parse().ok()).collect();
+            let p: Vec<f32> = rest
+                .split_whitespace()
+                .filter_map(|t| t.parse().ok())
+                .collect();
             if p.len() != 3 {
                 std::fs::write(&ack_file, "FAIL walk (need <x> <y> <z>)").ok();
                 bail!("aoi-observer: walk needs <x> <y> <z>, got {rest:?}");
@@ -171,7 +191,11 @@ fn aoi_observer(
                     info: MovementInfo {
                         flags: MovementInfo_MovementFlags::empty(),
                         timestamp: i * 300,
-                        position: Vector3d { x: p[0] + (i as f32) * 5.0, y: p[1], z: p[2] },
+                        position: Vector3d {
+                            x: p[0] + (i as f32) * 5.0,
+                            y: p[1],
+                            z: p[2],
+                        },
                         orientation: 0.0,
                         fall_time: 0.0,
                     },
@@ -179,7 +203,10 @@ fn aoi_observer(
                 std::thread::sleep(std::time::Duration::from_millis(150));
                 let _ = c.recv();
             }
-            println!("[aoi] walked 60yd in +x from ({}, {}, {}) — box recentered", p[0], p[1], p[2]);
+            println!(
+                "[aoi] walked 60yd in +x from ({}, {}, {}) — box recentered",
+                p[0], p[1], p[2]
+            );
             std::fs::write(&ack_file, "OK walk").ok();
             continue;
         }
@@ -195,9 +222,12 @@ fn aoi_observer(
         // instead of leaving it to a later expect-move.
         if let Some(rest) = cmd.strip_prefix("walk-multi ") {
             use wow_world_messages::vanilla::{
-                MovementInfo, MovementInfo_MovementFlags, Vector3d, MSG_MOVE_HEARTBEAT_Client,
+                MSG_MOVE_HEARTBEAT_Client, MovementInfo, MovementInfo_MovementFlags, Vector3d,
             };
-            let p: Vec<f32> = rest.split_whitespace().filter_map(|t| t.parse().ok()).collect();
+            let p: Vec<f32> = rest
+                .split_whitespace()
+                .filter_map(|t| t.parse().ok())
+                .collect();
             if p.len() != 3 {
                 std::fs::write(&ack_file, "FAIL walk-multi (need <x> <y> <z>)").ok();
                 bail!("aoi-observer: walk-multi needs <x> <y> <z>, got {rest:?}");
@@ -213,7 +243,11 @@ fn aoi_observer(
                         info: MovementInfo {
                             flags: MovementInfo_MovementFlags::empty(),
                             timestamp: i * 300,
-                            position: Vector3d { x: cx + dx * t, y: cy + dy * t, z: bz },
+                            position: Vector3d {
+                                x: cx + dx * t,
+                                y: cy + dy * t,
+                                z: bz,
+                            },
                             orientation: 0.0,
                             fall_time: 0.0,
                         },
@@ -224,7 +258,9 @@ fn aoi_observer(
                     while let Ok(m) = c.recv() {
                         match &m {
                             Smsg::SMSG_UPDATE_OBJECT(u)
-                                if u.objects.iter().any(|o| wire_client::create_object_guid(o) == Some(peer)) =>
+                                if u.objects
+                                    .iter()
+                                    .any(|o| wire_client::create_object_guid(o) == Some(peer)) =>
                             {
                                 creates += 1;
                             }
@@ -245,7 +281,11 @@ fn aoi_observer(
             if creates == 0 && destroys == 0 {
                 std::fs::write(&ack_file, "OK walk-multi").ok();
             } else {
-                std::fs::write(&ack_file, format!("FAIL walk-multi creates={creates} destroys={destroys}")).ok();
+                std::fs::write(
+                    &ack_file,
+                    format!("FAIL walk-multi creates={creates} destroys={destroys}"),
+                )
+                .ok();
                 bail!("aoi-observer: walk-multi saw creates={creates} destroys={destroys} for a peer that never left the box");
             }
             continue;
@@ -257,17 +297,18 @@ fn aoi_observer(
             let want = rest.to_string();
             let ok = c
                 .recv_for(window, |m| match m {
-                    Smsg::SMSG_MESSAGECHAT(msg) => {
-                        (extract_chat_sender(msg) == Some(peer) && extract_chat_text(msg).as_deref() == Some(want.as_str()))
-                            .then_some(())
-                    }
+                    Smsg::SMSG_MESSAGECHAT(msg) => (extract_chat_sender(msg) == Some(peer)
+                        && extract_chat_text(msg).as_deref() == Some(want.as_str()))
+                    .then_some(()),
                     _ => None,
                 })
                 .is_some();
             let verdict = if ok { "OK" } else { "FAIL" };
             println!("[aoi] expect-chat {want:?} -> {verdict}");
             std::fs::write(&ack_file, format!("{verdict} expect-chat")).ok();
-            if !ok { bail!("aoi-observer: expect-chat {want:?} from {peer:#x} not seen within 30s"); }
+            if !ok {
+                bail!("aoi-observer: expect-chat {want:?} from {peer:#x} not seen within 30s");
+            }
             continue;
         }
         // "expect-no-chat [secs]" (default 5) — the NEGATIVE control: assert NO Say/Yell from
@@ -278,7 +319,9 @@ fn aoi_observer(
             let secs: u64 = rest.trim().parse().unwrap_or(5);
             let leaked = c
                 .recv_for(std::time::Duration::from_secs(secs), |m| match m {
-                    Smsg::SMSG_MESSAGECHAT(msg) => (extract_chat_sender(msg) == Some(peer)).then_some(()),
+                    Smsg::SMSG_MESSAGECHAT(msg) => {
+                        (extract_chat_sender(msg) == Some(peer)).then_some(())
+                    }
                     _ => None,
                 })
                 .is_some();
@@ -313,7 +356,11 @@ fn aoi_observer(
                 }
                 let len = u32::from_le_bytes(payload[16..20].try_into().unwrap()) as usize;
                 let end = 20 + len.min(payload.len().saturating_sub(20));
-                Some(String::from_utf8_lossy(&payload[20..end]).trim_end_matches('\0').to_string())
+                Some(
+                    String::from_utf8_lossy(&payload[20..end])
+                        .trim_end_matches('\0')
+                        .to_string(),
+                )
             });
             let ok = matches!(&got, Some(name) if name.contains(&want_name));
             let verdict = if ok { "OK" } else { "FAIL" };
@@ -334,7 +381,9 @@ fn aoi_observer(
         // seen_guids, so the recv_for predicates below match the peer's CREATE directly.
         let peer_created = |m: &Smsg| match m {
             Smsg::SMSG_UPDATE_OBJECT(u)
-                if u.objects.iter().any(|o| wire_client::create_object_guid(o) == Some(peer)) =>
+                if u.objects
+                    .iter()
+                    .any(|o| wire_client::create_object_guid(o) == Some(peer)) =>
             {
                 Some(())
             }
@@ -382,7 +431,9 @@ fn aoi_observer(
         let verdict = if ok { "OK" } else { "FAIL" };
         println!("[aoi] {cmd} -> {verdict}");
         std::fs::write(&ack_file, format!("{verdict} {cmd}")).ok();
-        if !ok { bail!("aoi-observer: {cmd} not satisfied within 30s"); }
+        if !ok {
+            bail!("aoi-observer: {cmd} not satisfied within 30s");
+        }
     }
 }
 
@@ -394,7 +445,9 @@ fn aoi_mover(
     args: &mut dyn Iterator<Item = String>,
     _mcx: &ModeCtx<'_>,
 ) -> Result<()> {
-    use wow_world_messages::vanilla::{MovementInfo, MovementInfo_MovementFlags, Vector3d, MSG_MOVE_HEARTBEAT_Client};
+    use wow_world_messages::vanilla::{
+        MSG_MOVE_HEARTBEAT_Client, MovementInfo, MovementInfo_MovementFlags, Vector3d,
+    };
     const USAGE: &str = "aoi-mover <cmd_file> <ready_file>";
     let cmd_file = require_path_arg(args, USAGE, "cmd_file")?;
     let ready_file = require_path_arg(args, USAGE, "ready_file")?;
@@ -403,23 +456,36 @@ fn aoi_mover(
     std::fs::write(&ready_file, "1").ok();
     loop {
         let _ = c.recv();
-        let Ok(cmdtext) = std::fs::read_to_string(&cmd_file) else { continue };
+        let Ok(cmdtext) = std::fs::read_to_string(&cmd_file) else {
+            continue;
+        };
         let cmdtext = cmdtext.trim().to_string();
-        if cmdtext.is_empty() { continue; }
+        if cmdtext.is_empty() {
+            continue;
+        }
         let _ = std::fs::remove_file(&cmd_file);
         if cmdtext == "exit" {
-            println!("[wire] AOI-MOVER exiting (abrupt disconnect — the observer should see DESTROY)");
+            println!(
+                "[wire] AOI-MOVER exiting (abrupt disconnect — the observer should see DESTROY)"
+            );
             return Ok(());
         }
         if let Some(rest) = cmdtext.strip_prefix("burst ") {
-            let p: Vec<f32> = rest.split_whitespace().filter_map(|t| t.parse().ok()).collect();
+            let p: Vec<f32> = rest
+                .split_whitespace()
+                .filter_map(|t| t.parse().ok())
+                .collect();
             if p.len() == 3 {
                 for i in 0..10u32 {
                     c.send(&MSG_MOVE_HEARTBEAT_Client {
                         info: MovementInfo {
                             flags: MovementInfo_MovementFlags::empty(),
                             timestamp: i * 300,
-                            position: Vector3d { x: p[0] + (i as f32) * 0.4, y: p[1], z: p[2] },
+                            position: Vector3d {
+                                x: p[0] + (i as f32) * 0.4,
+                                y: p[1],
+                                z: p[2],
+                            },
                             orientation: 0.0,
                             fall_time: 0.0,
                         },
@@ -427,7 +493,10 @@ fn aoi_mover(
                     std::thread::sleep(std::time::Duration::from_millis(200));
                     let _ = c.recv();
                 }
-                println!("[aoi-mover] burst of 10 heartbeats sent around ({}, {}, {})", p[0], p[1], p[2]);
+                println!(
+                    "[aoi-mover] burst of 10 heartbeats sent around ({}, {}, {})",
+                    p[0], p[1], p[2]
+                );
             }
         }
         // #74 seam-chat: "say <text...>" / "yell <text...>" — CMSG_MESSAGECHAT via the same
@@ -453,7 +522,11 @@ fn aoi_mover(
         if let Some(rest) = cmdtext.strip_prefix("emote ") {
             match rest.trim().parse::<u64>() {
                 Ok(target) => {
-                    match c.send(&CMSG_TEXT_EMOTE { text_emote: TextEmote::Wave, emote: 0, target: Guid::new(target) }) {
+                    match c.send(&CMSG_TEXT_EMOTE {
+                        text_emote: TextEmote::Wave,
+                        emote: 0,
+                        target: Guid::new(target),
+                    }) {
                         Ok(()) => println!("[aoi-mover] sent emote(Wave) targeting {target:#x}"),
                         Err(e) => println!("[aoi-mover] emote send failed: {e}"),
                     }
@@ -472,8 +545,8 @@ fn soak(
     _mcx: &ModeCtx<'_>,
 ) -> Result<()> {
     use wow_world_messages::vanilla::{
-        MovementInfo, MovementInfo_MovementFlags, Vector3d, CMSG_ATTACKSTOP, CMSG_ATTACKSWING,
-        MSG_MOVE_HEARTBEAT_Client,
+        MSG_MOVE_HEARTBEAT_Client, MovementInfo, MovementInfo_MovementFlags, Vector3d,
+        CMSG_ATTACKSTOP, CMSG_ATTACKSWING,
     };
     let secs: u64 = args.next().and_then(|s| s.parse().ok()).unwrap_or(600);
     let cx: f32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(-8920.0);
@@ -486,21 +559,29 @@ fn soak(
     c.set_recv_timeout(std::time::Duration::from_millis(150))?;
     let start = std::time::Instant::now();
     let deadline = start + std::time::Duration::from_secs(secs);
-    let (mut hb, mut casts, mut engages, mut packets, mut recv_errs) = (0u64, 0u64, 0u64, 0u64, 0u64);
+    let (mut hb, mut casts, mut engages, mut packets, mut recv_errs) =
+        (0u64, 0u64, 0u64, 0u64, 0u64);
     let mut rng: u64 = 0x5eed_5eed; // deterministic LCG — reproducible walk
     let mut engaged: Option<u64> = None;
-    let (mut last_cast, mut last_engage_flip) = (std::time::Instant::now(), std::time::Instant::now());
+    let (mut last_cast, mut last_engage_flip) =
+        (std::time::Instant::now(), std::time::Instant::now());
     // Kept hand-rolled: not a wait-for-packet loop — this is the soak DRIVER (movement/cast/
     // engage cadence between drains), which recv_for cannot express.
     while std::time::Instant::now() < deadline {
-        rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        rng = rng
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         let dx = ((rng >> 33) % 300) as f32 / 10.0 - 15.0;
         let dy = ((rng >> 43) % 300) as f32 / 10.0 - 15.0;
         c.send(&MSG_MOVE_HEARTBEAT_Client {
             info: MovementInfo {
                 flags: MovementInfo_MovementFlags::empty(),
                 timestamp: hb as u32 * 400,
-                position: Vector3d { x: cx + dx, y: cy + dy, z: cz },
+                position: Vector3d {
+                    x: cx + dx,
+                    y: cy + dy,
+                    z: cz,
+                },
                 orientation: 0.0,
                 fall_time: 0.0,
             },
@@ -513,7 +594,10 @@ fn soak(
         }
         if last_engage_flip.elapsed() >= std::time::Duration::from_secs(8) {
             match engaged.take() {
-                Some(t) => { c.send(&CMSG_ATTACKSTOP {})?; let _ = t; }
+                Some(t) => {
+                    c.send(&CMSG_ATTACKSTOP {})?;
+                    let _ = t;
+                }
                 None => {
                     // explicit target list (round-robin), else the first visible CREATURE
                     // (HIGHGUID_UNIT = 0xF130 high bits) from the login burst
@@ -539,7 +623,10 @@ fn soak(
         while std::time::Instant::now() < drain_until {
             match c.recv_raw() {
                 Ok(_) => packets += 1,
-                Err(_) => { recv_errs += 1; break; }
+                Err(_) => {
+                    recv_errs += 1;
+                    break;
+                }
             }
         }
     }

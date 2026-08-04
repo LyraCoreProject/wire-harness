@@ -13,18 +13,18 @@ scenario_preflight rest-state
 # re-created (Ginger has been 3, 9 and 13). A stale hardcode does not fail loudly — every SQL read
 # returns NO ROWS, so each assertion reports `got ''` and reads like a product regression.
 G=$(char_guid Ginger)
-[ -n "$G" ] || { echo "[rest-state] no Ginger character on spacetime-core" >&2; exit 1; }
+[ -n "$G" ] || { echo "[rest-state] no Ginger character on lyracore" >&2; exit 1; }
 INN_X=-9464; INN_Y=42 # Lion's Pride Inn fixture (Goldshire) — REST_TRIGGERS in module/src/rest.rs
 FAR_X=-8930; FAR_Y=-160 # open field, outside any rest trigger
 FAILED=0
 chk(){ if [ "$2" = "$3" ]; then echo "  OK   $1 ($2)"; else echo "  FAIL $1: got '$2' want '$3'"; FAILED=1; fi }
-byte3(){ spacetime sql spacetime-core "SELECT player_bytes_2 FROM game_world_entity WHERE guid = $G" 2>/dev/null | grep -v WARNING | sed -n 3p | awk '{printf "%d", int($1/16777216)%256}'; }
-cval(){ spacetime sql spacetime-core "SELECT $1 FROM game_character WHERE guid = $G" 2>/dev/null | grep -v WARNING | sed -n 3p | tr -d ' '; }
+byte3(){ spacetime sql lyracore "SELECT player_bytes_2 FROM game_world_entity WHERE guid = $G" 2>/dev/null | grep -v WARNING | sed -n 3p | awk '{printf "%d", int($1/16777216)%256}'; }
+cval(){ spacetime sql lyracore "SELECT $1 FROM game_character WHERE guid = $G" 2>/dev/null | grep -v WARNING | sed -n 3p | tr -d ' '; }
 
 # fresh slate
 sqlq "DELETE FROM game_rest_state_event WHERE character_guid = $G" >/dev/null
 sqlq "UPDATE game_character SET resting = false, rested_since_micros = 0 WHERE guid = $G" >/dev/null
-spacetime call spacetime-core -- debug_set_health $G 200 >/dev/null 2>&1
+spacetime call lyracore -- debug_set_health $G 200 >/dev/null 2>&1
 stay_start TEST test123 Ginger || exit 1
 sleep 1
 

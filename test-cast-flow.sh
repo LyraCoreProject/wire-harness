@@ -22,7 +22,7 @@ SPELL="${1:-686}"   # 686 = Shadow Bolt (1.7s timed projectile)
 ENTRY="${2:-103}"   # 103 = Garrick Padfoot (a hostile Defias) — the cast target
 CHAR="Ginger"
 # ensure_ginger_home (issue #213), not a bare char_guid: Ginger is the shared long-lived fixture and
-# is not guaranteed to still be on spacetime-core (region-boundary logins can transfer her live row
+# is not guaranteed to still be on lyracore (region-boundary logins can transfer her live row
 # to another shard; a stale duplicate from an old create-on-miss fallback can also shadow her at
 # login) — self-heals both before handing back a guid.
 CGUID=$(ensure_ginger_home "$CHAR")

@@ -4,14 +4,14 @@
 
 use anyhow::{anyhow, bail, Result};
 use wire_client::WireClient;
+use wow_world_base::shared::friend_result_vanilla_tbc::FriendResult;
 use wow_world_messages::vanilla::opcodes::ServerOpcodeMessage as Smsg;
 use wow_world_messages::vanilla::Class;
-use wow_world_messages::vanilla::{CMSG_TEXT_EMOTE, TextEmote};
+use wow_world_messages::vanilla::MSG_RANDOM_ROLL_Client;
 use wow_world_messages::vanilla::{
     Friend_FriendStatus, CMSG_ADD_FRIEND, CMSG_ADD_IGNORE, CMSG_FRIEND_LIST,
 };
-use wow_world_base::shared::friend_result_vanilla_tbc::FriendResult;
-use wow_world_messages::vanilla::MSG_RANDOM_ROLL_Client;
+use wow_world_messages::vanilla::{TextEmote, CMSG_TEXT_EMOTE};
 use wow_world_messages::Guid;
 
 use super::{extract_chat_text, ModeCtx};
@@ -48,18 +48,26 @@ fn who(
     let want_name = args.next().unwrap_or_else(|| mcx.char_name.to_string());
     eprintln!("[who] sending CMSG_WHO (no filters), expecting {want_name} in response…");
     let (online_count, listed) = c.who_request()?;
-    println!("[probe] SMSG_WHO online_players={online_count} listed={}", listed.len());
+    println!(
+        "[probe] SMSG_WHO online_players={online_count} listed={}",
+        listed.len()
+    );
     for (name, level, class, race) in &listed {
         println!("[probe]   {name} level={level} class={class} race={race}");
     }
     if online_count == 0 {
         bail!("who: SMSG_WHO.online_players == 0 — no online characters (is the char in-world?)");
     }
-    let found = listed.iter().any(|(n, _, _, _)| n.eq_ignore_ascii_case(&want_name));
+    let found = listed
+        .iter()
+        .any(|(n, _, _, _)| n.eq_ignore_ascii_case(&want_name));
     if !found {
         bail!("who: {want_name:?} not listed in SMSG_WHO players (listed: {listed:?})");
     }
-    let (_, level, class, race) = listed.iter().find(|(n, _, _, _)| n.eq_ignore_ascii_case(&want_name)).unwrap();
+    let (_, level, class, race) = listed
+        .iter()
+        .find(|(n, _, _, _)| n.eq_ignore_ascii_case(&want_name))
+        .unwrap();
     println!("[wire] WHO PASS \u{2713}  SMSG_WHO online={online_count} — {want_name} listed (level={level} class={class} race={race})");
     Ok(())
 }
@@ -76,7 +84,9 @@ fn friend(
 ) -> Result<()> {
     let target_name = args.next().unwrap_or_else(|| "dfsdfsd".into());
     eprintln!("[friend] sending CMSG_ADD_FRIEND({target_name:?})…");
-    c.send(&CMSG_ADD_FRIEND { name: target_name.clone() })?;
+    c.send(&CMSG_ADD_FRIEND {
+        name: target_name.clone(),
+    })?;
     // Background AOI/relay traffic (nearby SMSG_UPDATE_OBJECT etc.) can interleave — recv_for
     // rides past it.
     let target_guid = match c.recv_for(std::time::Duration::from_secs(5), |m| match m {
@@ -142,12 +152,21 @@ fn ignore_whisper(
     let speaker_char = args.next().unwrap_or_else(|| "dfsdfsd".into());
 
     eprintln!("[ignore-whisper] ignorer={char_name} sending CMSG_ADD_IGNORE({speaker_char:?})…");
-    c.send(&CMSG_ADD_IGNORE { name: speaker_char.clone() })?;
+    c.send(&CMSG_ADD_IGNORE {
+        name: speaker_char.clone(),
+    })?;
     match c.recv_for(std::time::Duration::from_secs(5), |m| match m {
         Smsg::SMSG_FRIEND_STATUS(s) => {
-            eprintln!("[ignore-whisper] SMSG_FRIEND_STATUS result={:?} guid={:#x}", s.result, s.guid.guid());
+            eprintln!(
+                "[ignore-whisper] SMSG_FRIEND_STATUS result={:?} guid={:#x}",
+                s.result,
+                s.guid.guid()
+            );
             if s.result != FriendResult::IgnoreAdded {
-                return Some(Err(anyhow!("ignore-whisper: add_ignore({speaker_char:?}) returned {:?}, want IgnoreAdded", s.result)));
+                return Some(Err(anyhow!(
+                    "ignore-whisper: add_ignore({speaker_char:?}) returned {:?}, want IgnoreAdded",
+                    s.result
+                )));
             }
             Some(Ok(()))
         }
@@ -162,12 +181,24 @@ fn ignore_whisper(
     let _ = c.recv_raw_for(std::time::Duration::from_millis(300), |_, _| None::<()>);
 
     eprintln!("[ignore-whisper] connecting speaker as {speaker_account}/{speaker_char}…");
-    let mut sc = WireClient::login_as(&speaker_account, &speaker_password, &speaker_char, Class::Warrior)?;
-    let probe = format!("ignore-probe-{}", std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
+    let mut sc = WireClient::login_as(
+        &speaker_account,
+        &speaker_password,
+        &speaker_char,
+        Class::Warrior,
+    )?;
+    let probe = format!(
+        "ignore-probe-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+    );
     eprintln!("[ignore-whisper] speaker whispers {char_name:?}: {probe:?}");
     sc.send(&wow_world_messages::vanilla::CMSG_MESSAGECHAT {
-        chat_type: wow_world_messages::vanilla::CMSG_MESSAGECHAT_ChatType::Whisper { target_player: char_name.to_string() },
+        chat_type: wow_world_messages::vanilla::CMSG_MESSAGECHAT_ChatType::Whisper {
+            target_player: char_name.to_string(),
+        },
         language: wow_world_messages::vanilla::Language::Universal,
         message: probe.clone(),
     })?;
@@ -209,8 +240,14 @@ fn roll(
 ) -> Result<()> {
     let min: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(1);
     let max: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(100);
-    eprintln!("[roll] sending MSG_RANDOM_ROLL_Client(min={min}, max={max}) as guid {:#x}…", c.self_guid);
-    c.send(&MSG_RANDOM_ROLL_Client { minimum: min, maximum: max })?;
+    eprintln!(
+        "[roll] sending MSG_RANDOM_ROLL_Client(min={min}, max={max}) as guid {:#x}…",
+        c.self_guid
+    );
+    c.send(&MSG_RANDOM_ROLL_Client {
+        minimum: min,
+        maximum: max,
+    })?;
     // MSG_RANDOM_ROLL opcode: 0x01FB (same opcode for client and server direction in vanilla)
     const ROLL_OPCODE: u16 = 0x01FB;
     let got = c.recv_raw_for(std::time::Duration::from_secs(5), |opcode, payload| {
@@ -230,7 +267,10 @@ fn roll(
         None => bail!("roll: no MSG_RANDOM_ROLL_Server (opcode 0x{ROLL_OPCODE:04X}) within 5s"),
         Some((minimum, maximum, result, roller)) => {
             if roller != c.self_guid {
-                bail!("roll: roller_guid={roller:#x} but self_guid={:#x} (mismatch)", c.self_guid);
+                bail!(
+                    "roll: roller_guid={roller:#x} but self_guid={:#x} (mismatch)",
+                    c.self_guid
+                );
             }
             if minimum != min || maximum != max {
                 bail!("roll: echoed range [{minimum},{maximum}], want [{min},{max}]");
@@ -255,7 +295,10 @@ fn text_emote(
     mcx: &ModeCtx<'_>,
 ) -> Result<()> {
     let char_name = mcx.char_name;
-    eprintln!("[text-emote] sending CMSG_TEXT_EMOTE(wave, target=self {:#x})…", c.self_guid);
+    eprintln!(
+        "[text-emote] sending CMSG_TEXT_EMOTE(wave, target=self {:#x})…",
+        c.self_guid
+    );
     c.send(&CMSG_TEXT_EMOTE {
         text_emote: TextEmote::Wave,
         emote: 0,
@@ -273,9 +316,11 @@ fn text_emote(
             // guid(8) + text_emote(4) + emote(4) + SizedCString name (u32 len + bytes, no NUL)
             Some(if payload.len() >= 20 {
                 let len = u32::from_le_bytes(payload[16..20].try_into().unwrap()) as usize;
-                let name = String::from_utf8_lossy(&payload[20..20 + len.min(payload.len().saturating_sub(20))])
-                    .trim_end_matches('\0')
-                    .to_string();
+                let name = String::from_utf8_lossy(
+                    &payload[20..20 + len.min(payload.len().saturating_sub(20))],
+                )
+                .trim_end_matches('\0')
+                .to_string();
                 eprintln!("[text-emote] SMSG_TEXT_EMOTE name={name:?}");
                 Some(name)
             } else {
@@ -284,7 +329,9 @@ fn text_emote(
         })
         .flatten();
     match got {
-        None => bail!("text-emote: no SMSG_TEXT_EMOTE (opcode 0x{TEXT_EMOTE_OPCODE:04X}) within 5s"),
+        None => {
+            bail!("text-emote: no SMSG_TEXT_EMOTE (opcode 0x{TEXT_EMOTE_OPCODE:04X}) within 5s")
+        }
         Some(name) => {
             if name != char_name {
                 bail!("text-emote: SMSG_TEXT_EMOTE.name={name:?}, want {char_name:?}");
@@ -307,22 +354,32 @@ fn say_range(
     mcx: &ModeCtx<'_>,
 ) -> Result<()> {
     let char_name = mcx.char_name;
-    let listener_account  = args.next().unwrap_or_else(|| "TEST2".into());
+    let listener_account = args.next().unwrap_or_else(|| "TEST2".into());
     let listener_password = args.next().unwrap_or_else(|| "test123".into());
-    let listener_char     = args.next().unwrap_or_else(|| "dfsdfsd".into());
+    let listener_char = args.next().unwrap_or_else(|| "dfsdfsd".into());
 
     eprintln!("[say-range] speaker={char_name} listener={listener_char}");
     eprintln!("[say-range] connecting listener as {listener_account}/{listener_char}…");
     // Use `create_or_find_char` path for the listener. We don't know the class here, so pick
     // Human Warrior as a safe default (the char must already exist in game_character).
-    let mut lc = WireClient::login_as(&listener_account, &listener_password, &listener_char, Class::Warrior)?;
+    let mut lc = WireClient::login_as(
+        &listener_account,
+        &listener_password,
+        &listener_char,
+        Class::Warrior,
+    )?;
 
     // Drain any buffered packets from the listener before speaking (predicate never matches).
     let _ = lc.recv_raw_for(std::time::Duration::from_millis(500), |_, _| None::<()>);
 
     // Unique probe message (timestamped).
-    let probe = format!("range-probe-{}", std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
+    let probe = format!(
+        "range-probe-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+    );
     eprintln!("[say-range] speaker sends SAY: {probe:?}");
     c.send_say(&probe)?;
 
@@ -372,11 +429,19 @@ fn inspect(
     args: &mut dyn Iterator<Item = String>,
     _mcx: &ModeCtx<'_>,
 ) -> Result<()> {
-    let near_guid: u64 = args.next().and_then(|s| s.parse().ok()).expect("usage: … inspect <near_guid> <far_guid>");
-    let far_guid: u64 = args.next().and_then(|s| s.parse().ok()).expect("usage: … inspect <near_guid> <far_guid>");
+    let near_guid: u64 = args
+        .next()
+        .and_then(|s| s.parse().ok())
+        .expect("usage: … inspect <near_guid> <far_guid>");
+    let far_guid: u64 = args
+        .next()
+        .and_then(|s| s.parse().ok())
+        .expect("usage: … inspect <near_guid> <far_guid>");
 
     eprintln!("[inspect] sending CMSG_INSPECT for in-range guid={near_guid}…");
-    c.send(&wow_world_messages::vanilla::CMSG_INSPECT { guid: Guid::new(near_guid) })?;
+    c.send(&wow_world_messages::vanilla::CMSG_INSPECT {
+        guid: Guid::new(near_guid),
+    })?;
     let near_ok = c.recv_for(std::time::Duration::from_secs(3), |m| match m {
         Smsg::SMSG_INSPECT(r) => Some(r.guid.guid()),
         _ => None,
@@ -387,7 +452,9 @@ fn inspect(
     eprintln!("[inspect] in-range target: OK (SMSG_INSPECT guid={near_guid})");
 
     eprintln!("[inspect] sending CMSG_INSPECT for out-of-range guid={far_guid}…");
-    c.send(&wow_world_messages::vanilla::CMSG_INSPECT { guid: Guid::new(far_guid) })?;
+    c.send(&wow_world_messages::vanilla::CMSG_INSPECT {
+        guid: Guid::new(far_guid),
+    })?;
     let far_reply = c.recv_for(std::time::Duration::from_secs(2), |m| match m {
         Smsg::SMSG_INSPECT(r) => Some(r.guid.guid()),
         _ => None,

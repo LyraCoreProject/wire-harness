@@ -14,7 +14,7 @@
 #   2. the mover's MSG_MOVE_HEARTBEATs still relay to the observer AFTER the whole loop — the
 #      #109-class continued-relay check, now proven across several crossings/directions instead of
 #      just one.
-# Requires the gateway running with GW_AOI=1.
+# Requires the gateway running with LYRACORE_AOI=1.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 source tools/wire-client/scenario-lib.sh
