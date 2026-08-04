@@ -308,7 +308,7 @@ fn git_rev() -> String {
 
 impl fmt::Display for Report {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "# spacetime-core capacity benchmark — {}", self.label)?;
+        writeln!(f, "# lyracore capacity benchmark — {}", self.label)?;
         writeln!(f)?;
         writeln!(f, "rev            {}", self.git_rev)?;
         writeln!(f, "generated      {} (unix)", self.generated_at_unix)?;
@@ -357,7 +357,7 @@ impl fmt::Display for Report {
                     "walk           {span}yd back-and-forth LINE at {speed} yd/s with \
                      MOVEMENT_FLAG_FORWARD, leashed inside the spread — #184 WALK_SPAN/WALK_SPEED, \
                      crosses AOI cells at ~speed/{}yd",
-                    game_shared::spatial::GRID_CELL_SIZE
+                    lyracore_shared::spatial::GRID_CELL_SIZE
                 )?
             }
             None => writeln!(

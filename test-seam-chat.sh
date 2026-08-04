@@ -9,19 +9,19 @@
 # chat/emote relay, and tools/wire-client/src/modes/relay.rs's new command branches).
 #
 # ⚠ GEOMETRY CAVEAT (same as test-view-merge.sh): the coordinates below assume the documented live
-# seam (region 2 = Goldshire, gx 530..545 / gy 330..345, owned by spacetime-world-2). Before
+# seam (region 2 = Goldshire, gx 530..545 / gy 330..345, owned by lyracore-world-2). Before
 # running, confirm:
-#   spacetime sql spacetime-core "SELECT * FROM game_map_region"
-#   spacetime sql realm-core "SELECT * FROM game_region_assignment"
+#   spacetime sql lyracore "SELECT * FROM game_map_region"
+#   spacetime sql lyracore-realm "SELECT * FROM game_region_assignment"
 # and adjust NEAR_LOGIN_X / FAR_X / OUT_OF_SAY_X below if the live menu has moved.
 #
 # ⚠ THE AWAY CONNECT IS ASYNC (#207 fast-follow 1): NEAR's first crossing into the touching cell
-# only KICKS OFF a background connect to spacetime-world-2. `expect-seen`'s existing ack timeout
+# only KICKS OFF a background connect to lyracore-world-2. `expect-seen`'s existing ack timeout
 # (35s) is what lets this converge — see test-view-merge.sh's own note.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 source tools/wire-client/scenario-lib.sh
-WORLD2=spacetime-world-2
+WORLD2=lyracore-world-2
 FAILED=0
 
 # ---- geometry (map 0, all points share gy335 — only gx/x varies) --------------------------------
@@ -37,15 +37,15 @@ FAILED=0
 #   NEAR login   x=-9483  (gx530 at login — irrelevant: AreaOfInterestTracker::new() never
 #                          resolves shards at login regardless of the box's gx, so FAR stays
 #                          invisible pre-walk purely because it lives on a different database)
-#   NEAR walk-to x~-9428  (start -9483, walk verb's fixed +55yd -> gx529, home spacetime-core;
-#                          box [527,531] touches cell 530 -> away leg opens on spacetime-world-2)
-#   FAR (SAY leg)      x=-9440  (gx530, home spacetime-world-2/Goldshire; ~12yd from NEAR's
+#   NEAR walk-to x~-9428  (start -9483, walk verb's fixed +55yd -> gx529, home lyracore;
+#                          box [527,531] touches cell 530 -> away leg opens on lyracore-world-2)
+#   FAR (SAY leg)      x=-9440  (gx530, home lyracore-world-2/Goldshire; ~12yd from NEAR's
 #                                post-walk anchor -> inside the 25yd SAY range AND the merged view)
 #   FAR (out-of-range) x=-9490  (gx531, still inside Goldshire's rect NEAR's away leg subscribes
 #                                -> still in the merged VIEW; ~62yd from NEAR's anchor -> outside
 #                                the 25yd SAY range. This is the assertion that matters: the away
 #                                connection still carries EVERY game_chat_event row on
-#                                spacetime-world-2, so "no delivery" here is the range filter
+#                                lyracore-world-2, so "no delivery" here is the range filter
 #                                working, not the peer being out of sight.)
 NEAR_LOGIN_X=-9483.0
 FAR_X=-9440.0        # ~12yd from NEAR's post-walk anchor (~-9428) -> in SAY range (25yd)
@@ -72,7 +72,7 @@ echo "far guid=$FAR"
 echo "== position NEAR (core side, near the boundary) and stage FAR's row inside Goldshire"
 scall debug_teleport "$NEAR" 0 "$NEAR_LOGIN_X" "$Y" "$Z" 0
 # FAR has never logged in yet — stage the DURABLE row so its FIRST login's world-entry region
-# resolver routes it straight to spacetime-world-2 (test-view-merge.sh's own staging step).
+# resolver routes it straight to lyracore-world-2 (test-view-merge.sh's own staging step).
 sqlq "UPDATE game_character SET map_id = 0, x = $FAR_X, y = $Y, z = $Z WHERE guid = $FAR" >/dev/null
 
 echo "== pre-check: FAR's durable row lives on core (pre-first-login), nothing on world-2 yet"
@@ -105,7 +105,7 @@ obs_cmd() {
   if grep -q "^OK" <<<"$ack"; then step_ok "NEAR: $1"; else step_fail "NEAR: $1 -> ${ack:-no ack}"; fi
 }
 
-echo "== setup: NEAR walks toward the seam -> away leg opens against spacetime-world-2"
+echo "== setup: NEAR walks toward the seam -> away leg opens against lyracore-world-2"
 obs_cmd "walk $NEAR_LOGIN_X $Y $Z"
 
 echo "== assertion 0 (precondition): NEAR's merged view already includes FAR (proven by #73 — a re-check here means a chat failure below is a CHAT bug, not a stale view-merge regression)"
@@ -126,7 +126,7 @@ sleep 1
 echo "emote $NEAR" > "$CMD_MOV"
 wait $CMDPID
 
-echo "== move FAR beyond SAY range, still within NEAR's merged VIEW, for the negative control. Via the mover's OWN movement (not an admin debug_teleport) — FAR's live row is on spacetime-world-2 now (post-login world-entry routing), and 'burst' already speaks to whichever database this connection is on"
+echo "== move FAR beyond SAY range, still within NEAR's merged VIEW, for the negative control. Via the mover's OWN movement (not an admin debug_teleport) — FAR's live row is on lyracore-world-2 now (post-login world-entry routing), and 'burst' already speaks to whichever database this connection is on"
 echo "burst $OUT_OF_SAY_X $Y $Z" > "$CMD_MOV"
 sleep 3 # let the burst's heartbeats land and the entity update settle before the next SAY
 
@@ -150,14 +150,14 @@ rm -f "$CMD_OBS" "$ACK_OBS" "$OBS_READY" "$CMD_MOV" "$MOV_READY"
 if [ "$FAILED" -eq 0 ]; then echo "[seam-chat] PASS"; exit 0; else echo "[seam-chat] FAIL"; exit 1; fi
 
 # ---- negative control (run separately — see docs/danger-zones.md §3 for the launch recipe) ------
-# Same escape-hatch shape as test-view-merge.sh's own negative control: GW_VIEW_MERGE is read once
+# Same escape-hatch shape as test-view-merge.sh's own negative control: LYRACORE_VIEW_MERGE is read once
 # per AreaOfInterestTracker::new() from the GATEWAY PROCESS's environment, so it cannot be toggled
 # without a restart.
-#   1. pkill -x gateway; sleep 1
-#   2. relaunch with the SAME recipe as docs/danger-zones.md §3 plus GW_VIEW_MERGE=0
+#   1. pkill -x lyracore-gatewa; sleep 1
+#   2. relaunch with the SAME recipe as docs/danger-zones.md §3 plus LYRACORE_VIEW_MERGE=0
 #   3. re-run this script — "login precondition" and "expect-seen" (assertion 0) must now FAIL/
 #      timeout (the away leg never opens at all — #73's own contract), which means assertions 1-3
-#      never get a chance to run either. This is the intended degrade: GW_VIEW_MERGE=0 collapses
+#      never get a chance to run either. This is the intended degrade: LYRACORE_VIEW_MERGE=0 collapses
 #      the WHOLE cross-seam chat feature along with view-merge itself, not just the range filter.
-#   4. restart the gateway WITHOUT GW_VIEW_MERGE=0 (or omit the var — it defaults on) to restore
+#   4. restart the gateway WITHOUT LYRACORE_VIEW_MERGE=0 (or omit the var — it defaults on) to restore
 #      production behavior before leaving the stack running.

@@ -9,14 +9,14 @@
 #
 # ⚠ GEOMETRY CAVEAT: the coordinates below are DERIVED from the documented live seam
 # (test-warm-handoff.sh's comment + docs/region-sharding.md's worked example: region 2 = Goldshire,
-# gx 530..545 / gy 330..345, owned by spacetime-world-2; everything else on map 0 is region 1 /
-# spacetime-core), not re-verified against the live tables. Before running, confirm:
-#   spacetime sql spacetime-core "SELECT * FROM game_map_region"
-#   spacetime sql realm-core "SELECT * FROM game_region_assignment"
+# gx 530..545 / gy 330..345, owned by lyracore-world-2; everything else on map 0 is region 1 /
+# lyracore), not re-verified against the live tables. Before running, confirm:
+#   spacetime sql lyracore "SELECT * FROM game_map_region"
+#   spacetime sql lyracore-realm "SELECT * FROM game_region_assignment"
 # and adjust NEAR_LOGIN_X / WALK_TARGET_X / FAR_X below if the live menu has moved.
 #
 # ⚠ THE AWAY CONNECT IS ASYNC (#207 fast-follow 1, closed in the rebuild): NEAR's first crossing
-# into the touching cell only KICKS OFF a background connect to spacetime-world-2 — it does not
+# into the touching cell only KICKS OFF a background connect to lyracore-world-2 — it does not
 # block on it. The away rectangles are subscribed on whichever later heartbeat sees that connect
 # finish (still driven by every processed movement packet, not only a further cell crossing — see
 # `AreaOfInterestTracker::update`'s doc comment), so `expect-create`'s existing 35s ack timeout is
@@ -26,7 +26,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 source tools/wire-client/scenario-lib.sh
-WORLD2=spacetime-world-2
+WORLD2=lyracore-world-2
 FAILED=0
 
 # ---- geometry (map 0, all three points share gy335 — only gx/x varies) --------------------------
@@ -34,14 +34,14 @@ FAILED=0
 # "walk" verb only moves +x, so the NEAR observer must start on the LOW-gx side and walk toward the
 # seam, ending just inside the box-touches-region2 window (anchor gx 528..532 touches cell 530)).
 #
-#   NEAR login   gx529  x=-9405  (home spacetime-core; box [527,531] already geometrically touches
+#   NEAR login   gx529  x=-9405  (home lyracore; box [527,531] already geometrically touches
 #                                 530, but login stays home-only regardless — #73's own module doc)
 #   NEAR walk-to gx528  x=-9350  (box [526,530] touches cell 530 — the first recenter after this
 #                                 heartbeat is what activates view-merge: home's share of the box
 #                                 splits into [526,529]x[full height] and away's into the single
 #                                 touching column [530,530]x[full height] — one range query each,
 #                                 never a per-cell subscribe)
-#   FAR (peer)   gx530  x=-9450  (INSIDE the Goldshire rectangle -> home spacetime-world-2)
+#   FAR (peer)   gx530  x=-9450  (INSIDE the Goldshire rectangle -> home lyracore-world-2)
 NEAR_LOGIN_X=-9405.0; WALK_TARGET_X=-9350.0; FAR_X=-9450.0
 Y=300.0; Z=59.0
 
@@ -66,7 +66,7 @@ echo "== position NEAR (core side, at the pre-walk cell) and stage FAR's row ins
 scall debug_teleport "$NEAR" 0 "$NEAR_LOGIN_X" "$Y" "$Z" 0
 # FAR has never logged in yet at this point (fresh char) — stage the DURABLE row directly so its
 # FIRST login's world-entry region resolver (docs/region-sharding.md §"How routing uses them") routes
-# it straight to spacetime-world-2, exactly like test-aoi-relay.sh's re-entry step stages a position
+# it straight to lyracore-world-2, exactly like test-aoi-relay.sh's re-entry step stages a position
 # before a reconnect picks it up.
 sqlq "UPDATE game_character SET map_id = 0, x = $FAR_X, y = $Y, z = $Z WHERE guid = $FAR" >/dev/null
 
@@ -138,13 +138,13 @@ rm -f "$CMD_OBS" "$ACK_OBS" "$OBS_READY" "$CMD_MOV" "$MOV_READY"
 if [ "$FAILED" -eq 0 ]; then echo "[view-merge] PASS"; exit 0; else echo "[view-merge] FAIL"; exit 1; fi
 
 # ---- negative control (run separately — see docs/danger-zones.md §3 for the launch recipe) ------
-# GW_VIEW_MERGE is read once per AreaOfInterestTracker::new(), which reads it from the GATEWAY
+# LYRACORE_VIEW_MERGE is read once per AreaOfInterestTracker::new(), which reads it from the GATEWAY
 # PROCESS's own environment — it cannot be toggled without restarting the gateway. To prove the
 # escape hatch actually gates the feature (not just documented as doing so):
-#   1. pkill -x gateway; sleep 1
-#   2. relaunch with the SAME recipe as docs/danger-zones.md §3 plus GW_VIEW_MERGE=0
+#   1. pkill -x lyracore-gatewa; sleep 1
+#   2. relaunch with the SAME recipe as docs/danger-zones.md §3 plus LYRACORE_VIEW_MERGE=0
 #   3. re-run this script — "login precondition" must still pass, but `expect-create` (assertion 1)
 #      must now FAIL/timeout: with the away leg disabled, NEAR's box never opens a connection to
 #      world-2 at all, so FAR stays invisible even after the walk.
-#   4. restart the gateway WITHOUT GW_VIEW_MERGE=0 (or omit the var — it defaults on) to restore
+#   4. restart the gateway WITHOUT LYRACORE_VIEW_MERGE=0 (or omit the var — it defaults on) to restore
 #      production behavior before leaving the stack running.

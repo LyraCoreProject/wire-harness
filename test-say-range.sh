@@ -10,7 +10,7 @@
 #   a) Speaker receives their OWN SAY (self-echo always delivered).
 #   b) Listener does NOT receive the SAY (range-gate silences it).
 #
-# The test-accounts must exist in the running spacetime-core instance.
+# The test-accounts must exist in the running lyracore instance.
 
 set -euo pipefail
 cd "$(dirname "$0")/../.."

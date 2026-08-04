@@ -4,7 +4,7 @@
 # per-scenario pad via a short stay session, (3) runs the wire-client scenario mode, (4) sql-asserts
 # server state at each seam, (5) tears down every spawned row and ASSERTS the teardown.
 
-DB=spacetime-core
+DB=lyracore
 WC=./target/debug/wire-client
 
 # $2/db is optional on every read/lookup helper below (default: the $DB global) — issue #70: a
@@ -92,7 +92,7 @@ purge_creatures_near() { # $1=x $2=y $3=radius [$4... = guids to KEEP (fixtures:
 # Uses the product's own LEAVE op (realm_op::LEAVE = 3) so the disband/mirror-sync rules run; the
 # local delete is the single-database fallback. Both are best-effort — "not in a group" is success.
 leave_any_group() { # $1=character guid
-  spacetime call "${REALM_CORE_DB:-realm-core}" -- realm_group_op 3 "$1" 0 0 0 >/dev/null 2>&1
+  spacetime call "${REALM_CORE_DB:-lyracore-realm}" -- realm_group_op 3 "$1" 0 0 0 >/dev/null 2>&1
   sqlq "DELETE FROM game_group_member WHERE character_guid = $1" >/dev/null 2>&1
   return 0
 }
@@ -100,14 +100,14 @@ leave_any_group() { # $1=character guid
 # Restart the gateway WITH ITS OWN ENVIRONMENT. $1 = log path (default /tmp/gw.log).
 #
 # A test that relaunches the gateway from a hardcoded command silently redefines the realm's
-# topology for every test after it. test-playerbots.sh did exactly that — `GW_AOI=1` and nothing
+# topology for every test after it. test-playerbots.sh did exactly that — `LYRACORE_AOI=1` and nothing
 # else, against a stack running four databases — and on a realm whose default shard has
 # `hosts_instances = false` (correct for that topology) #48's guard REFUSED to start it. The gateway
 # stayed down and the next twelve tests failed on "Connection refused", reported as twelve product
 # regressions. Read the launch env off the live process instead, so a restart is a restart.
 restart_gateway() {
   local log="${1:-/tmp/gw.log}" pid bin i
-  pid=$(pgrep -x gateway | head -1)
+  pid=$(pgrep -x lyracore-gatewa | head -1)
   [ -n "$pid" ] || { echo "[lib] restart_gateway: no gateway running" >&2; return 1; }
   # `/proc/PID/exe` resolves to "<path> (deleted)" when the binary has been REBUILT under the
   # running process — which any `cargo build`/`cargo test` between the launch and here does. Strip
@@ -121,7 +121,7 @@ restart_gateway() {
   [ -x "$bin" ] || { echo "[lib] restart_gateway: cannot locate the gateway binary ($bin)" >&2; return 1; }
   local envs=()
   while IFS= read -r line; do envs+=("$line"); done < <(tr '\0' '\n' < "/proc/$pid/environ" | grep -E '^(GW_[A-Z_]*|RUST_LOG)=')
-  pkill -x gateway; sleep 1
+  pkill -x lyracore-gatewa; sleep 1
   setsid nohup env "${envs[@]}" "$bin" </dev/null >"$log" 2>&1 &
   for i in $(seq 1 30); do
     grep -q "world listening" "$log" 2>/dev/null && { sleep 1; return 0; }
@@ -145,7 +145,7 @@ restart_gateway() {
 # Drives the product's own ops: LEAVE each member on realm-core (disband happens on the last one),
 # then push an EMPTY roster to each world shard's mirror, which is the documented disband case.
 reset_party_state() {
-  local rc="${REALM_CORE_DB:-realm-core}" g
+  local rc="${REALM_CORE_DB:-lyracore-realm}" g
   for g in $(spacetime sql "$rc" "SELECT character_guid FROM game_group_member" 2>/dev/null | sed -n '3,$p' | grep -oE '[0-9]+'); do
     spacetime call "$rc" -- realm_group_op 3 "$g" 0 0 0 >/dev/null 2>&1
   done
@@ -380,10 +380,10 @@ wait_for_sql_ge() { # $1=secs $2=query $3=want
 
 # Every shard that can hold a durable game_character row (issue #213): realm-core holds
 # accounts/parties only, never a character, so it is deliberately not in this list.
-GINGER_SHARDS="spacetime-core spacetime-world-1 spacetime-world-2 spacetime-instances"
+GINGER_SHARDS="lyracore lyracore-world-1 lyracore-world-2 lyracore-instances"
 
 # Canonical stored position for the Ginger fixture — inside the map-0/region-1 box that
-# `settle_home_shard` resolves onto spacetime-core (gateway/src/stdb/connection.rs's
+# `settle_home_shard` resolves onto lyracore (gateway/src/stdb/connection.rs's
 # `region_db_for`). It is ALSO test-say-range.sh/test-move-relay.sh's `position_apart` target for
 # Ginger, so parking her here after a repair leaves her exactly where those two already expect her.
 GINGER_HOME_MAP=0; GINGER_HOME_X=-8968.0; GINGER_HOME_Y=-129.0; GINGER_HOME_Z=83.4
@@ -398,14 +398,14 @@ _find_all_named() { # $1=name
 }
 
 # Self-healing Ginger locator (issue #213: "no Ginger character" / "Ginger never went live"). The
-# suite's shared fixture is assumed to live on spacetime-core by every hardcoded `DB=spacetime-core`
+# suite's shared fixture is assumed to live on lyracore by every hardcoded `DB=lyracore`
 # in the standalone test-*.sh scripts, but she does not always stay there:
-#   (a) map 0 (Eastern Kingdoms) is split into region 1 -> spacetime-core and region 2 ->
-#       spacetime-world-2 (`spacetime sql realm-core "SELECT * FROM game_region_assignment"`). A
+#   (a) map 0 (Eastern Kingdoms) is split into region 1 -> lyracore and region 2 ->
+#       lyracore-world-2 (`spacetime sql lyracore-realm "SELECT * FROM game_region_assignment"`). A
 #       login while her STORED position sits in region 2 (e.g. a prior test walked/teleported her
 #       into Goldshire) makes `settle_home_shard` transfer her live row there — confirmed live via
-#       the gateway log's `transfer 13: character 13 spacetime-world-2 -> spacetime-core` line when
-#       walked back. Every char_guid/scall/sqlq call still hardwired to spacetime-core then finds
+#       the gateway log's `transfer 13: character 13 lyracore-world-2 -> lyracore` line when
+#       walked back. Every char_guid/scall/sqlq call still hardwired to lyracore then finds
 #       nothing: "no Ginger character".
 #   (b) char-select CREATE always lands on the gateway's DEFAULT shard (issue #60) and is
 #       resolved to a database only on the FIRST world login. A caller that could not find the real
@@ -414,20 +414,20 @@ _find_all_named() { # $1=name
 #       and char-select's login-by-name is not guaranteed to pick the durable fixture over the
 #       accidental duplicate — live-diagnosed as guid 3677 (stranded inside a Deadmines instance,
 #       pending_instance_id set, level 1) shadowing guid 13 (the real fixture, level 5, on
-#       spacetime-world-2): logins kept landing on 3677, so she "never went live" as far as any
+#       lyracore-world-2): logins kept landing on 3677, so she "never went live" as far as any
 #       overworld-shard poll was concerned.
-# This scans every shard for $1, deletes every extra copy (keeping spacetime-core's copy outright if
+# This scans every shard for $1, deletes every extra copy (keeping lyracore's copy outright if
 # one exists, else the most-played survivor — cascades via debug_delete_character, same as any other
-# fixture cleanup), then if the survivor is not on spacetime-core: logs in, teleports her (on her
+# fixture cleanup), then if the survivor is not on lyracore: logs in, teleports her (on her
 # CURRENT shard) to the canonical home position, logs out, and logs back in once more so
-# `settle_home_shard` transfers her row to spacetime-core. Echoes the final guid; returns 1 with a
-# loud reason on stderr if the repair did not land her on spacetime-core.
+# `settle_home_shard` transfers her row to lyracore. Echoes the final guid; returns 1 with a
+# loud reason on stderr if the repair did not land her on lyracore.
 ensure_ginger_home() { # $1=name (default Ginger)
   local name="${1:-Ginger}" hits guid db keep_guid="" keep_db="" best_secs=-1 cur_secs
   hits=$(_find_all_named "$name")
   if [ -z "$hits" ]; then
     # Never existed anywhere: create her via the real wire path. A fresh char spawns at the
-    # Northshire start position (region 1), so the FIRST login settles her onto spacetime-core with
+    # Northshire start position (region 1), so the FIRST login settles her onto lyracore with
     # no repair needed below.
     timeout 60 "$WC" TEST test123 "$name" logout >/dev/null 2>&1
     hits=$(_find_all_named "$name")
@@ -437,7 +437,7 @@ ensure_ginger_home() { # $1=name (default Ginger)
     [ -z "$guid" ] && continue
     cur_secs=$(sql1 "SELECT played_total_secs FROM game_character WHERE guid = $guid" "$db")
     cur_secs="${cur_secs:-0}"
-    if [ "$db" = "spacetime-core" ] || { [ "$keep_db" != "spacetime-core" ] && [ "$cur_secs" -gt "$best_secs" ] 2>/dev/null; }; then
+    if [ "$db" = "lyracore" ] || { [ "$keep_db" != "lyracore" ] && [ "$cur_secs" -gt "$best_secs" ] 2>/dev/null; }; then
       keep_guid="$guid"; keep_db="$db"; best_secs="$cur_secs"
     fi
   done <<<"$hits"
@@ -446,21 +446,21 @@ ensure_ginger_home() { # $1=name (default Ginger)
     echo "[orch] ensure_ginger_home: deleting stray duplicate '$name' guid=$guid on $db (keeping guid=$keep_guid on $keep_db)" >&2
     scall_on "$db" debug_delete_character "$guid"
   done <<<"$hits"
-  if [ "$keep_db" = "spacetime-core" ]; then
+  if [ "$keep_db" = "lyracore" ]; then
     echo "$keep_guid"; return 0
   fi
-  echo "[orch] ensure_ginger_home: '$name' (guid=$keep_guid) lives on $keep_db, not spacetime-core — walking her home" >&2
+  echo "[orch] ensure_ginger_home: '$name' (guid=$keep_guid) lives on $keep_db, not lyracore — walking her home" >&2
   stay_start TEST test123 "$name" 30 "$keep_db" || { echo "[orch] ensure_ginger_home: could not log in on $keep_db" >&2; return 1; }
   scall_on "$keep_db" debug_teleport "$keep_guid" "$GINGER_HOME_MAP" "$GINGER_HOME_X" "$GINGER_HOME_Y" "$GINGER_HOME_Z" 0
   sleep 1
   stay_stop
   sleep 2
-  stay_start TEST test123 "$name" 10 spacetime-core || true
+  stay_start TEST test123 "$name" 10 lyracore || true
   stay_stop
-  if [ "$(sqlq "SELECT guid FROM game_character WHERE name = '$name'" spacetime-core | grep -oE '[0-9]+' | tail -1)" = "$keep_guid" ]; then
+  if [ "$(sqlq "SELECT guid FROM game_character WHERE name = '$name'" lyracore | grep -oE '[0-9]+' | tail -1)" = "$keep_guid" ]; then
     echo "$keep_guid"; return 0
   fi
-  echo "[orch] ensure_ginger_home: '$name' (guid=$keep_guid) still not on spacetime-core after the repair attempt" >&2
+  echo "[orch] ensure_ginger_home: '$name' (guid=$keep_guid) still not on lyracore after the repair attempt" >&2
   return 1
 }
 

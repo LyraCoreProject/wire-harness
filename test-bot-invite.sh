@@ -8,7 +8,7 @@
 # the entire #51 outage. A SINGLE-DATABASE gateway answers a bot's invite inside the module — the
 # `group_invite` reducer fires `on_group_invite` and `brain.rs`'s `playerbots_auto_accept` accepts in
 # the same transaction — and this harness is single-database. The bug only existed on a gateway with
-# GW_REALM_CORE set, where the invite is authoritative on realm-core (whose `pkg_playerbots_bot` is
+# LYRACORE_REALM_CORE set, where the invite is authoritative on realm-core (whose `pkg_playerbots_bot` is
 # empty, so the hook is a no-op) and the answer has to come from the gateway's routing layer.
 #
 # So the script has two arms:
@@ -17,8 +17,8 @@
 #     kill-XP split, /p).
 #   * WHEN `REALM_DB` names a realm-core database — the same party asserted on the AUTHORITY. This is
 #     the arm that fails without the #51 fix; run it as:
-#         REALM_DB=spacetime-realm-core bash tools/wire-client/test-bot-invite.sh
-#     against a gateway started with GW_REALM_CORE=$REALM_DB (the multi-database shape
+#         REALM_DB=lyracore-realm bash tools/wire-client/test-bot-invite.sh
+#     against a gateway started with LYRACORE_REALM_CORE=$REALM_DB (the multi-database shape
 #     test-transfer-crash-matrix.sh documents for its own second database).
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -86,7 +86,7 @@ if [ -n "$REALM_DB" ] && [ "$REALM_DB" != "$DB" ]; then
 else
   echo "[orch] bot-invite: NOTE — no separate REALM_DB, so the party authority IS this database."
   echo "[orch] bot-invite: this run cannot exhibit #51 at all (the module's own hook answers here);"
-  echo "[orch] bot-invite: re-run with REALM_DB=<realm-core db> against a GW_REALM_CORE gateway."
+  echo "[orch] bot-invite: re-run with REALM_DB=<realm-core db> against a LYRACORE_REALM_CORE gateway."
 fi
 
 # ---- teardown: release the wire leader (it disbands), then despawn ----

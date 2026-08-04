@@ -4,7 +4,7 @@
 # heartbeat-stream walk, which unlocks range/leash/AOI scenarios headlessly.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-DB=spacetime-core
+DB=lyracore
 WC=./target/debug/wire-client
 source tools/wire-client/scenario-lib.sh
 

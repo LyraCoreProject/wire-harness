@@ -101,7 +101,7 @@ const WALK_ARC_RADIUS_YDS: f32 = 20.0;
 
 /// #184 (AOI subscription-churn experiment): `WALK_SPAN` / `--walk-span` replaces the #288 arc with
 /// a straight back-and-forth line of this many yards, walked at `WALK_SPEED` below. The arc's ~40yd
-/// excursion sits mostly inside one 50yd AOI grid cell (`game_shared::spatial::GRID_CELL_SIZE`) by
+/// excursion sits mostly inside one 50yd AOI grid cell (`lyracore_shared::spatial::GRID_CELL_SIZE`) by
 /// construction, so it cannot be dialled up to cross cells at a chosen rate.
 ///
 /// ⚠ **Measured, not assumed: `WALK_SPAN` alone does NOT sweep a churn continuum.** Once a span
@@ -489,8 +489,8 @@ struct Cfg {
     heartbeat_ms: u64,
     combat_pct: usize,
     /// The race new characters are created as, which decides WHICH DATABASE they are born on:
-    /// `game_start_position` puts Human on map 0 (`spacetime-core`) and Orc/Troll on map 1
-    /// (`spacetime-world-1`). Benchmarking a continent shard needs a race that starts there, or
+    /// `game_start_position` puts Human on map 0 (`lyracore`) and Orc/Troll on map 1
+    /// (`lyracore-world-1`). Benchmarking a continent shard needs a race that starts there, or
     /// every synthetic player is born on the default shard and transfers off the one under test
     /// (#71).
     race: Race,
@@ -1001,8 +1001,8 @@ fn main() -> Result<()> {
             "orc" => Race::Orc,
             "troll" => Race::Troll,
             other => anyhow::bail!(
-                "--race {other} is not one this benchmark knows. Use human (map 0, spacetime-core) \
-                 or orc/troll (map 1, spacetime-world-1) — the race decides which database the \
+                "--race {other} is not one this benchmark knows. Use human (map 0, lyracore) \
+                 or orc/troll (map 1, lyracore-world-1) — the race decides which database the \
                  synthetic players are born on."
             ),
         },
@@ -1407,7 +1407,7 @@ spacetime_num_bytes_sent_to_clients_total{db="aaa",txn_type="Reducer"} 5
             .to_string();
         assert!(err.contains("same database"), "{err}");
         // …and both are PREFIX selectors, so overlap is the realistic typo, not equality:
-        // `--db spacetime-instances --witness-db spacetime-instances-1` makes the primary column
+        // `--db lyracore-instances --witness-db lyracore-instances-1` makes the primary column
         // aggregate the witness. Tightening the guard to `witness == db` left this suite green.
         let err = validate_witness_selection(&two, "aa", "aaa", &metrics::db_filter("aaa"))
             .unwrap_err()

@@ -1,4 +1,4 @@
-//! Headless 1.12.1 (build 5875) wire test-client for the spacetime-core gateway.
+//! Headless 1.12.1 (build 5875) wire test-client for the lyracore gateway.
 //!
 //! Speaks the real WoW protocol — SRP6 logon (port 3724) then the encrypted world session
 //! (port 8085) — so tests can drive CMSG and ASSERT on decoded SMSG, instead of QAing
@@ -6,7 +6,7 @@
 //! `gateway/src/logon/mod.rs` tests + `gateway/src/world/tests.rs::client_handshake`,
 //! lifted onto real `TcpStream`s. All blocking std I/O — no async.
 
-pub use game_shared::values_mask;
+pub use lyracore_shared::values_mask;
 
 use std::io::{Cursor, Read};
 use std::net::{Shutdown, TcpStream};
@@ -576,7 +576,7 @@ impl WireClient {
     /// the read timeout for the duration of the wait (a queued connection can legitimately sit for
     /// as long as it takes seats to free, which is NOT bounded by the normal 10s packet-arrival
     /// timeout every other read in this client uses). Every pre-#180 caller sees no behavior change
-    /// at all: an unlimited gateway (`GW_MAX_SESSIONS` unset) never sends `AuthWaitQueue`, so the
+    /// at all: an unlimited gateway (`LYRACORE_MAX_SESSIONS` unset) never sends `AuthWaitQueue`, so the
     /// loop body below never runs and `queue_positions_seen` stays empty.
     pub fn connect_world(world_addr: &str, account: &str, k: [u8; 40]) -> Result<Self> {
         let mut stream =
@@ -935,8 +935,8 @@ impl WireClient {
     ///
     /// The race decides which DATABASE the character is born on, which is why this exists. A new
     /// character is placed at its race's `game_start_position`, and those straddle the continent
-    /// split: Human is Elwynn on map 0 (`spacetime-core`), Orc and Troll are the Valley of Trials on
-    /// map 1 (`spacetime-world-1`). So a benchmark that wants to load the KALIMDOR writer cannot use
+    /// split: Human is Elwynn on map 0 (`lyracore`), Orc and Troll are the Valley of Trials on
+    /// map 1 (`lyracore-world-1`). So a benchmark that wants to load the KALIMDOR writer cannot use
     /// the default — 200 Humans created against a world-1 gateway are all born on map 0 and every
     /// one of them immediately transfers to core, measuring the shard it was trying to leave alone
     /// (work-item #71).

@@ -6,7 +6,7 @@
 #      and BOTH directions via the jump-relay pair at the end,
 #   4. DESTROY on AOI leave (teleport out of the box),
 #   5. CREATE on re-enter, then DESTROY on peer DISCONNECT (+ the entity row despawn via sql).
-# Requires the gateway running with GW_AOI=1 (grid-scoped entity subscriptions).
+# Requires the gateway running with LYRACORE_AOI=1 (grid-scoped entity subscriptions).
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 source tools/wire-client/scenario-lib.sh

@@ -228,7 +228,7 @@ fn char_delete(
 // — no character, no world entry: the #180 gate sits before either). Requires:
 //   - the N accounts already provisioned (`gateway provision`, or `scripts/run-capacity-bench.sh`'s
 //     provisioning step for a larger N) — this probe does not provision anything itself;
-//   - the gateway running with a small `GW_MAX_SESSIONS` (< N), so some of these are forced to
+//   - the gateway running with a small `LYRACORE_MAX_SESSIONS` (< N), so some of these are forced to
 //     queue. Against an unconfigured gateway every connection admits immediately and this still
 //     passes (`queue_positions_seen` empty for all of them) — a legitimate, if less interesting, run.
 //
@@ -246,7 +246,7 @@ fn login_queue_probe(
         .ok_or_else(|| anyhow!("usage: login-queue <N> — missing/invalid <N>"))?;
     eprintln!(
         "[wire] login-queue: {n} concurrent world logins as {account_prefix}0..{account_prefix}{} \
-         (accounts must already be provisioned; gateway should be running with a small GW_MAX_SESSIONS)",
+         (accounts must already be provisioned; gateway should be running with a small LYRACORE_MAX_SESSIONS)",
         n.saturating_sub(1)
     );
 
@@ -601,7 +601,7 @@ fn seamwalk(
     args: &mut dyn Iterator<Item = String>,
     _mcx: &ModeCtx<'_>,
 ) -> Result<()> {
-    use game_shared::spatial::grid_cell;
+    use lyracore_shared::spatial::grid_cell;
     use std::time::Duration;
     let mut f = || -> f32 {
         args.next()
@@ -1046,7 +1046,7 @@ fn gossip(
 }
 
 // ---- ghost-reveal probe (PIECE 2): a viewer who dies + becomes a GHOST should get the spirit-healer
-// entity CREATE'd (the GW_AOI=0 on_update reveal). The orchestrator kills+repops via debug reducers
+// entity CREATE'd (the LYRACORE_AOI=0 on_update reveal). The orchestrator kills+repops via debug reducers
 // (the char's small guid). PASS = healer hidden while alive, then revealed on the ghost transition.
 fn ghost(
     c: &mut WireClient,
@@ -1144,7 +1144,7 @@ fn logout_probe(
 // ---- ding probe: verify mid-session L10 ding pushes PLAYER_CHARACTER_POINTS1=1 ----
 // Usage: wire-client [account] [password] [char-name] ding <ready_file>
 // The orchestrator (test-ding.sh) must first set the char to L9, wait for its ready file,
-// then call `spacetime call spacetime-core debug_set_level <guid> 10`.
+// then call `spacetime call lyracore debug_set_level <guid> 10`.
 // Pass: an SMSG_UPDATE_OBJECT arrives that contains BOTH a level=10 word [0x0a 00 00 00]
 // AND a character_points1=1 word [0x01 00 00 00] — the levelup VALUES packet (#032 fix).
 fn ding(
