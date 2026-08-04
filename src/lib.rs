@@ -784,6 +784,21 @@ impl WireClient {
                     {
                         return Err(anyhow!("recv: socket read timeout: {e}"));
                     }
+                    // A CLOSED connection ("connection closed mid-frame" — [`fill_resumable`] hitting
+                    // EOF) is also terminal, and for the same reason a timeout is: this is a "broken
+                    // stream", not a "nothing yet". Issue #209 fix, found live: without this, a
+                    // connection that ends for ANY reason (a graceful peer close, a session the
+                    // gateway shed under load — nothing to do with #209's decode-corruption at all)
+                    // fell into the `skipped`/dump path below. A closed socket's reads return
+                    // instantly (no blocking), so a caller that keeps calling `recv()` once per poll
+                    // tick for the rest of a benchmark's hold window hit the 64-skip threshold on
+                    // EVERY call and wrote a fresh crash dump EVERY time — one dead session produced
+                    // thousands of files, burying the (correctly now-absent) real corruption signal
+                    // under noise that has nothing to do with it. No dump here: an ended stream is
+                    // not decode evidence worth capturing.
+                    if msg.contains("connection closed") {
+                        return Err(anyhow!("recv: connection closed: {e}"));
+                    }
                     skipped += 1;
                     if skipped > 64 {
                         // 64 STRAIGHT ordinary `read_encrypted` errors (as opposed to the ONE-shot
@@ -1564,6 +1579,37 @@ mod tests {
         let dribbled = drain_with_retries(&mut dribble_reader, &mut dribble_dec, &mut dribble_log, 3);
 
         assert_eq!(baseline, dribbled, "byte-at-a-time decode diverged from the clean decode");
+    }
+
+    /// Found live during the #209 repro (not in the original hunt list): a connection that's
+    /// genuinely CLOSED (the peer hung up — nothing to do with #209's decode-desync) used to fall
+    /// into the same `skipped`/64-strikes bucket as an ordinary undecodable frame. A closed socket's
+    /// reads return instantly (no blocking), so a caller that polls `recv()` once per tick for the
+    /// rest of a benchmark's hold window hit the 64-skip threshold on EVERY call and wrote a fresh
+    /// crash dump EVERY time — one dead session produced thousands of files (observed on the live
+    /// 150-mage repro), burying the real corruption signal (there wasn't any left) under noise. This
+    /// pins that a closed connection fails fast, every time, and is never mistaken for #209 evidence.
+    #[test]
+    fn a_closed_connection_is_terminal_and_does_not_flood_crash_dumps() {
+        let label = "CRASHTEST-closed";
+        cleanup_dumps_labeled(label);
+
+        let mut client = client_receiving_frames_labeled(&[(0x004D, &[])], label); // one clean frame, then the server drops
+        assert!(matches!(client.recv().unwrap(), WorldSmsg::SMSG_LOGOUT_COMPLETE));
+
+        for _ in 0..10 {
+            let err = client.recv().expect_err("a closed connection must not be swallowed as a skip");
+            assert!(!is_unsafe_server_frame(&err), "a closed connection is not decode corruption: {err}");
+            assert!(err.to_string().contains("connection closed"), "unexpected error: {err}");
+        }
+
+        let dir = crash_dump_dir();
+        let prefix = format!("{}-", sanitize_label(label));
+        let dumped = std::fs::read_dir(&dir)
+            .ok()
+            .map(|it| it.flatten().filter(|e| e.file_name().to_string_lossy().starts_with(&prefix)).count())
+            .unwrap_or(0);
+        assert_eq!(dumped, 0, "a closed connection is not decode evidence — it must not write a dump");
     }
 
     /// The ring buffer is BOUNDED (`CRASH_RING_CAPACITY`) — a long-lived session must not grow its
