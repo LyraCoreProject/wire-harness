@@ -106,7 +106,16 @@ obs_cmd "walk $NEAR_LOGIN_X $Y $Z" # steps +x from NEAR_LOGIN_X, crossing into t
                                     # WALK_TARGET_X directly (see the geometry comment above)
 
 echo "== assertion 1 (AC): NEAR decodes FAR's CREATE — a single coherent crowd across the seam"
-obs_cmd expect-create
+# expect-seen, not expect-create (found live, 2026-08-04): the away leg's resident sweep fires the
+# moment the FIRST away-shard rect subscription applies, which is DURING the "walk" command's own
+# 12-heartbeat loop above (that loop drains the socket after every send) — not after it, the way
+# every OTHER use of this harness stages its trigger (a separate debug_teleport/burst issued AFTER
+# the observer's own movement settles). expect-create deliberately clears any earlier sighting and
+# waits for a FRESH create, so it times out here even though FAR's CREATE genuinely arrived — just
+# a heartbeat or two earlier than this line. expect-seen asserts the same acceptance criterion
+# (peer has been CREATEd — "already, or within the window") without assuming which side of the
+# walk it happens on.
+obs_cmd expect-seen
 
 echo "== assertion 2 (AC): movement crosses the seam live, not on a refresh"
 obs_cmd expect-move &
