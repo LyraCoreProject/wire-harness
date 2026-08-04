@@ -122,6 +122,20 @@ pub(crate) fn extract_chat_text(m: &SMSG_MESSAGECHAT) -> Option<String> {
     }
 }
 
+/// #74 seam-chat: the SPEAKER's guid out of a Say/Yell SMSG_MESSAGECHAT — `speech_bubble_credit`
+/// on both variants (the gateway's `codec::build_chat_message` stamps `sender_guid` into both
+/// credit fields; see its own test asserting exactly that). Lets `expect-chat`/`expect-no-chat`
+/// (the away-shard seam-chat probe) filter on WHO spoke, not just what they said — needed once a
+/// scenario has more than one possible speaker in flight.
+pub(crate) fn extract_chat_sender(m: &SMSG_MESSAGECHAT) -> Option<u64> {
+    use wow_world_messages::vanilla::SMSG_MESSAGECHAT_ChatType;
+    match &m.chat_type {
+        SMSG_MESSAGECHAT_ChatType::Say { speech_bubble_credit, .. }
+        | SMSG_MESSAGECHAT_ChatType::Yell { speech_bubble_credit, .. } => Some(speech_bubble_credit.guid()),
+        _ => None,
+    }
+}
+
 /// Parse a vanilla PACKED guid from the head of a payload: mask byte, then one byte per set mask
 /// bit (LSB-first). Returns None on truncation.
 pub(crate) fn read_packed_guid(payload: &[u8]) -> Option<u64> {
