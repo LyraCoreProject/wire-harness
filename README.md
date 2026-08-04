@@ -1,22 +1,22 @@
-# vanilla-wire — a headless build-5875 (WoW 1.12.1) wire client
+# wire-harness — a headless build-5875 (WoW 1.12.1) wire client
 
 Speaks the real vanilla protocol — SRP6 logon, then the encrypted world session — so tests can
 drive `CMSG` and assert on decoded `SMSG` without a game client in the loop. No wine, no async, no
 game install: `cargo run`, a reachable server, and credentials.
 
-It is **server-agnostic**. Anything that implements build 5875 will do; this repository's server
-is simply the one it is developed against.
+It is **server-agnostic**. Anything that implements **build 5875** will do.
+[LyraCore](https://github.com/LyraCoreProject/LyraCore) is simply the server it is developed
+against, and everything LyraCore-specific is quarantined under `adapters/lyracore/`.
 
 ```
-printf '%s' "$PASSWORD" | cargo run -p wire-client -- smoke \
+printf '%s' "$PASSWORD" | cargo run -- smoke \
     --host 10.0.0.5 --account TESTER --character Tester --password-stdin
 ```
 
-## The boundary (issue #244)
+## The boundary
 
-This directory contains two different kinds of thing, and the whole point of the boundary is that
-they never mix. Issue #245 splits them into two repositories; the line drawn here is the line the
-split will cut along.
+This repository contains two different kinds of thing, and the whole point of the boundary is that
+they never mix.
 
 ### Generic — the client (`src/`, `Cargo.toml`)
 
@@ -28,18 +28,19 @@ Build-5875 protocol and nothing else.
 | `src/cli.rs` | Endpoints (`--host`, `--logon-port`, `--world-port`) and identity (`--account`, `--character`, `--class`, `--race`, `--password-stdin`) |
 | `src/values_mask.rs` | `SMSG_UPDATE_OBJECT` VALUES decoder — the harness's OWN implementation |
 | `src/spatial.rs` | Map-coordinate and interest-grid math — the harness's OWN implementation |
-| `src/main.rs`, `src/modes/` | The `smoke` command and the named protocol scenarios (#245 relocates `modes/` to `scenarios/`) |
+| `src/main.rs`, `src/scenarios/` | The `smoke` command and the named protocol scenarios |
 | `src/bin/bench/` | `vanilla-wire-bench`, the synthetic-player capacity ramp |
 
 Rules this half keeps:
 
-* **No path dependency on any server crate.** Every dependency in `Cargo.toml` is an external
-  protocol crate. This is not a style preference: a path dependency is exactly what makes the tool
-  un-extractable and un-runnable against anything else.
-* **No shared decoder with the server.** `values_mask.rs` and `spatial.rs` were re-exports of the
-  server's `lyracore-shared` copies. A test tool that decodes with the encoder's own logic cannot
-  catch an encoder bug — the two errors cancel and a broken server reads green. Independent
-  implementations, with their own unit tests, are the point.
+* **No dependency on any server crate.** Every dependency in `Cargo.toml` is an external protocol
+  crate (`wow_srp`, `wow_login_messages`, `wow_world_messages`, `wow_world_base` — gtker's, and
+  their `wow_` names are upstream's; never rename them). This is not a style preference: a path
+  dependency on a server is exactly what makes a test client un-runnable against anything else.
+* **No shared decoder with the server.** `values_mask.rs` and `spatial.rs` were once re-exports of
+  LyraCore's copies. A test tool that decodes with the encoder's own logic cannot catch an encoder
+  bug — the two errors cancel and a broken server reads green. Independent implementations, with
+  their own unit tests, are the point.
 * **No baked-in fixtures.** No default account, no default password, no default character, no
   default target name. Every one of those is an argument.
 * **No password on a command line.** `--password-stdin` is required and takes the password from
@@ -48,32 +49,46 @@ Rules this half keeps:
 * **No project vocabulary.** Nothing here names a database, a reducer, a shard or a fixture
   character.
 
-### Project-specific — the adapters (`*.sh`, `adapters/`)
+Building and testing the generic half needs **no server checkout of any kind** — see
+[Tests](#tests).
 
-The orchestration around the client: which accounts this repository's dev stack provisions, what
-their passwords are, which characters and creature entries the scenarios expect, and the
-`spacetime sql` / `spacetime call` steps that stage and assert server state. All of it is
-LyraCore/SpacetimeDB-specific and none of it is protocol.
+### Server-specific — the adapters (`adapters/`)
+
+The orchestration around the client: which accounts a particular dev stack provisions, what their
+passwords are, which characters and creature entries the scenarios expect, and the steps that stage
+and assert server state. None of it is protocol.
+
+`adapters/lyracore/` is the one adapter that ships here, because this harness grew inside LyraCore
+and its 47 orchestrators are the harness's own regression history. It is a worked example of what
+an adapter looks like; a second server would get a sibling directory and touch nothing in `src/`.
 
 | Piece | What it is |
 |---|---|
 | `adapters/lyracore/wire.sh` | **The seam.** Fixture credentials, endpoints and class default → the client's CLI |
-| `scenario-lib.sh` | Shared orchestrator helpers (`spacetime sql`/`call`, fixtures, stay sessions) |
-| `test-*.sh`, `wire-suite.sh` | The orchestrators and the regression suite |
+| `adapters/lyracore/adapter-env.sh` | Resolves the two roots (this repo, and a LyraCore checkout) |
+| `adapters/lyracore/scenario-lib.sh` | Shared orchestrator helpers (`spacetime sql`/`call`, fixtures, stay sessions) |
+| `adapters/lyracore/test-*.sh`, `wire-suite.sh` | The orchestrators and the regression suite |
 
 Every orchestrator calls the client as `"$WC" <account> <character> [scenario [args…]]`, where
 `$WC` is `adapters/lyracore/wire.sh` (set once, in `scenario-lib.sh`). That is the only path from
-project-specific orchestration into the generic client. Nothing exec's the binary directly except
+server-specific orchestration into the generic client. Nothing exec's the binary directly except
 `test-login-queue.sh`, which provisions its own throwaway accounts and passes its own password.
 
-Point `WIRE_BIN` at a different build — a downloaded `wire-harness` release, say — and the entire
-suite runs against it unchanged. That is the mechanism #246 uses.
+Point `WIRE_BIN` at a different build — a downloaded release, say — and the entire suite runs
+against it unchanged.
+
+The LyraCore adapter's **external requirements** (none of which apply to `cargo test`) are stated
+at the top of `adapters/lyracore/adapter-env.sh` and in
+[`adapters/lyracore/README.md`](adapters/lyracore/README.md): a LyraCore checkout
+(`$LYRACORE_DIR`), a running SpacetimeDB node and gateway, the `spacetime` CLI, a module published
+with `--features=debug_reducers`, and the fixture accounts.
 
 #### Adapter configuration
 
 | Variable | Meaning | Default |
 |---|---|---|
-| `WIRE_BIN` | Path to the `vanilla-wire` binary | `<repo>/target/debug/vanilla-wire` |
+| `LYRACORE_DIR` | Path to a LyraCore checkout | autodetected from `$PWD` |
+| `WIRE_BIN` | Path to the `vanilla-wire` binary | `<this repo>/target/debug/vanilla-wire` |
 | `WIRE_HOST` | Server host | `127.0.0.1` |
 | `WIRE_LOGON_PORT` | Logon tier port | `3724` |
 | `WIRE_WORLD_PORT` | World tier port override | unset (use the realm-list answer) |
@@ -95,7 +110,7 @@ vanilla-wire-bench [OPTIONS]        # see --help
 ```
 
 `vanilla-wire --help` lists every flag. Each scenario documents its own arguments in a
-`// Usage: vanilla-wire scenario …` comment above its function in `src/modes/`.
+`// Usage: vanilla-wire scenario …` comment above its function in `src/scenarios/`.
 
 `smoke` is the generic acceptance test: logon → world handshake → character enumerate (creating
 the character if absent) → enter the world → report the session guid and the number of objects
@@ -124,19 +139,44 @@ client-observed movement latency and throughput. Its inputs are documented in
 
 Its one non-generic surface is `--metrics`/`--db`/`--witness-db`: server-side writer, transaction
 and table counters, scraped from a Prometheus endpoint whose series names are SpacetimeDB's. That
-is the benchmark's server adapter — flagged as such in `--help`, and separate from the load
-generation, which is pure protocol.
+is the benchmark's server adapter — flagged as such in `--help`, switchable off with
+`--metrics none`, and separate from the load generation, which is pure protocol.
 
 ## Tests
 
 ```
-cargo test -p wire-client
+cargo test
 ```
 
-Offline and hermetic — no server needed. Covered: CLI parsing and the no-default/no-plaintext
-rules, endpoint resolution, the update-mask decoder (mask-block indexing, packed guids, truncation
-safety), the spatial helpers, and framing (fragmented reads, header cipher-state continuity,
-oversized/corrupt compressed frames, the crash-dump ring).
+Offline and hermetic — no server, and no server checkout, needed. Covered: CLI parsing and the
+no-default/no-plaintext rules, endpoint resolution, the update-mask decoder (mask-block indexing,
+packed guids, truncation safety), the spatial helpers, and framing (fragmented reads, header
+cipher-state continuity, oversized/corrupt compressed frames, the crash-dump ring).
 
-The `test-*.sh` orchestrators are live tests: they need a running server and this repository's
-fixtures, and they are operator-gated in attended sessions (see `../../CLAUDE.md`).
+The scripts under `adapters/` are **live** tests: they need a running server and that server's
+fixtures. They are not part of `cargo test` and CI never runs them.
+
+## Build support
+
+Build **5875** (WoW 1.12.1) only. The logon handshake, the world handshake, the opcode numbering
+and the update-mask layout are all build-specific; supporting another build means another
+implementation, not a flag.
+
+## History
+
+This repository was extracted from
+[LyraCore](https://github.com/LyraCoreProject/LyraCore) (`tools/wire-client/`) with
+`git filter-repo`, preserving every commit that touched those paths along with its author, date and
+message. Commits before the extraction therefore describe work done inside the server repository
+and reference its issue numbers.
+
+## License
+
+Dual-licensed under either of
+
+* Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+* MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+at your option. Unless you explicitly state otherwise, any contribution intentionally submitted for
+inclusion in this work by you shall be dual licensed as above, without any additional terms or
+conditions.

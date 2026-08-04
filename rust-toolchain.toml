@@ -1,0 +1,11 @@
+# Pins the DEVELOPMENT toolchain (what you build/test/fmt with day to day) so `cargo fmt` and
+# `cargo clippy` output is reproducible across machines and CI. Deliberately NEWER than the crate's
+# declared MSRV (`rust-version = "1.80"` in Cargo.toml, kept for the widest range of buildable
+# rustc): rustup transparently fetches this exact toolchain for any cargo command run from this
+# repo, and fails fast with an actionable message if it cannot.
+#
+# Kept in step with LyraCore's own rust-toolchain.toml — the two repositories are developed
+# together and a version skew between them shows up as fmt churn in review, nothing more.
+[toolchain]
+channel = "1.93.0"
+components = ["rustfmt", "clippy"]

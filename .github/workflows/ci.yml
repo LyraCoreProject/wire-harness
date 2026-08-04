@@ -1,0 +1,121 @@
+# CI for the GENERIC half. Everything here is offline and hermetic: no server, no server checkout,
+# no network beyond crates.io. That is the property worth protecting — the moment CI needs a running
+# LyraCore to go green, the boundary this repository exists to draw has quietly moved.
+#
+# The scripts under adapters/ are live tests against a real server and are NEVER run here; they get
+# a shellcheck-grade syntax check only.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Linux is where it is developed; macOS is the one that catches the assumptions a Linux-only
+        # tool accretes (BSD userland, case-insensitive FS, a different linker).
+        os: [ubuntu-latest, macos-latest]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # No toolchain action: rust-toolchain.toml pins the version and rustup (preinstalled on both
+      # runners) honours it for every cargo command run in this repo. Installing a toolchain here
+      # would be a second, silently-diverging source of truth.
+      - name: Show the pinned toolchain
+        run: rustup show active-toolchain && cargo --version
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ci-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ci-${{ runner.os }}-
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      # --locked: the lockfile is committed and a CI run must not silently resolve a different
+      # dependency tree than the one a developer tested against.
+      - name: Test
+        run: cargo test --locked
+
+      # The generic client must build with nothing else present. `cargo test` already proves that
+      # (there is no server crate in the tree to depend on), so this is the release-profile check
+      # that the binaries the adapters and #246 consume actually link.
+      - name: Build release binaries
+        run: cargo build --release --locked --bins
+
+      - name: Syntax-check the adapter scripts
+        shell: bash
+        run: |
+          for f in adapters/*/*.sh; do bash -n "$f" || exit 1; done
+          echo "bash -n clean on $(ls adapters/*/*.sh | wc -l) adapter scripts"
+
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show the pinned toolchain
+        run: rustup show active-toolchain && cargo --version
+
+      - name: Cache cargo registry + coverage target dir
+        uses: actions/cache@v4
+        with:
+          # cargo-llvm-cov builds into its OWN target subdirectory so a coverage run never
+          # invalidates a normal build cache.
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cargo-llvm-cov
+            target/llvm-cov-target
+          key: coverage-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: coverage-${{ runner.os }}-
+
+      - name: Install cargo-llvm-cov
+        run: |
+          rustup component add llvm-tools-preview
+          cargo llvm-cov --version || cargo install cargo-llvm-cov --locked
+
+      # A RATCHET, not a target. The floors are the 2026-08-04 measured baseline, floor()ed
+      # (lines 27.84 / regions 28.22 / functions 30.21). They are low because most of the crate is
+      # scenario code whose only honest exercise is a live server — the covered part is the protocol
+      # core (values_mask 100%, spatial 100%, cli 79%, framing). Raise them from a measurement;
+      # lowering one is a deliberate act that belongs in the same commit as the removed tests.
+      - name: Measure and enforce the floors
+        run: |
+          cargo llvm-cov --locked --html --output-dir target/coverage \
+            --fail-under-lines 27 --fail-under-regions 28 --fail-under-functions 30
+
+      # always(): a FAILING run still ships the per-line HTML, which is exactly what a reviewer
+      # needs to see which lines the branch stopped covering.
+      - name: Upload coverage artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ github.sha }}
+          path: target/coverage/
+          if-no-files-found: error
+          retention-days: 14

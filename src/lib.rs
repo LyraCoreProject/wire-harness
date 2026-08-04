@@ -18,6 +18,11 @@
 //! the crate, in the shell adapters under `adapters/`, and reaches this client only through the
 //! documented CLI. See `README.md`.
 
+// A handful of decode helpers hand back the whole decoded packet as a tuple (`char_enumerate`,
+// `who_request`). Naming a struct per SMSG would be more types than the assertions that consume
+// them are worth — the tuple IS the packet, positionally, and it is read once at the call site.
+#![allow(clippy::type_complexity)]
+
 pub mod cli;
 pub mod spatial;
 pub mod values_mask;
