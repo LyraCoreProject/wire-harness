@@ -54,7 +54,7 @@ fi
 
 echo "[test-login-queue] provisioning ${N} accounts ${PREFIX}0..${PREFIX}$((N - 1))…"
 for i in $(seq 0 $((N - 1))); do
-  "$GW" provision "${PREFIX}${i}" "$PASSWORD" >/dev/null
+  printf '%s\n' "$PASSWORD" | "$GW" provision "${PREFIX}${i}" --password-stdin >/dev/null
 done
 
 echo "[test-login-queue] driving ${N} concurrent world logins…"
