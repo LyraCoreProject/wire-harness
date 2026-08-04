@@ -182,6 +182,73 @@ fn aoi_observer(
             std::fs::write(&ack_file, "OK walk").ok();
             continue;
         }
+        // "walk-multi <x> <y> <z>" (190 rework): the OBSERVER loops E, N, W, S — four ~60yd legs,
+        // each past a 50yd GRID_CELL_SIZE boundary, in FOUR DIFFERENT directions, back to the
+        // start. This is the batched-generational-diff scheme's worst case at the wire level: the
+        // W leg's entering generation is exactly the E leg's generation retiring (a full-strip
+        // reversal, not a partial split — see gateway/src/stdb/aoi.rs's module doc), and the S leg
+        // does the same for N. `peer` is already visible (staged near the loop's center by the
+        // caller) and never leaves the box at any point along it, so ANY create/destroy for `peer`
+        // observed DURING the walk is a flicker/gap bug (duplicate coverage or a dropped one), not
+        // legitimate AOI churn — unlike the single "walk" above, this command asserts that itself
+        // instead of leaving it to a later expect-move.
+        if let Some(rest) = cmd.strip_prefix("walk-multi ") {
+            use wow_world_messages::vanilla::{
+                MovementInfo, MovementInfo_MovementFlags, Vector3d, MSG_MOVE_HEARTBEAT_Client,
+            };
+            let p: Vec<f32> = rest.split_whitespace().filter_map(|t| t.parse().ok()).collect();
+            if p.len() != 3 {
+                std::fs::write(&ack_file, "FAIL walk-multi (need <x> <y> <z>)").ok();
+                bail!("aoi-observer: walk-multi needs <x> <y> <z>, got {rest:?}");
+            }
+            let bz = p[2];
+            let legs: [(f32, f32); 4] = [(60.0, 0.0), (0.0, 60.0), (-60.0, 0.0), (0.0, -60.0)]; // E, N, W, S
+            let (mut cx, mut cy) = (p[0], p[1]);
+            let (mut creates, mut destroys) = (0u32, 0u32);
+            for (dx, dy) in legs {
+                for i in 1..=12u32 {
+                    let t = i as f32 / 12.0;
+                    c.send(&MSG_MOVE_HEARTBEAT_Client {
+                        info: MovementInfo {
+                            flags: MovementInfo_MovementFlags::empty(),
+                            timestamp: i * 300,
+                            position: Vector3d { x: cx + dx * t, y: cy + dy * t, z: bz },
+                            orientation: 0.0,
+                            fall_time: 0.0,
+                        },
+                    })?;
+                    std::thread::sleep(std::time::Duration::from_millis(120));
+                    // Drain fully (not just one frame) so a burst around the crossing can't hide a
+                    // duplicate create/destroy in a later "walk-multi" iteration's single c.recv().
+                    while let Ok(m) = c.recv() {
+                        match &m {
+                            Smsg::SMSG_UPDATE_OBJECT(u)
+                                if u.objects.iter().any(|o| wire_client::create_object_guid(o) == Some(peer)) =>
+                            {
+                                creates += 1;
+                            }
+                            Smsg::SMSG_DESTROY_OBJECT(d) if d.guid.guid() == peer => {
+                                destroys += 1;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                cx += dx;
+                cy += dy;
+            }
+            println!(
+                "[aoi] walk-multi looped E,N,W,S from ({}, {}, {}) — creates={creates} destroys={destroys} for peer {peer:#x}",
+                p[0], p[1], p[2]
+            );
+            if creates == 0 && destroys == 0 {
+                std::fs::write(&ack_file, "OK walk-multi").ok();
+            } else {
+                std::fs::write(&ack_file, format!("FAIL walk-multi creates={creates} destroys={destroys}")).ok();
+                bail!("aoi-observer: walk-multi saw creates={creates} destroys={destroys} for a peer that never left the box");
+            }
+            continue;
+        }
         // a command may carry an explicit guid ("expect-seen 42") overriding the launch peer —
         // used when the interesting guid (a freshly spawned bot) isn't known at observer start
         let (cmd, peer) = match cmd.split_once(' ') {
