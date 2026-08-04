@@ -12,7 +12,7 @@ cd "$(dirname "$0")/../.."
 source tools/wire-client/scenario-lib.sh
 scenario_preflight aoi-relay
 DFS=$(char_guid dfsdfsd)
-[ -z "$DFS" ] && timeout 60 "$WC" TEST2 test123 dfsdfsd logout >/dev/null 2>&1 && DFS=$(char_guid dfsdfsd)
+[ -z "$DFS" ] && timeout 60 "$WC" TEST2 dfsdfsd logout >/dev/null 2>&1 && DFS=$(char_guid dfsdfsd)
 [ -z "$DFS" ] && { echo "[orch] no dfsdfsd character" >&2; exit 1; }
 
 # Geometry: observer at pad O; peer starts ~400yd away (far outside the 125yd AOI box).
@@ -27,20 +27,20 @@ RELAY_READY=/tmp/wc_relay_ready_$$
 rm -f "$CMD_OBS" "$ACK_OBS" "$CMD_MOV" "$OBS_READY" "$MOV_READY" "$RELAY_READY"
 
 # stage stored positions (login places each session at its stored character position)
-stay_start TEST test123 Ginger || exit 1
+stay_start TEST Ginger || exit 1
 scall debug_teleport "$GINGER" 0 $OX $OY $OZ 0
 stay_stop
-stay_start TEST2 test123 dfsdfsd || exit 1
+stay_start TEST2 dfsdfsd || exit 1
 scall debug_teleport "$DFS" 0 $FX $FY $FZ 0
 stay_stop
 
 # mover first (so the observer's login precondition sees it already in-world but FAR)
-timeout 240 "$WC" TEST2 test123 dfsdfsd aoi-mover "$CMD_MOV" "$MOV_READY" >/tmp/ws_aoi_mover.log 2>&1 &
+timeout 240 "$WC" TEST2 dfsdfsd aoi-mover "$CMD_MOV" "$MOV_READY" >/tmp/ws_aoi_mover.log 2>&1 &
 MOVER=$!
 wait_for_file 20 "$MOV_READY" || { echo "[orch] mover never ready" >&2; kill $MOVER 2>/dev/null; exit 1; }
 rm -f "$MOV_READY"
 
-timeout 240 "$WC" TEST test123 Ginger aoi-observer "$DFS" "$CMD_OBS" "$ACK_OBS" "$OBS_READY" >/tmp/ws_aoi_observer.log 2>&1 &
+timeout 240 "$WC" TEST Ginger aoi-observer "$DFS" "$CMD_OBS" "$ACK_OBS" "$OBS_READY" >/tmp/ws_aoi_observer.log 2>&1 &
 OBS=$!
 wait_for_file 20 "$OBS_READY" || { echo "[orch] observer never ready (peer visible at login?)" >&2; cat /tmp/ws_aoi_observer.log; kill $OBS $MOVER 2>/dev/null; exit 1; }
 rm -f "$OBS_READY"
@@ -95,7 +95,7 @@ sqlq "UPDATE game_character SET x = $NX, y = $NY, z = $NZ WHERE guid = $DFS" >/d
 rm -f "$MOV_READY"
 obs_cmd expect-create & CMDPID=$!
 sleep 1 # let the observer arm (clear the stale sighting) BEFORE the login CREATE can arrive
-timeout 120 "$WC" TEST2 test123 dfsdfsd aoi-mover "$CMD_MOV" "$MOV_READY" >/tmp/ws_aoi_mover2.log 2>&1 &
+timeout 120 "$WC" TEST2 dfsdfsd aoi-mover "$CMD_MOV" "$MOV_READY" >/tmp/ws_aoi_mover2.log 2>&1 &
 MOVER=$!
 wait_for_file 20 "$MOV_READY"
 rm -f "$MOV_READY"
@@ -128,9 +128,9 @@ sqlq "UPDATE game_character SET x = -8968.0, y = -129.0, z = 83.4 WHERE guid = $
 sqlq "UPDATE game_character SET x = -8945.0, y = -107.0, z = 83.4 WHERE guid = $DFS" >/dev/null
 echo "[orch] move relay A->B (Ginger jumps, dfsdfsd observes)…"
 rm -f "$RELAY_READY"
-"$WC" TEST2 test123 dfsdfsd relay-observer "$RELAY_READY" >/tmp/wc_relay_obs.log 2>&1 &
+"$WC" TEST2 dfsdfsd relay-observer "$RELAY_READY" >/tmp/wc_relay_obs.log 2>&1 &
 ORC=$!
-"$WC" TEST test123 Ginger relay-sender "$RELAY_READY" >/tmp/wc_relay_snd.log 2>&1 &
+"$WC" TEST Ginger relay-sender "$RELAY_READY" >/tmp/wc_relay_snd.log 2>&1 &
 SRC=$!
 wait $ORC; RC1=$?
 wait $SRC 2>/dev/null
@@ -138,9 +138,9 @@ if [ $RC1 -eq 0 ]; then step_ok "move relay A->B (jump received by observer)"; e
 echo "[orch] move relay B->A (dfsdfsd jumps, Ginger observes)…"
 sleep 4 # settle: both accounts just disconnected from the A->B pair
 rm -f "$RELAY_READY"
-"$WC" TEST test123 Ginger relay-observer "$RELAY_READY" >/tmp/wc_relay_obs2.log 2>&1 &
+"$WC" TEST Ginger relay-observer "$RELAY_READY" >/tmp/wc_relay_obs2.log 2>&1 &
 ORC=$!
-"$WC" TEST2 test123 dfsdfsd relay-sender "$RELAY_READY" >/tmp/wc_relay_snd2.log 2>&1 &
+"$WC" TEST2 dfsdfsd relay-sender "$RELAY_READY" >/tmp/wc_relay_snd2.log 2>&1 &
 SRC=$!
 wait $ORC; RC2=$?
 wait $SRC 2>/dev/null

@@ -18,7 +18,7 @@ mod_panics() { spacetime logs "$DB" 2>/dev/null | grep -c "panicked" || echo 0; 
 
 # stage: full vitals + mana for the periodic casts, a couple of wolves for ambient combat, and the
 # Lesser Heal spellbook entry (the cast path is exercised end-to-end)
-stay_start TEST test123 Ginger || exit 1
+stay_start TEST Ginger || exit 1
 scall debug_teleport "$GINGER" 0 $PAD_X $PAD_Y $PAD_Z 0
 scall debug_set_health "$GINGER" 100000
 scall debug_set_power "$GINGER" 100000
@@ -43,7 +43,7 @@ echo "[orch] baseline: gw_errs=$ERRS0 module_panics=$PANICS0"
 ) &
 KEEPER=$!
 
-timeout $(( SOAK_SECS + 60 )) "$WC" TEST test123 Ginger soak "$SOAK_SECS" $PAD_X $PAD_Y $PAD_Z 2050 "$W1" "$W2"
+timeout $(( SOAK_SECS + 60 )) "$WC" TEST Ginger soak "$SOAK_SECS" $PAD_X $PAD_Y $PAD_Z 2050 "$W1" "$W2"
 RC=$?
 kill "$KEEPER" 2>/dev/null; wait "$KEEPER" 2>/dev/null
 [ $RC -ne 0 ] && { echo "[orch] soak wire client exited rc=$RC"; FAILED=1; }

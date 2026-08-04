@@ -15,5 +15,5 @@ CGUID=$(char_guid Ginger)
 [ -n "$CGUID" ] && sqlq "DELETE FROM game_melee_attack WHERE attacker_guid = $CGUID" >/dev/null 2>&1 || true
 sleep 7
 echo "[077] out-of-combat logout probe…"
-"$WC" TEST test123 Ginger logout
+"$WC" TEST Ginger logout
 echo "[077] PASS"

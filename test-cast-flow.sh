@@ -66,7 +66,7 @@ orchestrate() {
 
 orchestrate &
 ORCH=$!
-WIRE_TARGET_FILE="$TGT" timeout 120 cargo run -q -p wire-client -- TEST test123 "$CHAR" "$SPELL"
+WIRE_TARGET_FILE="$TGT" timeout 120 "$WC" TEST "$CHAR" cast "$SPELL"
 RC=$?
 wait "$ORCH" 2>/dev/null || true
 # Cleanup the spawned mob: ENTITY AND SPAWN ROW (else the respawn pass resurrects it).

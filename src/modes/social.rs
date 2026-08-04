@@ -38,7 +38,7 @@ pub(crate) fn try_dispatch(
 }
 
 // ---- who probe: send CMSG_WHO (no filters) and assert SMSG_WHO lists the online char ----
-// Usage: wire-client [account] [password] [char-name] who [want-name]
+// Usage: vanilla-wire scenario who [want-name]
 // Pass: SMSG_WHO.online_players >= 1 and `want-name` (default = char-name) appears in the list.
 fn who(
     c: &mut WireClient,
@@ -74,7 +74,7 @@ fn who(
 
 // ---- friend probe (work-item 130): CMSG_ADD_FRIEND by name -> SMSG_FRIEND_STATUS, then
 // CMSG_FRIEND_LIST -> SMSG_FRIEND_LIST + SMSG_IGNORE_LIST. ----
-// Usage: wire-client [account] [password] [char-name] friend <target-name>
+// Usage: vanilla-wire scenario friend <target-name>
 // Pass: SMSG_FRIEND_STATUS is Added(Online|Offline) carrying the target's guid, then a fresh
 // SMSG_FRIEND_LIST lists that guid as Online (this client and the target are both connected).
 fn friend(
@@ -82,7 +82,10 @@ fn friend(
     args: &mut dyn Iterator<Item = String>,
     _mcx: &ModeCtx<'_>,
 ) -> Result<()> {
-    let target_name = args.next().unwrap_or_else(|| "dfsdfsd".into());
+    // No fixture default (#244): a baked-in character name only ever works on one server.
+    let target_name = args
+        .next()
+        .ok_or_else(|| anyhow!("usage: scenario friend <target-character-name>"))?;
     eprintln!("[friend] sending CMSG_ADD_FRIEND({target_name:?})…");
     c.send(&CMSG_ADD_FRIEND {
         name: target_name.clone(),
@@ -138,7 +141,7 @@ fn friend(
 
 // ---- ignore-whisper probe (work-item 130): the IGNORER (this client) adds the SPEAKER to their
 // ignore list, then the speaker whispers a unique probe line — assert it NEVER arrives. ----
-// Usage: wire-client [account] [password] [char-name] ignore-whisper <speaker-account> <speaker-password> <speaker-char>
+// Usage: scenario ignore-whisper <speaker-account> <speaker-char>  (speaker password = stdin line 2)
 // Pass: SMSG_FRIEND_STATUS(IgnoreAdded) for the speaker's guid, then no SMSG_MESSAGECHAT Whisper
 // carrying the probe text reaches this (ignoring) client within the wait window.
 fn ignore_whisper(
@@ -147,9 +150,14 @@ fn ignore_whisper(
     mcx: &ModeCtx<'_>,
 ) -> Result<()> {
     let char_name = mcx.char_name;
-    let speaker_account = args.next().unwrap_or_else(|| "TEST2".into());
-    let speaker_password = args.next().unwrap_or_else(|| "test123".into());
-    let speaker_char = args.next().unwrap_or_else(|| "dfsdfsd".into());
+    let speaker_account = args.next().ok_or_else(|| {
+        anyhow!("usage: scenario ignore-whisper <speaker-account> <speaker-char>")
+    })?;
+    let speaker_char = args.next().ok_or_else(|| {
+        anyhow!("usage: scenario ignore-whisper <speaker-account> <speaker-char>")
+    })?;
+    // The second session's password comes off stdin line 2 — never argv (#244).
+    let speaker_password = mcx.inv.peer_password(0)?.to_string();
 
     eprintln!("[ignore-whisper] ignorer={char_name} sending CMSG_ADD_IGNORE({speaker_char:?})…");
     c.send(&CMSG_ADD_IGNORE {
@@ -231,7 +239,7 @@ fn ignore_whisper(
 }
 
 // ---- roll probe: send MSG_RANDOM_ROLL_Client(1, 100) and assert MSG_RANDOM_ROLL_Server ----
-// Usage: wire-client [account] [password] [char-name] roll [min] [max]
+// Usage: vanilla-wire scenario roll [min] [max]
 // Pass: MSG_RANDOM_ROLL_Server received with result in [min,max] and roller_guid == self_guid.
 fn roll(
     c: &mut WireClient,
@@ -285,7 +293,7 @@ fn roll(
 }
 
 // ---- text-emote probe: verify a TARGETED emote resolves the target's name in SMSG_TEXT_EMOTE ----
-// Usage: wire-client [account] [password] [char-name] text-emote
+// Usage: vanilla-wire scenario text-emote
 // Self-targets (target = own guid) so a single connection exercises the full pipeline: CMSG's
 // target guid -> send_emote reducer -> game_emote_event.target_guid -> gateway resolves via
 // game_character -> SMSG_TEXT_EMOTE.name. Pass: SMSG_TEXT_EMOTE.name == char_name (non-empty).
@@ -343,20 +351,25 @@ fn text_emote(
 }
 
 // ---- say-range probe: verify range-gated SAY relay ----
-// Usage: wire-client [account] [password] [char-name] say-range [listener-account] [listener-password] [listener-char]
+// Usage: scenario say-range <listener-account> <listener-char>  (listener password = stdin line 2)
 // Two connections: speaker (this client) + listener. Asserts:
 //   a) Speaker receives their OWN SAY (self-echo, always delivered).
 //   b) Listener at >25yd does NOT receive the SAY (range gate).
-// Chars must be pre-positioned; this test relies on the stored coordinates in game_character.
+// Chars must be pre-positioned; this test relies on the characters' stored coordinates.
 fn say_range(
     c: &mut WireClient,
     args: &mut dyn Iterator<Item = String>,
     mcx: &ModeCtx<'_>,
 ) -> Result<()> {
     let char_name = mcx.char_name;
-    let listener_account = args.next().unwrap_or_else(|| "TEST2".into());
-    let listener_password = args.next().unwrap_or_else(|| "test123".into());
-    let listener_char = args.next().unwrap_or_else(|| "dfsdfsd".into());
+    let listener_account = args
+        .next()
+        .ok_or_else(|| anyhow!("usage: scenario say-range <listener-account> <listener-char>"))?;
+    let listener_char = args
+        .next()
+        .ok_or_else(|| anyhow!("usage: scenario say-range <listener-account> <listener-char>"))?;
+    // The second session's password comes off stdin line 2 — never argv (#244).
+    let listener_password = mcx.inv.peer_password(0)?.to_string();
 
     eprintln!("[say-range] speaker={char_name} listener={listener_char}");
     eprintln!("[say-range] connecting listener as {listener_account}/{listener_char}…");
@@ -419,7 +432,7 @@ fn say_range(
 }
 
 // ---- inspect probe: CMSG_INSPECT -> SMSG_INSPECT(target guid) gated on range (work-item 137) ----
-// Usage: wire-client [account] [password] [char-name] inspect <near_guid> <far_guid>
+// Usage: vanilla-wire scenario inspect <near_guid> <far_guid>
 // `near_guid` must be an in-world player guid within 10yd of `char_name` (a real target replies
 // SMSG_INSPECT carrying that guid); `far_guid` must be an in-world player guid beyond 10yd (the
 // module's range gate rejects it, so the gateway sends nothing back). Guids come from

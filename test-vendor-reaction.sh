@@ -10,7 +10,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 DB=lyracore
-WC=./target/debug/wire-client
+# $WC comes from scenario-lib.sh (the adapters/lyracore/wire.sh seam) — do not re-point it at the binary.
 source tools/wire-client/scenario-lib.sh
 
 GINGER=$(char_guid Ginger)
@@ -56,7 +56,7 @@ if [ "$(sql1 "SELECT COUNT(*) AS n FROM game_faction_template WHERE id = 50901")
   sqlq "INSERT INTO game_faction_template (id, faction, faction_group, friend_group, enemy_group, enemy_0, enemy_1, enemy_2, enemy_3, friend_0, friend_1, friend_2, friend_3) VALUES (50901, 50900, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)" >/dev/null
 fi
 
-stay_start TEST test123 Ginger || exit 1
+stay_start TEST Ginger || exit 1
 scall debug_teleport "$GINGER" 0 $PAD_X $PAD_Y $PAD_Z 0
 VENDOR=$(spawn_at "$GINGER" $VENDOR_ENTRY 4)
 [ -z "$VENDOR" ] && { echo "[vendor-reaction] vendor spawn failed" >&2; stay_stop; exit 1; }
@@ -70,7 +70,7 @@ CUR=$(sql1 "SELECT standing FROM game_player_reputation WHERE character_guid = $
 scall debug_grant_reputation "$GINGER" 50900 "$(( -6000 - CUR ))"
 
 # STEP 1: HOSTILE standing -> the window is REFUSED (vendor-list must FAIL its assert).
-if timeout 30 "$WC" TEST test123 Ginger vendor-list "$VENDOR" $BLADE >/dev/null 2>&1; then
+if timeout 30 "$WC" TEST Ginger vendor-list "$VENDOR" $BLADE >/dev/null 2>&1; then
   echo "[vendor-reaction] STEP-ASSERT FAIL: hostile-standing vendor still opened the window" >&2
   FAILED=1
 else
@@ -79,7 +79,7 @@ fi
 
 # STEP 2: back to NEUTRAL (0) -> the window opens again (proves the gate keys on standing, not breakage).
 scall debug_grant_reputation "$GINGER" 50900 6000
-if timeout 60 "$WC" TEST test123 Ginger vendor-list "$VENDOR" $BLADE >/dev/null 2>&1; then
+if timeout 60 "$WC" TEST Ginger vendor-list "$VENDOR" $BLADE >/dev/null 2>&1; then
   echo "[vendor-reaction] STEP-ASSERT OK: neutral standing opens the window"
 else
   echo "[vendor-reaction] STEP-ASSERT FAIL: neutral standing did not open the window" >&2
@@ -88,15 +88,15 @@ fi
 
 # STEP 3 (195 slice B): AT-WAR forces hostile regardless of standing — still Neutral from step 2,
 # check the box and the window must refuse; uncheck and it opens again.
-timeout 60 "$WC" TEST test123 Ginger atwar 60 1 >/dev/null 2>&1
-if timeout 30 "$WC" TEST test123 Ginger vendor-list "$VENDOR" $BLADE >/dev/null 2>&1; then
+timeout 60 "$WC" TEST Ginger atwar 60 1 >/dev/null 2>&1
+if timeout 30 "$WC" TEST Ginger vendor-list "$VENDOR" $BLADE >/dev/null 2>&1; then
   echo "[vendor-reaction] STEP-ASSERT FAIL: at-war vendor still opened the window (standing Neutral)" >&2
   FAILED=1
 else
   echo "[vendor-reaction] STEP-ASSERT OK: at-war refuses the window even at Neutral standing"
 fi
-timeout 60 "$WC" TEST test123 Ginger atwar 60 0 >/dev/null 2>&1
-if timeout 60 "$WC" TEST test123 Ginger vendor-list "$VENDOR" $BLADE >/dev/null 2>&1; then
+timeout 60 "$WC" TEST Ginger atwar 60 0 >/dev/null 2>&1
+if timeout 60 "$WC" TEST Ginger vendor-list "$VENDOR" $BLADE >/dev/null 2>&1; then
   echo "[vendor-reaction] STEP-ASSERT OK: unchecking at-war re-opens the window"
 else
   echo "[vendor-reaction] STEP-ASSERT FAIL: window still refused after unchecking at-war" >&2

@@ -48,7 +48,7 @@ orchestrate() {
 rm -f "$DING_READY"
 orchestrate &
 ORCH=$!
-timeout 60 cargo run -q -p wire-client -- TEST test123 "$CHAR" ding "$DING_READY"
+timeout 60 "$WC" TEST "$CHAR" ding "$DING_READY"
 RC=$?
 wait "$ORCH" 2>/dev/null || true
 rm -f "$DING_READY"

@@ -52,20 +52,20 @@ FAR_X=-9440.0        # ~12yd from NEAR's post-walk anchor (~-9428) -> in SAY ran
 OUT_OF_SAY_X=-9490.0 # ~62yd from NEAR's post-walk anchor -> outside SAY range, still inside the view
 Y=300.0; Z=59.0
 
-seamtest_fresh_char() { # $1=account $2=password $3=char $4=class $5=level
-  timeout 60 "$WC" "$1" "$2" "$3" char-delete >/dev/null 2>&1 || true
-  timeout 60 "$WC" "$1" "$2" "$3" make-char "${4:-warrior}" >/dev/null 2>&1
-  local guid; guid=$(char_guid "$3")
-  [ -n "$guid" ] && scall debug_set_level "$guid" "${5:-5}"
+seamtest_fresh_char() { # $1=account $2=char $3=class $4=level  (password: adapters/lyracore/wire.sh)
+  timeout 60 "$WC" "$1" "$2" char-delete >/dev/null 2>&1 || true
+  timeout 60 "$WC" "$1" "$2" make-char "${3:-warrior}" >/dev/null 2>&1
+  local guid; guid=$(char_guid "$2")
+  [ -n "$guid" ] && scall debug_set_level "$guid" "${4:-5}"
   echo "$guid"
 }
 
 echo "== fresh chars (SEAMTEST / SEAMTEST2 — never TEST/TEST2, the shared-suite accounts)"
-NEAR=$(seamtest_fresh_char SEAMTEST seamtest123 SeamNear warrior 5)
+NEAR=$(seamtest_fresh_char SEAMTEST SeamNear warrior 5)
 echo "near guid=$NEAR"
 [ -n "$NEAR" ] || { echo "FAIL: no NEAR guid"; exit 1; }
 
-FAR=$(seamtest_fresh_char SEAMTEST2 seamtest123 SeamFar warrior 5)
+FAR=$(seamtest_fresh_char SEAMTEST2 SeamFar warrior 5)
 echo "far guid=$FAR"
 [ -n "$FAR" ] || { echo "FAIL: no FAR guid"; exit 1; }
 
@@ -84,7 +84,7 @@ CMD_MOV=/tmp/wc_sc_mov_cmd_$$; MOV_READY=/tmp/wc_sc_mov_ready_$$
 rm -f "$CMD_OBS" "$ACK_OBS" "$OBS_READY" "$CMD_MOV" "$MOV_READY"
 
 echo "== leg 1: FAR logs in first (world entry resolves it onto world-2 — the away side)"
-timeout 240 "$WC" SEAMTEST2 seamtest123 SeamFar aoi-mover "$CMD_MOV" "$MOV_READY" >/tmp/wc_sc_far.log 2>&1 &
+timeout 240 "$WC" SEAMTEST2 SeamFar aoi-mover "$CMD_MOV" "$MOV_READY" >/tmp/wc_sc_far.log 2>&1 &
 MOVER=$!
 wait_for_file 20 "$MOV_READY" || { echo "[orch] FAR never ready" >&2; cat /tmp/wc_sc_far.log; kill $MOVER 2>/dev/null; exit 1; }
 rm -f "$MOV_READY"
@@ -94,7 +94,7 @@ sqlq "SELECT guid, map_id, grid_x, grid_y FROM game_world_entity WHERE guid = $F
 sqlq "SELECT guid FROM game_world_entity WHERE guid = $FAR"
 
 echo "== leg 2: NEAR logs in on core, still outside the straddle (login precondition: FAR not visible)"
-timeout 240 "$WC" SEAMTEST seamtest123 SeamNear aoi-observer "$FAR" "$CMD_OBS" "$ACK_OBS" "$OBS_READY" >/tmp/wc_sc_near.log 2>&1 &
+timeout 240 "$WC" SEAMTEST SeamNear aoi-observer "$FAR" "$CMD_OBS" "$ACK_OBS" "$OBS_READY" >/tmp/wc_sc_near.log 2>&1 &
 OBS=$!
 wait_for_file 20 "$OBS_READY" || { echo "[orch] NEAR never ready (FAR visible at login?)" >&2; cat /tmp/wc_sc_near.log; kill $OBS $MOVER 2>/dev/null; exit 1; }
 rm -f "$OBS_READY"
@@ -143,8 +143,8 @@ echo "done" > "$CMD_OBS"
 wait "$OBS"; OBS_RC=$?
 [ $OBS_RC -ne 0 ] && { echo "[orch] NEAR observer exited rc=$OBS_RC"; tail -5 /tmp/wc_sc_near.log; FAILED=1; }
 
-timeout 60 "$WC" SEAMTEST seamtest123 SeamNear char-delete >/dev/null 2>&1 || true
-timeout 60 "$WC" SEAMTEST2 seamtest123 SeamFar char-delete >/dev/null 2>&1 || true
+timeout 60 "$WC" SEAMTEST SeamNear char-delete >/dev/null 2>&1 || true
+timeout 60 "$WC" SEAMTEST2 SeamFar char-delete >/dev/null 2>&1 || true
 rm -f "$CMD_OBS" "$ACK_OBS" "$OBS_READY" "$CMD_MOV" "$MOV_READY"
 
 if [ "$FAILED" -eq 0 ]; then echo "[seam-chat] PASS"; exit 0; else echo "[seam-chat] FAIL"; exit 1; fi

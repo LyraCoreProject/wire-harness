@@ -19,7 +19,7 @@ sqlq "DELETE FROM game_player_spell WHERE character_guid = $GINGER AND spell_id 
 settle_char_money "$GINGER" # the 265 trace caught this exact clobber (stale 800 over staged 1000)
 scall debug_set_money "$GINGER" 1000
 
-stay_start TEST test123 Ginger || exit 1
+stay_start TEST Ginger || exit 1
 scall debug_teleport "$GINGER" 0 $PAD_X $PAD_Y $PAD_Z 0
 TRAINER=$(spawn_at "$GINGER" $TRAINER_ENTRY 4)
 stay_stop
@@ -28,7 +28,7 @@ echo "[orch] staged: trainer=$TRAINER"
 
 # ---- run the wire scenario; stage the damaged caster at its ready-handshake ----
 rm -f "$TRAIN_READY"
-timeout 120 "$WC" TEST test123 Ginger scenario-train "$TRAINER" $SPELL $CAST_MS "$TRAIN_READY" &
+timeout 120 "$WC" TEST Ginger scenario-train "$TRAINER" $SPELL $CAST_MS "$TRAIN_READY" &
 WIRE=$!
 HEALTH0=""
 wait_for_file 30 "$TRAIN_READY"

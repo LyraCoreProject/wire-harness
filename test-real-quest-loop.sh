@@ -41,7 +41,7 @@ COUNT=${COUNT:-1}
 TITLE=$(sqlq "SELECT title FROM game_quest_template WHERE entry = $QUEST" | sed -n 3p)
 echo "[real-quest] picked q$QUEST '$TITLE' — kill ${COUNT}x creature $TGT (giver $START/$END)"
 
-stay_start TEST test123 "$QCHAR" 90 || exit 1
+stay_start TEST "$QCHAR" 90 || exit 1
 XP0=$(sql1 "SELECT xp FROM game_world_entity WHERE guid = $G")
 # The end giver must be an ENTITY for turn-in; spawn the giver + the objective mobs at the char.
 GIVER_GUID=$(spawn_at "$G" "$END" 3)

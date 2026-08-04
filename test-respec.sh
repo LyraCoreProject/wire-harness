@@ -58,7 +58,7 @@ sqlq "DELETE FROM game_character_talent WHERE character_guid = $GINGER" >/dev/nu
 sqlq "DELETE FROM game_aura WHERE target_guid = $GINGER AND spell_id = $CRUELTY_AURA" >/dev/null
 sqlq "DELETE FROM game_player_spell WHERE character_guid = $GINGER AND spell_id = $DEATHWISH_SPELL" >/dev/null
 
-stay_start TEST test123 Ginger || exit 1
+stay_start TEST Ginger || exit 1
 scall debug_teleport "$GINGER" 0 $PAD_X $PAD_Y $PAD_Z 0
 scall debug_set_level "$GINGER" 20 # >= 2 talent points free for Cruelty + Death Wish
 TRAINER=$(spawn_at "$GINGER" $TRAINER_ENTRY 4)

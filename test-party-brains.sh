@@ -56,7 +56,7 @@ assert_eq "personality: healer role default heal_at_pct=80" "${H_AT:-0}" "80"
 # Run-scoped hold path (work-item 161): defined ONCE here, passed as the party-bots hold arg.
 HOLD=/tmp/ws_party_bots_$$
 rm -f "$HOLD" "$HOLD.ingroup"
-timeout 400 "$WC" TEST test123 Ginger party-bots "$HOLD" Tankbot1 Healbot1 Dpsbot1 >/tmp/ws_party_bots.log 2>&1 &
+timeout 400 "$WC" TEST Ginger party-bots "$HOLD" Tankbot1 Healbot1 Dpsbot1 >/tmp/ws_party_bots.log 2>&1 &
 LEADER=$!
 wait_for_file 40 "$HOLD.ingroup"
 if [ -f "$HOLD.ingroup" ]; then

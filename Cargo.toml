@@ -8,18 +8,29 @@ homepage.workspace = true
 publish.workspace = true
 # NOT renamed to `lyracore-*` on purpose: #244–#246 extract this as a SERVER-AGNOSTIC standalone
 # 1.12.1 wire harness that can test any core, so a LyraCore-branded name would be wrong for it.
-# The capacity benchmark (issue #18) added a SECOND binary to this crate, which made the bare
-# `cargo run -p wire-client` that ~6 test scripts use ambiguous — every one of them failed with
-# "could not determine which binary to run". Name the default so those scripts keep working;
-# the benchmark is reached explicitly via `--bin bench`.
-default-run = "wire-client"
+# Two binaries: name the default so a bare `cargo run -p wire-client` is unambiguous.
+default-run = "vanilla-wire"
 
-# Headless 1.12.1 (build 5875) wire test-client: speaks the real WoW protocol to the
-# gateway so tests can drive CMSG and assert on decoded SMSG (no wine client in the loop).
-# Reuses the SAME protocol crates the gateway depends on (gateway/Cargo.toml).
+# Headless 1.12.1 (build 5875) wire client: speaks the real WoW protocol so tests can drive CMSG
+# and assert on decoded SMSG (no wine client in the loop).
+#
+# STANDALONE BOUNDARY (#244): every dependency below is an EXTERNAL protocol crate. There is no
+# path dependency on any server crate in this workspace, and adding one is the thing that makes
+# this tool un-extractable (#245) and un-usable against any other build-5875 server. If the client
+# needs something a server crate has (an update-mask decoder, grid math), it gets its own
+# independent implementation — see src/values_mask.rs and src/spatial.rs for why that is a feature.
+
+# `vanilla-wire`: the scenario driver. Path stays src/main.rs so the module tree is unchanged.
+[[bin]]
+name = "vanilla-wire"
+path = "src/main.rs"
+
+# `vanilla-wire-bench`: the synthetic-player capacity benchmark.
+[[bin]]
+name = "vanilla-wire-bench"
+path = "src/bin/bench/main.rs"
 
 [dependencies]
-lyracore-shared.workspace = true
 wow_srp = "0.7"
 wow_login_messages = { version = "0.5", features = ["sync"] }
 wow_world_messages = { version = "0.3", features = ["vanilla", "sync"] }

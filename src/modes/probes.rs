@@ -107,7 +107,7 @@ pub(crate) fn try_dispatch_charselect(
 }
 
 // ---- char-enum-gear probe: verify SMSG_CHAR_ENUM equipment slots carry real display_ids ----
-// Usage: wire-client TEST test123 <char-name> char-enum-gear [slot] [want_display_id]
+// Usage: vanilla-wire scenario char-enum-gear [slot] [want_display_id]
 // slot defaults to 15 (main-hand weapon). want_display_id defaults to 0 (asserts nonzero).
 // Pass: the named character's equipment slot has a non-zero display_id (or == want if given).
 fn char_enum_gear(
@@ -157,7 +157,7 @@ fn char_enum_gear(
 }
 
 // ---- char-create-gear probe: a FRESH, never-logged-in character must already show gear ----
-// Usage: wire-client TEST test123 <throwaway-name> char-create-gear [slot]
+// Usage: vanilla-wire scenario char-create-gear [slot]
 // Work-item 180: the loadout is granted at CREATION, so SMSG_CHAR_ENUM renders the model armed
 // on the very first char-select — before any world entry. The existing char-enum-gear probe
 // can't catch a regression here (its subject has logged in, and the first-login safety-net
@@ -198,7 +198,7 @@ fn char_create_gear(
 }
 
 // ---- char-delete probe: CMSG_CHAR_DELETE -> SMSG_CHAR_DELETE(success), row gone (081) ----
-// Usage: wire-client <account> <password> <char-name-to-create-then-delete> char-delete
+// Usage: vanilla-wire scenario char-delete
 // Char-select tier only (no player_login/world-entry). Creates (or finds) a throwaway
 // character named `char_name`, deletes it, and asserts SMSG_CHAR_DELETE(CharDeleteSuccess)
 // AND that a follow-up CMSG_CHAR_ENUM no longer lists that guid. The gateway's own DB-row
@@ -234,7 +234,7 @@ fn char_delete(
 // and assert the FIFO AUTH_WAIT_QUEUE shape. WRITTEN, not run as part of any suite — a login
 // storm is an operator-approved live-stack action (CLAUDE.md "Live wire tests are operator-gated").
 //
-// Usage: wire-client <ACCOUNT_PREFIX> <password> _ login-queue <N>
+// Usage: vanilla-wire scenario login-queue <N>
 //
 // Spins up N accounts named "<ACCOUNT_PREFIX>0" .. "<ACCOUNT_PREFIX><N-1>" CONCURRENTLY (one
 // thread each) and takes each one only as far as the world handshake (`WireClient::connect_world`
@@ -314,7 +314,7 @@ fn login_queue_probe(
 }
 
 // ---- initial-spells probe: assert SMSG_INITIAL_SPELLS carries the given spell ids ----
-// Usage: wire-client TEST test123 <Human char> initial-spells [id1 id2 ...]
+// Usage: vanilla-wire scenario initial-spells [id1 id2 ...]   (--character must be a Human)
 // Prints the captured spellbook; with ids, exits 1 unless every id is present.
 fn initial_spells(
     c: &mut WireClient,
@@ -341,7 +341,7 @@ fn initial_spells(
 }
 
 // ---- init-factions probe: assert SMSG_INITIALIZE_FACTIONS carries a persisted standing on RELOG (076) ----
-// Usage: wire-client TEST test123 <char-name> init-factions <reputation_index> <want_standing>
+// Usage: vanilla-wire scenario init-factions <reputation_index> <want_standing>
 // The client is already logged in once; this probe reconnects fresh (a real relog) and re-runs
 // player_login, so the SMSG_INITIALIZE_FACTIONS captured is the one built by the *second* login
 // burst — exactly what a relogging client sees. Asserts slot[index] == want_standing.
@@ -354,6 +354,7 @@ fn init_factions(
         account,
         password,
         char_name,
+        ..
     } = *mcx;
     let index: usize = args
         .next()
@@ -668,8 +669,8 @@ fn seamwalk(
     args: &mut dyn Iterator<Item = String>,
     _mcx: &ModeCtx<'_>,
 ) -> Result<()> {
-    use lyracore_shared::spatial::grid_cell;
     use std::time::Duration;
+    use wire_client::spatial::{distance_2d, grid_cell};
     let mut f = || -> f32 {
         args.next()
             .and_then(|s| s.parse().ok())
@@ -683,7 +684,7 @@ fn seamwalk(
     let oneway = expect_handoff || flag.as_deref() == Some("oneway");
     let (a, b) = ((x0, y0, z0), (x1, y1, z1));
     let (ca, cb) = (grid_cell(x0, y0), grid_cell(x1, y1));
-    let dist = ((x1 - x0).powi(2) + (y1 - y0).powi(2)).sqrt();
+    let dist = distance_2d((x0, y0), (x1, y1));
     println!("[wire] seamwalk: cell {ca:?} -> {cb:?} ({dist:.0} yd each way)");
     if ca == cb {
         bail!("seamwalk FAIL: both endpoints are in cell {ca:?} — this walk crosses no cell boundary, so it cannot cross a seam either");
@@ -705,7 +706,7 @@ fn seamwalk(
     // destroys, which is exactly the case this must not flag).
     let mut destroyed_own_items = Vec::new();
     let mut walk = |c: &mut WireClient, from: (f32, f32, f32), to: (f32, f32, f32)| -> Result<()> {
-        let leg_dist = ((to.0 - from.0).powi(2) + (to.1 - from.1).powi(2)).sqrt();
+        let leg_dist = distance_2d((from.0, from.1), (to.0, to.1));
         let legs = ((leg_dist / LEG_YD).ceil() as u32).max(1);
         let mut prev = from;
         for i in 1..=legs {
@@ -846,7 +847,7 @@ fn atwar(
 }
 
 // ---- item-query probe: assert SMSG_ITEM_QUERY_SINGLE_RESPONSE carries armor + stats ----
-// Usage: wire-client TEST test123 Ginger query-item <entry> [want_armor] [want_spell] [want_bonding]
+// Usage: vanilla-wire scenario query-item <entry> [want_armor] [want_spell] [want_bonding]
 // Exits 0 if armor == want_armor (default 105 for Blackrock Gauntlets entry 1448).
 // want_bonding: 4th optional arg, -1 (default) = don't check (0=NoBind,1=BoP,2=BoE,3=BoU work-item 127).
 fn query_item(
@@ -885,7 +886,7 @@ fn query_item(
 }
 
 // ---- played-time probe: work-item 029 — CMSG_PLAYED_TIME -> SMSG_PLAYED_TIME (/played) ----
-// Usage: wire-client TEST test123 <char-name> played-time
+// Usage: vanilla-wire scenario played-time
 fn played_time(
     c: &mut WireClient,
     _args: &mut dyn Iterator<Item = String>,
@@ -901,7 +902,7 @@ fn played_time(
 // ---- played-time-live probe: two CMSG_PLAYED_TIME queries with a sleep between, asserting the
 // second total is strictly greater — proves the live session's elapsed span is folded into the
 // reply in real time (not just accrued at logout). ----
-// Usage: wire-client TEST test123 <char-name> played-time-live [sleep_secs]
+// Usage: vanilla-wire scenario played-time-live [sleep_secs]
 fn played_time_live(
     c: &mut WireClient,
     args: &mut dyn Iterator<Item = String>,
@@ -929,7 +930,7 @@ fn played_time_live(
 // grant_xp, e.g. debug_kill_nearest) until the character dings; we decode the resulting
 // SMSG_LEVELUP_INFO and print every field. For a mana class the mana delta must be non-zero and at
 // least one stat delta non-zero (the pre-033 gateway hardcoded all of them 0). ----
-// Usage: wire-client TEST test123 <char-name> levelup-info <ready_file> [expect_mana: 0|1 (default 1)]
+// Usage: vanilla-wire scenario levelup-info <ready_file> [expect_mana: 0|1 (default 1)]
 fn levelup_info(
     c: &mut WireClient,
     args: &mut dyn Iterator<Item = String>,
@@ -1204,7 +1205,7 @@ fn ghost(
 }
 
 // ---- stay probe: login + stay connected until a sentinel file appears, then exit Ok.
-// Usage: wire-client [account] [password] [char-name] stay <sentinel_file> [deadline_secs]
+// Usage: vanilla-wire scenario stay <sentinel_file> [deadline_secs]
 // The external orchestrator writes anything to sentinel_file to signal done; we exit 0.
 // Useful when the test only needs the character to be live in game_world_entity while an
 // external script calls spacetime reducers (e.g. work-item #092 combat-regen probe).
@@ -1248,7 +1249,7 @@ fn stay(
 }
 
 // ---- logout probe: assert out-of-combat logout replies Success + LOGOUT_COMPLETE ----
-// Usage: wire-client [account] [password] [char-name] logout
+// Usage: vanilla-wire scenario logout
 // Pass: SMSG_LOGOUT_RESPONSE(Success, Instant) → SMSG_LOGOUT_COMPLETE
 // Fail: FailureInCombat or timeout.
 fn logout_probe(
@@ -1268,7 +1269,7 @@ fn logout_probe(
 }
 
 // ---- ding probe: verify mid-session L10 ding pushes PLAYER_CHARACTER_POINTS1=1 ----
-// Usage: wire-client [account] [password] [char-name] ding <ready_file>
+// Usage: vanilla-wire scenario ding <ready_file>
 // The orchestrator (test-ding.sh) must first set the char to L9, wait for its ready file,
 // then call `spacetime call lyracore debug_set_level <guid> 10`.
 // Pass: an SMSG_UPDATE_OBJECT arrives that contains BOTH a level=10 word [0x0a 00 00 00]
@@ -1329,7 +1330,7 @@ fn ding(
 }
 
 // ---- repop-delay probe: CMSG_REPOP_REQUEST → assert SMSG_CORPSE_RECLAIM_DELAY(30s) ----
-// Usage: wire-client [account] [password] [char-name] repop <char-small-guid> <ready_file>
+// Usage: vanilla-wire scenario repop <char-small-guid> <ready_file>
 // The orchestrator must kill the character (debug_set_health 0) then consume the ready file;
 // then we send CMSG_REPOP_REQUEST and assert the gateway emits the 30s delay packet.
 // Pass: SMSG_CORPSE_RECLAIM_DELAY with delay == Duration::from_secs(30).
@@ -1976,7 +1977,7 @@ fn name_query(
 }
 
 // ---- bindpoint probe: assert SMSG_BINDPOINTUPDATE carries home_x/y/z (not login position) ----
-// Usage: wire-client [account] [password] [char-name] bindpoint <home_x> <home_y> <home_z>
+// Usage: vanilla-wire scenario bindpoint <home_x> <home_y> <home_z>
 // The char must have home_* != login position (e.g. "Tester": login=(-8935, -188) home=(-8873, -134)).
 // Pass: SMSG_BINDPOINTUPDATE.position.x == home_x (within 0.1 tolerance).
 fn bindpoint(
@@ -1988,6 +1989,7 @@ fn bindpoint(
         account,
         password,
         char_name,
+        ..
     } = *mcx;
     let want_x: f32 = args
         .next()

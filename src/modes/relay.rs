@@ -33,7 +33,7 @@ pub(crate) fn try_dispatch(
 }
 
 // ---- relay-observer: log in, signal ready, then listen for a relayed MSG_MOVE_JUMP_Server ----
-// Usage: wire-client TEST2 test123 dfsdfsd relay-observer <ready_file>
+// Usage: vanilla-wire scenario relay-observer <ready_file>
 // We write the script-owned ready file (the relay-sender side polls the same path), then listen
 // for opcode 0xBB (MSG_MOVE_JUMP / MSG_MOVE_JUMP_Server — same opcode value 0x00BB = 187).
 // Pass: opcode 0xBB received from a *different* guid (the sender's guid) within 5s.
@@ -69,7 +69,7 @@ fn relay_observer(
 }
 
 // ---- relay-sender: wait for observer ready, then send MSG_MOVE_JUMP ----
-// Usage: wire-client TEST test123 Ginger relay-sender <ready_file>
+// Usage: vanilla-wire scenario relay-sender <ready_file>
 // Waits for the script-owned ready file (written by relay-observer), then sends MSG_MOVE_JUMP.
 fn relay_sender(
     c: &mut WireClient,

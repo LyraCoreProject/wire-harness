@@ -34,7 +34,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$SCRIPT_DIR/../.."
-WC="$REPO_ROOT/target/debug/wire-client"
+WC="$REPO_ROOT/target/debug/vanilla-wire"
 GW="$REPO_ROOT/target/debug/lyracore-gateway"
 PREFIX="LQ"
 
@@ -58,7 +58,11 @@ for i in $(seq 0 $((N - 1))); do
 done
 
 echo "[test-login-queue] driving ${N} concurrent world logins…"
-if "$WC" "$PREFIX" "$PASSWORD" _ login-queue "$N"; then
+# The password goes in on STDIN, never argv (#244) — see adapters/lyracore/wire.sh for the
+# adapter seam the rest of the suite uses; this script drives the client directly because it
+# provisions its own throwaway LQ* accounts with a password of its own choosing.
+if printf '%s\n' "$PASSWORD" | "$WC" scenario login-queue "$N" \
+     --account "$PREFIX" --character _ --password-stdin; then
   echo "[test-login-queue] PASS: all ${N} connections reached AuthOk (FIFO shape held for any that queued)"
   exit 0
 else

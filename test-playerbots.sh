@@ -48,7 +48,7 @@ sqlq "UPDATE game_character SET x = $PAD_X, y = $PAD_Y, z = $PAD_Z WHERE guid = 
 # Run-scoped handshake paths (work-item 161): defined ONCE here, passed as wire-client args.
 CMD=/tmp/ws_bots_cmd_$$; ACK=/tmp/ws_bots_ack_$$; OBS_READY=/tmp/ws_bots_obs_ready_$$
 rm -f "$CMD" "$ACK" "$OBS_READY"
-timeout 180 "$WC" TEST test123 Ginger aoi-observer 999999999 "$CMD" "$ACK" "$OBS_READY" >/tmp/ws_bots_observer.log 2>&1 &
+timeout 180 "$WC" TEST Ginger aoi-observer 999999999 "$CMD" "$ACK" "$OBS_READY" >/tmp/ws_bots_observer.log 2>&1 &
 OBS=$!
 wait_for_file 20 "$OBS_READY"
 rm -f "$OBS_READY"
@@ -64,7 +64,7 @@ wait "$OBS" 2>/dev/null
 
 # name resolution over the wire (fresh session — also proves re-login sees the durable bot)
 sleep 2
-if timeout 60 "$WC" TEST test123 Ginger name-query "$BOT" "$BOTNAME" >/tmp/ws_bots_name.log 2>&1; then
+if timeout 60 "$WC" TEST Ginger name-query "$BOT" "$BOTNAME" >/tmp/ws_bots_name.log 2>&1; then
   step_ok "wire: CMSG_NAME_QUERY resolves the bot to $BOTNAME"
 else
   step_fail "wire: bot name query failed ($(tail -1 /tmp/ws_bots_name.log))"
@@ -112,7 +112,7 @@ assert_ge "restart: gateway back up (world listening)" "$(grep -c 'world listeni
 assert_eq "restart: bot registry rows survived" "$(sql1 "SELECT COUNT(*) AS n FROM pkg_playerbots_bot")" "4"
 assert_eq "restart: bot entity survived" "$(sql1 "SELECT COUNT(*) AS n FROM game_world_entity WHERE guid = $BOT")" "1"
 sleep 2
-if timeout 60 "$WC" TEST test123 Ginger name-query "$BOT" "$BOTNAME" >/tmp/ws_bots_name2.log 2>&1; then
+if timeout 60 "$WC" TEST Ginger name-query "$BOT" "$BOTNAME" >/tmp/ws_bots_name2.log 2>&1; then
   step_ok "restart: a fresh wire session still resolves + sees the bot"
 else
   step_fail "restart: bot not reachable over the wire after gateway restart"

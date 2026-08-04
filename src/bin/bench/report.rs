@@ -373,7 +373,7 @@ impl fmt::Display for Report {
                     "walk           {span}yd back-and-forth LINE at {speed} yd/s with \
                      MOVEMENT_FLAG_FORWARD, leashed inside the spread — #184 WALK_SPAN/WALK_SPEED, \
                      crosses AOI cells at ~speed/{}yd",
-                    lyracore_shared::spatial::GRID_CELL_SIZE
+                    wire_client::spatial::DEFAULT_GRID_CELL_SIZE
                 )?
             }
             None => writeln!(

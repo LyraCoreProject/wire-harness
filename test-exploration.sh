@@ -21,7 +21,7 @@ chk_gt(){ # chk_gt label value floor
 
 sqlq "DELETE FROM game_character_explored WHERE character_guid = $GINGER" >/dev/null # fresh slate
 scall debug_set_level "$GINGER" 5
-stay_start TEST test123 Ginger || exit 1
+stay_start TEST Ginger || exit 1
 
 XP0=$(sql1 "SELECT xp FROM game_world_entity WHERE guid = $GINGER")
 scall debug_explore_at "$GINGER" 0 "$GOLDSHIRE_X" "$GOLDSHIRE_Y"
@@ -46,7 +46,7 @@ stay_stop
 # WIRE (fog restore): a fresh login relays the PLAYER_EXPLORED_ZONES word for the explored area, so the
 # client's map fog is correct on login. Goldshire area_bit 548 → word 17 → field 1111+17=1128, and
 # bit 548%32=4 → value 16. (This is also the live fog-clear path — the same on_insert relay.)
-FOGOUT=$(timeout 35 "$WC" TEST test123 Ginger values-watch "$GINGER" 1128 20 2>&1)
+FOGOUT=$(timeout 35 "$WC" TEST Ginger values-watch "$GINGER" 1128 20 2>&1)
 if grep -q 'VALUES-WATCH PASS' <<<"$FOGOUT" && grep -q 'field 1128 = 16' <<<"$FOGOUT"; then
   echo "  OK   fog restore: PLAYER_EXPLORED_ZONES field 1128 = 16 (Goldshire bit relayed on login)"
 else
@@ -58,7 +58,7 @@ fi
 # every already-explored area re-pops) — the gateway's initial-skip set (on_explored_insert). Body =
 # area_id u32 LE + experience u32 LE, so Goldshire = (87, 70) at L5.
 # NEGATIVE (row still present from the fog check): a fresh login must NOT replay the popup.
-if timeout 20 "$WC" TEST test123 Ginger opcode-watch 504 8 2>&1 | grep -q 'OPCODE-WATCH PASS'; then
+if timeout 20 "$WC" TEST Ginger opcode-watch 504 8 2>&1 | grep -q 'OPCODE-WATCH PASS'; then
   echo "  FAIL Discovered popup replayed on login (initial-skip broken)"; FAILED=1
 else
   echo "  OK   Discovered popup skipped on login (initial-skip holds)"
@@ -66,7 +66,7 @@ fi
 # POSITIVE: clear the row, connect+watch, then fire a fresh discovery from outside → popup must arrive.
 sqlq "DELETE FROM game_character_explored WHERE character_guid = $GINGER" >/dev/null
 POPOUT=$(mktemp)
-timeout 30 "$WC" TEST test123 Ginger opcode-watch 504 20 >"$POPOUT" 2>&1 &
+timeout 30 "$WC" TEST Ginger opcode-watch 504 20 >"$POPOUT" 2>&1 &
 POPID=$!
 sleep 5
 scall debug_explore_at "$GINGER" 0 "$GOLDSHIRE_X" "$GOLDSHIRE_Y"

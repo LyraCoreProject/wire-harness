@@ -23,7 +23,7 @@ sqlq "DELETE FROM game_aura WHERE target_guid = $GINGER AND spell_id = $SICKNESS
 # Reset the corpse-reclaim ESCALATION ladder (226): other suite tests kill Ginger too, and a repeat
 # death inside the escalation window waits 60s where this test asserts the first-death 30s.
 sqlq "UPDATE game_character SET death_expire_micros = 0 WHERE guid = $GINGER" >/dev/null
-stay_start TEST test123 Ginger || exit 1
+stay_start TEST Ginger || exit 1
 scall debug_teleport "$GINGER" 0 $PAD_X $PAD_Y $PAD_Z 0
 scall debug_set_health "$GINGER" 100000
 WOLF=$(spawn_at "$GINGER" $WOLF_ENTRY 5)
@@ -38,7 +38,7 @@ fi
 stay_stop
 if [ -n "$NEED_EQUIP" ]; then
   SWORD_SLOT=$(sqlq "SELECT slot FROM game_item_instance WHERE owner_guid = $GINGER AND entry = 25" | grep -oE '[0-9]+' | tail -1)
-  [ -n "$SWORD_SLOT" ] && timeout 60 "$WC" TEST test123 Ginger equip-from "$SWORD_SLOT" >/dev/null 2>&1
+  [ -n "$SWORD_SLOT" ] && timeout 60 "$WC" TEST Ginger equip-from "$SWORD_SLOT" >/dev/null 2>&1
 fi
 if [ -z "$WOLF" ]; then echo "[orch] wolf spawn failed" >&2; exit 1; fi
 # repeatability: every suite death costs 10% max durability and nothing ever repaired the starter
@@ -51,7 +51,7 @@ echo "[orch] staged: wolf=$WOLF corpse_guid=$CORPSE mainhand_dur0=${DUR0:-none}"
 
 # ---- run the wire scenario; arrange the real death at its ready-handshake ----
 rm -f "$DEATH_READY" "$DEATH_RECLAIMED"
-timeout 180 "$WC" TEST test123 Ginger scenario-death "$CORPSE" "$DEATH_READY" "$DEATH_RECLAIMED" &
+timeout 180 "$WC" TEST Ginger scenario-death "$CORPSE" "$DEATH_READY" "$DEATH_RECLAIMED" &
 WIRE=$!
 wait_for_file 30 "$DEATH_READY"
 if [ -f "$DEATH_READY" ]; then
@@ -126,7 +126,7 @@ wait "$WIRE"; RC=$?
 
 # ---- rez-sickness LEVEL GATE via the spirit-healer path (shared do_spirit_healer_res core) ----
 # The debug res/kill reducers need a LIVE entity — hold a stay session for the two cycles.
-stay_start TEST test123 Ginger || FAILED=1
+stay_start TEST Ginger || FAILED=1
 # below the gate: level 10 -> no sickness
 scall debug_set_level "$GINGER" 10
 scall debug_set_health "$GINGER" 0

@@ -34,10 +34,10 @@ ginger_home() {
     [ "$holder" = "$DB" ] && continue
     [ "$(sql1 "SELECT COUNT(*) AS n FROM game_character WHERE guid = $GINGER" "$holder")" = "1" ] || continue
     echo "[orch] Ginger is on '$holder' — bringing her home to '$DB'"
-    if stay_start TEST test123 Ginger 60 "$holder"; then
+    if stay_start TEST Ginger 60 "$holder"; then
       spacetime call "$holder" -- debug_teleport "$GINGER" 0 $PAD_X $PAD_Y $PAD_Z 0 >/dev/null 2>&1
       stay_stop
-      timeout 90 "$WC" TEST test123 Ginger logout >/dev/null 2>&1
+      timeout 90 "$WC" TEST Ginger logout >/dev/null 2>&1
     fi
   done
 }
@@ -61,7 +61,7 @@ echo "[orch] bot-deadmines: tank=$TANK heal=$HEAL dps=$DPS ginger=$GINGER"
 
 HOLD=/tmp/ws_bot_dm_$$
 rm -f "$HOLD" "$HOLD.ingroup"
-timeout 400 "$WC" TEST test123 Ginger party-bots "$HOLD" Tankbot1 Healbot1 Dpsbot1 >/tmp/ws_bot_dm.log 2>&1 &
+timeout 400 "$WC" TEST Ginger party-bots "$HOLD" Tankbot1 Healbot1 Dpsbot1 >/tmp/ws_bot_dm.log 2>&1 &
 LEADER=$!
 wait_for_file 40 "$HOLD.ingroup"
 [ -f "$HOLD.ingroup" ] && step_ok "wire: 4-member party formed" || { step_fail "wire: party never formed"; tail -3 /tmp/ws_bot_dm.log; }

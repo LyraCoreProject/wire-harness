@@ -15,7 +15,7 @@ PAD_X=-8930.0; PAD_Y=-250.0; PAD_Z=80.0
 
 stress_watch() { # $1=opcode-decimal  $2=label
   local OUT; OUT=$(mktemp)
-  timeout 45 "$WC" TEST test123 Ginger opcode-watch "$1" 25 >"$OUT" 2>&1 &
+  timeout 45 "$WC" TEST Ginger opcode-watch "$1" 25 >"$OUT" 2>&1 &
   local WPID=$!
   sleep 6   # login + watch armed
   # (Re)stage inside the session: giver near Ginger, quest in the log (idempotent re-accept of a

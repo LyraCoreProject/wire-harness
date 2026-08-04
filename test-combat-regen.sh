@@ -126,7 +126,7 @@ orchestrate &
 ORCH=$!
 
 # Wire client "stay" mode: drains the socket until we touch the sentinel.
-timeout 90 cargo run -q -p wire-client -- TEST test123 "$CHAR" stay "$SENTINEL"
+timeout 90 "$WC" TEST "$CHAR" stay "$SENTINEL"
 WC_RC=$?
 
 wait "$ORCH" 2>/dev/null || true

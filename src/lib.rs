@@ -1,12 +1,28 @@
-//! Headless 1.12.1 (build 5875) wire test-client for the lyracore gateway.
+//! Headless 1.12.1 (build 5875) wire client — a STANDALONE test client for any server that
+//! implements the vanilla protocol.
 //!
-//! Speaks the real WoW protocol — SRP6 logon (port 3724) then the encrypted world session
-//! (port 8085) — so tests can drive CMSG and ASSERT on decoded SMSG, instead of QAing
-//! through the wine client. It is the client-side routines already proven in
-//! `gateway/src/logon/mod.rs` tests + `gateway/src/world/tests.rs::client_handshake`,
-//! lifted onto real `TcpStream`s. All blocking std I/O — no async.
+//! Speaks the real WoW protocol — SRP6 logon (default port 3724) then the encrypted world session
+//! — so tests can drive CMSG and ASSERT on decoded SMSG, instead of QAing through the wine client.
+//! All blocking std I/O — no async.
+//!
+//! # The standalone boundary (#244)
+//!
+//! Everything in this crate is build-5875 protocol and nothing else: it must compile, run and be
+//! useful with no server-side code in the workspace at all. Concretely, it does not depend on any
+//! server crate, does not name a server's databases/reducers/constants, and takes every server
+//! fact — host, ports, account, character — from [`cli`]. Its own [`values_mask`] decoder and
+//! [`spatial`] helpers are deliberate independent implementations, not shared server code: a test
+//! tool that decodes with the encoder's own logic cannot catch an encoder bug.
+//!
+//! The project-specific half — fixtures, database orchestration, debug reducers — lives OUTSIDE
+//! the crate, in the shell adapters under `adapters/`, and reaches this client only through the
+//! documented CLI. See `README.md`.
 
-pub use lyracore_shared::values_mask;
+pub mod cli;
+pub mod spatial;
+pub mod values_mask;
+
+pub use cli::{endpoints, set_endpoints, Endpoints};
 
 use std::io::{Cursor, Read};
 use std::net::{Shutdown, TcpStream};
@@ -45,10 +61,8 @@ use wow_world_messages::vanilla::{
 };
 use wow_world_messages::Guid;
 
-const LOGON_PORT: u16 = 3724;
-pub const DEFAULT_WORLD_ADDR: &str = "127.0.0.1:8085";
-/// Default logon-tier address — the same `127.0.0.1:3724` every existing caller assumed.
-pub const DEFAULT_LOGON_ADDR: &str = "127.0.0.1:3724";
+/// Port assumed when a `--logon`/`logon_at` address names a bare host.
+const LOGON_PORT: u16 = cli::DEFAULT_LOGON_PORT;
 
 /// `SMSG_COMPRESSED_MOVES` carries a u32 decompressed-size prefix inside the protocol's already
 /// bounded u16 frame. The generated wow_messages 0.3 decoder trusts that prefix for two allocations
@@ -467,10 +481,10 @@ fn ns(s: &str) -> Result<NormalizedString> {
     NormalizedString::new(s).map_err(|e| anyhow!("normalized string {s:?}: {e:?}"))
 }
 
-/// Complete SRP6 logon and return `(session key K, world server address)`.
-/// Mirrors `gateway/src/logon/mod.rs` `full_srp6_handshake_and_realm_list`.
+/// Complete SRP6 logon against THIS RUN'S configured logon tier ([`cli::set_endpoints`], i.e.
+/// `--host`/`--logon-port`), and return `(session key K, world server address)`.
 pub fn logon(account: &str, password: &str) -> Result<([u8; 40], String)> {
-    logon_at(DEFAULT_LOGON_ADDR, account, password)
+    logon_at(&endpoints().logon_addr, account, password)
 }
 
 /// [`logon`] against an explicit `host:port` (a bare host defaults to the standard logon port).
@@ -545,15 +559,17 @@ pub fn logon_at(logon_addr: &str, account: &str, password: &str) -> Result<([u8;
     let k: [u8; 40] = *srp.session_key();
 
     wow_login_messages::version_8::CMD_REALM_LIST_Client {}.write(&mut s)?;
-    let world_addr = match LogonSmsg::read(&mut s)? {
+    let realm_answer = match LogonSmsg::read(&mut s)? {
         LogonSmsg::CMD_REALM_LIST(reply) => reply
             .realms
             .first()
             .map(|r| r.address.clone())
-            .unwrap_or_else(|| DEFAULT_WORLD_ADDR.to_string()),
+            .unwrap_or_default(),
         other => bail!("realm list failed: {other:?}"),
     };
-    Ok((k, world_addr))
+    // `--world-port` (if given) overrides the realm-list answer: a server may advertise an address
+    // that is not routable from where the harness runs (container, port-forward, tunnel).
+    Ok((k, endpoints().world_addr(&realm_answer)))
 }
 
 /// A live, authenticated world connection. Send CMSG via [`WireClient::send`], read SMSG
@@ -596,9 +612,21 @@ impl WireClient {
     /// One-shot bring-up: logon -> world handshake -> create-or-find `char_name` of
     /// `class` -> player login. Leaves the client in-world.
     pub fn login_as(account: &str, password: &str, char_name: &str, class: Class) -> Result<Self> {
+        Self::login_as_race(account, password, char_name, class, Race::Human)
+    }
+
+    /// [`login_as`] with the race used when the character has to be CREATED spelled out — the
+    /// `--class`/`--race` path. The pair must be legal on build 5875 (no Human shaman).
+    pub fn login_as_race(
+        account: &str,
+        password: &str,
+        char_name: &str,
+        class: Class,
+        race: Race,
+    ) -> Result<Self> {
         let (k, world_addr) = logon(account, password)?;
         let mut c = Self::connect_world(&world_addr, account, k)?;
-        let guid = c.create_or_find_char(char_name, class)?;
+        let guid = c.create_or_find_char_as(char_name, class, race)?;
         c.player_login(guid)?;
         Ok(c)
     }
@@ -987,12 +1015,12 @@ impl WireClient {
 
     /// [`create_or_find_char`](Self::create_or_find_char) with the race chosen by the caller.
     ///
-    /// The race decides which DATABASE the character is born on, which is why this exists. A new
-    /// character is placed at its race's `game_start_position`, and those straddle the continent
-    /// split: Human is Elwynn on map 0 (`lyracore`), Orc and Troll are the Valley of Trials on
-    /// map 1 (`lyracore-world-1`). So a benchmark that wants to load the KALIMDOR writer cannot use
-    /// the default — 200 Humans created against a world-1 gateway are all born on map 0 and every
-    /// one of them immediately transfers to core, measuring the shard it was trying to leave alone
+    /// The race decides which CONTINENT the character is born on, which is why this exists. A new
+    /// character is placed at its race's start position, and those straddle the continent split:
+    /// Human starts in Elwynn on map 0, Orc and Troll in the Valley of Trials on map 1. On a
+    /// server that shards by continent that is also a choice of shard, so a benchmark aiming load
+    /// at the Kalimdor writer cannot use the default — 200 Humans are all born on map 0 and every
+    /// one of them immediately transfers away, measuring the shard it was trying to leave alone
     /// (work-item #71).
     pub fn create_or_find_char_as(&mut self, name: &str, class: Class, race: Race) -> Result<u64> {
         if let Some((g, _, _)) = self

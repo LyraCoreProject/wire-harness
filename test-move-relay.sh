@@ -16,10 +16,9 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 source tools/wire-client/scenario-lib.sh
 
-if [[ ! -x "$WC" ]]; then
-  echo "[test-move-relay] building wire-client…"
-  cargo build -p wire-client 2>&1
-fi
+# $WC is the adapter wrapper (always present), so the old `[ -x "$WC" ]` guard could no longer
+# tell whether the CLIENT had been built — build it the way every other orchestrator does.
+cargo build -q -p wire-client || exit 1
 
 # Staging (moved from wire-suite.sh, work-item 162): park the two characters ~32yd apart so
 # standalone runs get the same geometry the suite used to set up in its t_move_relay wrapper.
@@ -31,12 +30,12 @@ rm -f "$RELAY_READY"
 
 # --- Client B (observer) — runs in background ---
 echo "[test-move-relay] launching observer (TEST2 / dfsdfsd)…"
-"$WC" TEST2 test123 dfsdfsd relay-observer "$RELAY_READY" >/tmp/wc_relay_observer.log 2>&1 &
+"$WC" TEST2 dfsdfsd relay-observer "$RELAY_READY" >/tmp/wc_relay_observer.log 2>&1 &
 OBSERVER_PID=$!
 
 # --- Client A (sender) — wait up to 8s for observer to log in, then send jump ---
 echo "[test-move-relay] launching sender (TEST / Ginger)…"
-"$WC" TEST test123 Ginger relay-sender "$RELAY_READY" >/tmp/wc_relay_sender.log 2>&1 &
+"$WC" TEST Ginger relay-sender "$RELAY_READY" >/tmp/wc_relay_sender.log 2>&1 &
 SENDER_PID=$!
 
 # --- Wait for both to finish ---

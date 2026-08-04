@@ -11,7 +11,7 @@ source tools/wire-client/scenario-lib.sh
 scenario_preflight addon-bridge
 
 for i in 1 2; do
-  if timeout 40 "$WC" TEST test123 Ginger addon-ping "roundtrip$i" 2>&1 | grep -q "ADDON-PING PASS"; then
+  if timeout 40 "$WC" TEST Ginger addon-ping "roundtrip$i" 2>&1 | grep -q "ADDON-PING PASS"; then
     step_ok "bridge round-trip $i (ping -> client_command -> pong envelope)"
   else
     step_fail "bridge round-trip $i failed"

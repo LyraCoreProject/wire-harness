@@ -30,7 +30,7 @@ orchestrate() {
 }
 orchestrate &
 ORCH=$!
-timeout 90 cargo run -q -p wire-client -- TEST test123 "$CHAR" ghost "$HEALER" "$GHOST_READY"
+timeout 90 "$WC" TEST "$CHAR" ghost "$HEALER" "$GHOST_READY"
 RC=$?
 wait "$ORCH" 2>/dev/null || true
 rm -f "$GHOST_READY"

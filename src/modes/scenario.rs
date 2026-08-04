@@ -34,7 +34,7 @@ pub(crate) fn try_dispatch(
 }
 
 // ---- scenario-quest: accept -> kill 2 objective wolves (real swings) -> loot -> turn in ----
-// Usage: wire-client TEST test123 Ginger scenario-quest <giver_guid> <quest_entry> <wolf1> <wolf2>
+// Usage: vanilla-wire scenario scenario-quest <giver_guid> <quest_entry> <wolf1> <wolf2>
 fn scenario_quest(
     _mode: &str,
     c: &mut WireClient,
@@ -358,7 +358,7 @@ fn vendor_sell_buyback(
 }
 
 // ---- scenario-train: trainer list -> buy spell -> cast it, asserting the full sequence ----
-// Usage: wire-client TEST test123 Ginger scenario-train <trainer_guid> <spell_id> <cast_ms> <ready_file>
+// Usage: vanilla-wire scenario scenario-train <trainer_guid> <spell_id> <cast_ms> <ready_file>
 // NOTE: <cast_ms> is positional BEFORE <ready_file> — callers must pass both (the ready file is
 // required, so an omitted cast_ms would swallow the path and bail on the missing arg).
 fn scenario_train(
@@ -465,7 +465,7 @@ fn scenario_train(
 }
 
 // ---- scenario-death: die (orchestrated) -> release -> wait the reclaim delay -> reclaim ----
-// Usage: wire-client TEST test123 Ginger scenario-death <corpse_guid> <ready_file> <reclaimed_file>
+// Usage: vanilla-wire scenario scenario-death <corpse_guid> <ready_file> <reclaimed_file>
 fn scenario_death(
     _mode: &str,
     c: &mut WireClient,

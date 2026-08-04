@@ -37,7 +37,7 @@ FAIL=0
 
 echo "[078] Step 1: login (stay) to create a live entity..."
 # outer timeout 90 > the stay mode's own 60s sentinel deadline — the wire client must own the timeout, not be SIGKILLed mid-drain
-timeout 90 "$WC" TEST test123 "$CHAR" stay "$SENTINEL1" &
+timeout 90 "$WC" TEST "$CHAR" stay "$SENTINEL1" &
 WC1=$!
 for _ in $(seq 1 15); do
   H=$(spacetime sql "$DB" "SELECT health FROM game_world_entity WHERE guid=$CGUID" 2>&1 | grep -oE '[0-9]+' | tail -1)
@@ -79,7 +79,7 @@ fi
 [ -n "${PWOLF:-}" ] && spacetime sql "$DB" "DELETE FROM game_creature_spawn WHERE guid = $PWOLF" >/dev/null 2>&1
 [ -n "${PWOLF:-}" ] && spacetime sql "$DB" "DELETE FROM game_world_entity WHERE guid = $PWOLF" >/dev/null 2>&1
 echo "[078] Step 4: relog (stay) and check the rebuilt entity's health..."
-timeout 90 "$WC" TEST test123 "$CHAR" stay "$SENTINEL2" & # 90 > the stay mode's 60s inner deadline (same as step 1)
+timeout 90 "$WC" TEST "$CHAR" stay "$SENTINEL2" & # 90 > the stay mode's 60s inner deadline (same as step 1)
 WC2=$!
 RELOG_HEALTH=""
 MAXHP=""

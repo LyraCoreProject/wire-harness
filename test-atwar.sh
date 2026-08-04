@@ -6,7 +6,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 DB=lyracore
-WC=./target/debug/wire-client
+# $WC comes from scenario-lib.sh (the adapters/lyracore/wire.sh seam) — do not re-point it at the binary.
 source tools/wire-client/scenario-lib.sh
 
 GINGER=$(char_guid Ginger)
@@ -20,16 +20,16 @@ STANDING=$(sql1 "SELECT standing FROM game_player_reputation WHERE character_gui
 [ -z "$STANDING" ] && { echo "[atwar] no standing row after grant — fixture faction missing?" >&2; exit 1; }
 
 # ON: send the checkbox, then assert the flag survives a relog.
-timeout 60 "$WC" TEST test123 Ginger atwar $IDX 1 || { echo "[atwar] send(on) failed" >&2; FAILED=1; }
+timeout 60 "$WC" TEST Ginger atwar $IDX 1 || { echo "[atwar] send(on) failed" >&2; FAILED=1; }
 AW=$(sql1 "SELECT COUNT(*) AS n FROM game_player_reputation WHERE character_guid = $GINGER AND faction_id = 50900 AND at_war = true")
 assert_ge "server row: at_war = true after the CMSG" "${AW:-0}" 1
-timeout 60 "$WC" TEST test123 Ginger init-factions $IDX "$STANDING" 1 \
+timeout 60 "$WC" TEST Ginger init-factions $IDX "$STANDING" 1 \
   && step_ok "relog: INITIALIZE_FACTIONS slot $IDX carries AT_WAR" \
   || { echo "[atwar] STEP-ASSERT FAIL: AT_WAR flag missing on relog" >&2; FAILED=1; }
 
 # OFF: uncheck, assert the bit clears on the next relog (round-trip both directions).
-timeout 60 "$WC" TEST test123 Ginger atwar $IDX 0 || { echo "[atwar] send(off) failed" >&2; FAILED=1; }
-timeout 60 "$WC" TEST test123 Ginger init-factions $IDX "$STANDING" 0 \
+timeout 60 "$WC" TEST Ginger atwar $IDX 0 || { echo "[atwar] send(off) failed" >&2; FAILED=1; }
+timeout 60 "$WC" TEST Ginger init-factions $IDX "$STANDING" 0 \
   && step_ok "relog: AT_WAR cleared after uncheck" \
   || { echo "[atwar] STEP-ASSERT FAIL: AT_WAR flag stuck on after uncheck" >&2; FAILED=1; }
 

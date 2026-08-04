@@ -1,60 +1,78 @@
-//! Manual driver for the headless wire test-client.
+//! `vanilla-wire` — the standalone build-5875 wire client's driver binary.
 //!
-//! Usage: wire-client [account] [password] [char-name] [spell-id]
-//! Defaults: TEST / test123 / Ginger.  With a spell-id it runs M2 (cast assertion):
-//! it logs in, WAITS for a creature to appear nearby (spawn one externally via
-//! `debug_spawn_at_feet <char_guid> <entry> <offset>`), then targets it and casts,
-//! asserting the timed-cast SMSG sequence.
+//! Two commands (see `wire_client::cli::USAGE`):
+//!   * `smoke` — logon → world handshake → enter the world → report. The generic acceptance test:
+//!     it asserts nothing project-specific, so it passes against ANY working 5875 server given a
+//!     reachable host and valid credentials.
+//!   * `scenario NAME [ARGS…]` — one named protocol scenario (`src/modes/`).
+//!
+//! Every server fact (host, ports) and every identity fact (account, character, class, password)
+//! comes from the CLI. Nothing here knows what server it is talking to.
 
 use anyhow::{bail, Result};
 
 mod modes;
+use wire_client::cli::{invocation, Command};
 use wire_client::WireClient;
 use wow_world_messages::vanilla::opcodes::ServerOpcodeMessage as Smsg;
-use wow_world_messages::vanilla::Class;
 
 fn main() -> Result<()> {
-    let mut args = std::env::args().skip(1);
-    let account = args.next().unwrap_or_else(|| "TEST".into());
-    let password = args.next().unwrap_or_else(|| "test123".into());
-    let char_name = args.next().unwrap_or_else(|| "Ginger".into());
-    let mode: Option<String> = args.next();
+    let inv = invocation()?;
+    let (account, password, char_name) = (
+        inv.account.clone(),
+        inv.password.clone(),
+        inv.character.clone(),
+    );
+    let mode: Option<&str> = match &inv.command {
+        Command::Smoke => None,
+        Command::Scenario(name) => Some(name.as_str()),
+    };
+    let mut args = inv.args.clone().into_iter();
 
-    // ---- char-select-tier probes (modes/probes.rs): these run BEFORE login_as — they operate
+    // ---- char-select-tier scenarios (modes/probes.rs): these run BEFORE login — they operate
     // at the character-select screen (char-enum-gear, char-delete) and never enter the world. ----
-    if let Some(m) = mode.as_deref() {
+    if let Some(m) = mode {
         if modes::dispatch_charselect(m, &account, &password, &char_name, &mut args)? {
             return Ok(());
         }
     }
 
-    eprintln!("[wire] logon + world handshake as {account} -> char {char_name}…");
-    let mut c = WireClient::login_as(&account, &password, &char_name, Class::Warlock)?;
+    if char_name.is_empty() {
+        bail!("--character is required to enter the world (only char-select scenarios run without one)");
+    }
+    eprintln!(
+        "[wire] logon {} — {account} -> char {char_name}…",
+        inv.endpoints.logon_addr
+    );
+    let mut c = WireClient::login_as_race(&account, &password, &char_name, inv.class, inv.race)?;
     println!(
         "[wire] M1 OK — in world as guid {} ({} nearby objects)",
         c.self_guid,
         c.seen_guids.len()
     );
 
-    // ---- named modes: the five family dispatchers own everything below (modes/*.rs) ----
-    // No mode at all is the M1 login smoke (we already printed M1 OK). A mode NOBODY claims
-    // must bail: a silent Ok(()) here turns a renamed/typo'd mode into a green suite entry.
+    // ---- named scenarios: the five family dispatchers own everything below (modes/*.rs) ----
+    // `smoke` is the M1 login check we just printed. A name NOBODY claims must bail: a silent
+    // Ok(()) here turns a renamed/typo'd scenario into a green suite entry.
     let Some(mode) = mode else { return Ok(()) };
     let mcx = modes::ModeCtx {
         account: &account,
         password: &password,
         char_name: &char_name,
+        inv: &inv,
     };
-    if modes::dispatch(&mode, &mut c, &mut args, &mcx)? {
+    if modes::dispatch(mode, &mut c, &mut args, &mcx)? {
         return Ok(());
     }
 
-    let spell_id: u32 = match mode.parse() {
-        Ok(id) => id,
-        Err(_) => bail!(
-            "unknown mode {mode:?} — no family dispatcher claimed it and it is not an M2 spell-id"
-        ),
-    };
+    // ---- `scenario cast <spell-id>`: the M2 timed-cast assertion. ----
+    if mode != "cast" {
+        bail!("unknown scenario {mode:?} — no family dispatcher claimed it");
+    }
+    let spell_id: u32 = args
+        .next()
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| anyhow::anyhow!("usage: scenario cast <spell-id>"))?;
 
     // ---- M2: the orchestrator spawns a mob at Ginger's feet (she must be live) and writes
     // its exact guid to a file; we KEEP DRAINING the socket while polling that file, then

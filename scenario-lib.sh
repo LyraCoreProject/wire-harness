@@ -5,7 +5,14 @@
 # server state at each seam, (5) tears down every spawned row and ASSERTS the teardown.
 
 DB=lyracore
-WC=./target/debug/wire-client
+# THE CLIENT IS REACHED THROUGH THE ADAPTER, NEVER DIRECTLY (#244). `vanilla-wire` is a standalone
+# build-5875 client with no default account, no default password and no knowledge of this project;
+# adapters/lyracore/wire.sh is where this repo's fixture credentials, class default and endpoints
+# live. Call it exactly like the old binary minus the password token:
+#     "$WC" <account> <character> [scenario [args…]]
+# Absolute (derived from this library's own location) so it works from any cwd, and overridable —
+# point $WIRE_BIN at a released wire-harness build and the whole suite runs against that instead.
+WC=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/adapters/lyracore/wire.sh
 
 # $2/db is optional on every read/lookup helper below (default: the $DB global) — issue #70: a
 # character living on a NON-default database (e.g. an instance or continent shard) used to read as
@@ -44,11 +51,10 @@ settle_char_money() { # $1=char_guid
 
 # Disposable per-test character (testing-hardening §3.4 — kills the shared-Ginger ambient-state
 # flake class, work-item 267): delete-first (reaps a crashed prior run's leftover), create fresh
-# through the REAL wire char-create path, echo the guid. Pair with drop_char in teardown. WC must
-# be defined by the caller before use (every scenario script sets it).
+# through the REAL wire char-create path, echo the guid. Pair with drop_char in teardown.
 fresh_char() { # $1=name  $2=class (warrior|...; default warrior)  $3=level (default 5)
-  timeout 60 "$WC" TEST test123 "$1" char-delete >/dev/null 2>&1 || true
-  timeout 60 "$WC" TEST test123 "$1" make-char "${2:-warrior}" >/dev/null 2>&1
+  timeout 60 "$WC" TEST "$1" char-delete >/dev/null 2>&1 || true
+  timeout 60 "$WC" TEST "$1" make-char "${2:-warrior}" >/dev/null 2>&1
   local guid; guid=$(char_guid "$1")
   # Level 5 default (267 root-cause, 2026-07-16): the scenario pads sit near REAL imported
   # low-level spawns — a level-1 fresh char is a valid aggro target and gets mauled mid-scenario
@@ -59,7 +65,7 @@ fresh_char() { # $1=name  $2=class (warrior|...; default warrior)  $3=level (def
   echo "$guid"
 }
 drop_char() { # $1=name
-  timeout 60 "$WC" TEST test123 "$1" char-delete >/dev/null 2>&1 || true
+  timeout 60 "$WC" TEST "$1" char-delete >/dev/null 2>&1 || true
 }
 
 # Clear the pad of REAL imported hostiles before a controlled fight (2026-07-18). The Elwynn scenario
@@ -192,7 +198,9 @@ _stay_wait_exit() { # $1=pid $2=budget_secs
     kill -0 "$1" 2>/dev/null || { wait "$1" 2>/dev/null; return 0; }
     sleep 1
   done
-  if ! ps -o comm= -p "$1" 2>/dev/null | grep -q '^wire-client$'; then
+  # `vanilla-wire` since #244 (the binary was renamed and the adapter wrapper exec's it, so the
+  # backgrounded pid IS the client — see adapters/lyracore/wire.sh).
+  if ! ps -o comm= -p "$1" 2>/dev/null | grep -q '^vanilla-wire$'; then
     echo "[orch] stay: pid $1 did not exit within ${2}s, but no longer looks like our wire-client" \
          "(stale/reused pid) — refusing to kill it" >&2
     return 0
@@ -203,7 +211,9 @@ _stay_wait_exit() { # $1=pid $2=budget_secs
 }
 
 SC_STAY_PID=""; SC_STAY_SENTINEL=""; SC_STAY_DEADLINE=""
-stay_start() { # $1=account $2=pass $3=char $4=deadline_secs (optional, default 60) $5=database (optional, default $DB)
+stay_start() { # $1=account $2=char $3=deadline_secs (optional, default 60) $4=database (optional, default $DB)
+  # The password argument is GONE (#244): the client takes no password on its command line, and
+  # this account's fixture password lives in adapters/lyracore/wire.sh, which $WC points at.
   # deadline_secs (work-item 157): the wire client's stay mode self-exits (rc 0, silent) once its
   # own deadline elapses, regardless of whether stay_stop has been called yet. A caller that holds
   # the session live across a longer poll window than 60s (scenario-vendor's Step 4 fight-durability
@@ -211,20 +221,20 @@ stay_start() { # $1=account $2=pass $3=char $4=deadline_secs (optional, default 
   # character's live connection — can vanish mid-poll.
   # $5/database (issue #70): lets a caller materialise a session and poll for its entity on a
   # database OTHER than $DB (e.g. an instance/continent shard) without reassigning the global.
-  local db="${5:-$DB}"
-  local guid attempt; guid=$(char_guid "$3" "$db")
-  local deadline="${4:-60}"
+  local db="${4:-$DB}"
+  local guid attempt; guid=$(char_guid "$2" "$db")
+  local deadline="${3:-60}"
   SC_STAY_DEADLINE="$deadline"
-  SC_STAY_SENTINEL="/tmp/sc_stay_$$_$3"
+  SC_STAY_SENTINEL="/tmp/sc_stay_$$_$2"
   # A fast relogin can race the PREVIOUS session's disconnect cleanup (which despawns the character
   # guid and would delete the NEW session's entity from under us) — settle first, then verify the
   # entity SURVIVES a beat after appearing, retrying the whole login once if it got reaped.
   sleep 2
   # Callers that want the wire session's output (the suite) set SC_STAY_LOG_DIR; default discards.
-  local staylog="${SC_STAY_LOG_DIR:+${SC_STAY_LOG_DIR}/stay_$3.log}"
+  local staylog="${SC_STAY_LOG_DIR:+${SC_STAY_LOG_DIR}/stay_$2.log}"
   for attempt in 1 2; do
     rm -f "$SC_STAY_SENTINEL"
-    "$WC" "$1" "$2" "$3" stay "$SC_STAY_SENTINEL" "$deadline" >"${staylog:-/dev/null}" 2>&1 &
+    "$WC" "$1" "$2" stay "$SC_STAY_SENTINEL" "$deadline" >"${staylog:-/dev/null}" 2>&1 &
     SC_STAY_PID=$!
     local live=""
     for _ in $(seq 1 20); do
@@ -237,7 +247,7 @@ stay_start() { # $1=account $2=pass $3=char $4=deadline_secs (optional, default 
       if [ -n "$(sqlq "SELECT guid FROM game_world_entity WHERE guid = $guid" "$db" | grep -oE '[0-9]+' | tail -1)" ]; then
         return 0
       fi
-      echo "[orch] stay_start: $3 entity reaped by a stale disconnect (attempt $attempt) — retrying" >&2
+      echo "[orch] stay_start: $2 entity reaped by a stale disconnect (attempt $attempt) — retrying" >&2
     fi
     # Clear SC_STAY_PID as soon as this attempt's client is reaped (issue #70 review): if this was
     # the LAST attempt, stay_start returns 1 below with SC_STAY_PID now empty, so a caller that calls
@@ -246,7 +256,7 @@ stay_start() { # $1=account $2=pass $3=char $4=deadline_secs (optional, default 
     # now-stale, already-reaped pid.
     touch "$SC_STAY_SENTINEL"; _stay_wait_exit "$SC_STAY_PID" $(( deadline + 15 )); SC_STAY_PID=""; sleep 2
   done
-  echo "[orch] stay_start: $3 never went live" >&2
+  echo "[orch] stay_start: $2 never went live" >&2
   return 1
 }
 stay_stop() {
@@ -350,10 +360,10 @@ position_apart() {
   local G D
   G=$(char_guid Ginger); D=$(char_guid dfsdfsd)
   { [ -n "$G" ] && [ -n "$D" ]; } || { echo "[orch] position_apart: missing fixture character (Ginger=$G dfsdfsd=$D)" >&2; return 1; }
-  stay_start TEST test123 Ginger || return 1
+  stay_start TEST Ginger || return 1
   scall debug_teleport "$G" 0 -8968 -129 83.4 0 || { stay_stop; return 1; }
   stay_stop
-  stay_start TEST2 test123 dfsdfsd || return 1
+  stay_start TEST2 dfsdfsd || return 1
   scall debug_teleport "$D" 0 -8945 -107 83.4 0 || { stay_stop; return 1; }
   stay_stop
 }
@@ -429,7 +439,7 @@ ensure_ginger_home() { # $1=name (default Ginger)
     # Never existed anywhere: create her via the real wire path. A fresh char spawns at the
     # Northshire start position (region 1), so the FIRST login settles her onto lyracore with
     # no repair needed below.
-    timeout 60 "$WC" TEST test123 "$name" logout >/dev/null 2>&1
+    timeout 60 "$WC" TEST "$name" logout >/dev/null 2>&1
     hits=$(_find_all_named "$name")
     [ -z "$hits" ] && { echo "[orch] ensure_ginger_home: could not create '$name' anywhere" >&2; return 1; }
   fi
@@ -450,12 +460,12 @@ ensure_ginger_home() { # $1=name (default Ginger)
     echo "$keep_guid"; return 0
   fi
   echo "[orch] ensure_ginger_home: '$name' (guid=$keep_guid) lives on $keep_db, not lyracore — walking her home" >&2
-  stay_start TEST test123 "$name" 30 "$keep_db" || { echo "[orch] ensure_ginger_home: could not log in on $keep_db" >&2; return 1; }
+  stay_start TEST "$name" 30 "$keep_db" || { echo "[orch] ensure_ginger_home: could not log in on $keep_db" >&2; return 1; }
   scall_on "$keep_db" debug_teleport "$keep_guid" "$GINGER_HOME_MAP" "$GINGER_HOME_X" "$GINGER_HOME_Y" "$GINGER_HOME_Z" 0
   sleep 1
   stay_stop
   sleep 2
-  stay_start TEST test123 "$name" 10 lyracore || true
+  stay_start TEST "$name" 10 lyracore || true
   stay_stop
   if [ "$(sqlq "SELECT guid FROM game_character WHERE name = '$name'" lyracore | grep -oE '[0-9]+' | tail -1)" = "$keep_guid" ]; then
     echo "$keep_guid"; return 0

@@ -12,7 +12,7 @@ cd "$(dirname "$0")/../.."
 source tools/wire-client/scenario-lib.sh
 scenario_preflight group-loot
 DFS=$(char_guid dfsdfsd)
-[ -z "$DFS" ] && timeout 60 "$WC" TEST2 test123 dfsdfsd logout >/dev/null 2>&1 && DFS=$(char_guid dfsdfsd)
+[ -z "$DFS" ] && timeout 60 "$WC" TEST2 dfsdfsd logout >/dev/null 2>&1 && DFS=$(char_guid dfsdfsd)
 [ -z "$DFS" ] && { echo "[orch] no dfsdfsd character" >&2; exit 1; }
 
 WOLF_ENTRY=51000; GREEN=1116; GREY=52  # 1116 Ring of Pure Silver: a REAL imported q2 green (the seeded 50 imports at q1 on a dump-loaded node)
@@ -40,10 +40,10 @@ HOLD_L=/tmp/ws_loot_leader_$$; HOLD_V=/tmp/ws_loot_voter_$$
 rm -f "$HOLD_L" "$HOLD_V" "$HOLD_L".* "$HOLD_V".* 2>/dev/null
 
 # ---- form the party; leader sets GroupLoot/Uncommon (clause 1 asserted wire-side in-mode) ----
-timeout 400 "$WC" TEST2 test123 dfsdfsd loot-voter greed "$HOLD_V" >/tmp/ws_loot_voter.log 2>&1 &
+timeout 400 "$WC" TEST2 dfsdfsd loot-voter greed "$HOLD_V" >/tmp/ws_loot_voter.log 2>&1 &
 VOTER=$!
 sleep 3
-timeout 400 "$WC" TEST test123 Ginger loot-leader dfsdfsd need "$HOLD_L" >/tmp/ws_loot_leader.log 2>&1 &
+timeout 400 "$WC" TEST Ginger loot-leader dfsdfsd need "$HOLD_L" >/tmp/ws_loot_leader.log 2>&1 &
 LEADER=$!
 for _ in $(seq 1 40); do [ -f "$HOLD_L.method" ] && break; sleep 1; done
 [ -f "$HOLD_L.method" ] && step_ok "wire: loot method set + GROUP_LIST echo (GroupLoot/Uncommon)" \

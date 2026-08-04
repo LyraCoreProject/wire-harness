@@ -64,7 +64,7 @@ assert_eq "kit: dps learned Judgement" "$(sql1 "SELECT COUNT(*) AS n FROM game_p
 # Run-scoped hold path (work-item 161): defined ONCE here, passed as the party-bots hold arg.
 HOLD=/tmp/ws_class_roles_$$
 rm -f "$HOLD" "$HOLD.ingroup"
-timeout 400 "$WC" TEST test123 Ginger party-bots "$HOLD" Tankbot1 Healbot1 Dpsbot1 >/tmp/ws_class_roles.log 2>&1 &
+timeout 400 "$WC" TEST Ginger party-bots "$HOLD" Tankbot1 Healbot1 Dpsbot1 >/tmp/ws_class_roles.log 2>&1 &
 LEADER=$!
 wait_for_file 40 "$HOLD.ingroup"
 [ -f "$HOLD.ingroup" ] && step_ok "wire: 4-member all-Paladin party formed" || { step_fail "wire: party never formed"; tail -3 /tmp/ws_class_roles.log; }

@@ -20,4 +20,4 @@ cargo build -p wire-client -q
 # Staging (moved from wire-suite.sh, work-item 162): park the two characters ~32yd apart so
 # standalone runs get the same geometry the suite used to set up in its t_say_range wrapper.
 position_apart || { echo "[test-say-range] staging failed (position_apart)" >&2; exit 1; }
-"$WC" TEST test123 Ginger say-range TEST2 test123 dfsdfsd
+"$WC" TEST Ginger say-range TEST2 dfsdfsd

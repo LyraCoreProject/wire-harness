@@ -36,7 +36,7 @@ settle(){ sleep 10; } # for a NEGATIVE assert: wait ≥2 sense ticks so pass_pet
 
 # --- stage: live warlock + a summoned Imp on the empty pad ---
 scall debug_set_level "$GINGER" 10
-stay_start TEST test123 Ginger || exit 1
+stay_start TEST Ginger || exit 1
 scall debug_teleport "$GINGER" 0 $PAD_X $PAD_Y $PAD_Z 0
 scall debug_set_health "$GINGER" 100000
 purge_creatures_near "$PAD_X" "$PAD_Y" 40

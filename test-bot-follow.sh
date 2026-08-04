@@ -32,7 +32,7 @@ echo "[orch] bot-follow: bot=$BOT ginger=$GINGER"
 
 HOLD=/tmp/ws_bot_follow_$$
 rm -f "$HOLD" "$HOLD.ingroup"
-timeout 400 "$WC" TEST test123 Ginger party-bots "$HOLD" Dpsbot1 >/tmp/ws_bot_follow.log 2>&1 &
+timeout 400 "$WC" TEST Ginger party-bots "$HOLD" Dpsbot1 >/tmp/ws_bot_follow.log 2>&1 &
 LEADER=$!
 wait_for_file 40 "$HOLD.ingroup"
 [ -f "$HOLD.ingroup" ] && step_ok "wire: bot grouped under Ginger" || { step_fail "wire: party never formed"; tail -3 /tmp/ws_bot_follow.log; }

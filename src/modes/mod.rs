@@ -20,6 +20,10 @@ pub(crate) struct ModeCtx<'a> {
     pub account: &'a str,
     pub password: &'a str,
     pub char_name: &'a str,
+    /// The whole parsed invocation — endpoints, class/race, and the peer passwords a
+    /// multi-session scenario needs. Credentials for an EXTRA account come from
+    /// `inv.peer_password(i)` (stdin), never from a positional argument.
+    pub inv: &'a wire_client::cli::Invocation,
 }
 
 /// Run `mode` through the CHAR-SELECT-TIER probes (probes that must run BEFORE `login_as`,

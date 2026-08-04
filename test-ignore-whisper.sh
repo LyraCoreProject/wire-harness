@@ -14,7 +14,7 @@ GINGER=$(char_guid Ginger)
 [ -z "$GINGER" ] && { echo "[test] character 'Ginger' not found in game_character" >&2; exit 1; }
 
 sqlq "DELETE FROM game_character_contact WHERE owner_guid = $GINGER" >/dev/null
-timeout 90 "$WC" TEST test123 Ginger ignore-whisper TEST2 test123 dfsdfsd
+timeout 90 "$WC" TEST Ginger ignore-whisper TEST2 dfsdfsd
 RC=$?
 sqlq "DELETE FROM game_character_contact WHERE owner_guid = $GINGER" >/dev/null
 exit $RC

@@ -16,7 +16,7 @@ cd "$(dirname "$0")/../.."
 source tools/wire-client/scenario-lib.sh
 scenario_preflight group
 DFS=$(char_guid dfsdfsd)
-[ -z "$DFS" ] && timeout 60 "$WC" TEST2 test123 dfsdfsd logout >/dev/null 2>&1 && DFS=$(char_guid dfsdfsd)
+[ -z "$DFS" ] && timeout 60 "$WC" TEST2 dfsdfsd logout >/dev/null 2>&1 && DFS=$(char_guid dfsdfsd)
 [ -z "$DFS" ] && { echo "[orch] no dfsdfsd character" >&2; exit 1; }
 
 QUEST=50900; WOLF_ENTRY=51000
@@ -39,10 +39,10 @@ HOLD_L=/tmp/ws_group_leader_$$; HOLD_J=/tmp/ws_group_join_$$
 rm -f "$HOLD_L" "$HOLD_J" "$HOLD_L.ingroup" "$HOLD_J.ingroup"
 
 # ---- 1. invite/accept over two live sessions ----
-timeout 300 "$WC" TEST2 test123 dfsdfsd group-join "$HOLD_J" >/tmp/ws_group_join.log 2>&1 &
+timeout 300 "$WC" TEST2 dfsdfsd group-join "$HOLD_J" >/tmp/ws_group_join.log 2>&1 &
 JOINER=$!
 sleep 3
-timeout 300 "$WC" TEST test123 Ginger group-leader dfsdfsd "$HOLD_L" >/tmp/ws_group_leader.log 2>&1 &
+timeout 300 "$WC" TEST Ginger group-leader dfsdfsd "$HOLD_L" >/tmp/ws_group_leader.log 2>&1 &
 LEADER=$!
 # both sides must signal in-group.
 # Kept hand-rolled: ONE 40s deadline shared by BOTH files (chained wait_for_file calls would
@@ -119,10 +119,10 @@ assert_eq "sql: zero member rows after disband" "$(sql1 "SELECT COUNT(*) AS n FR
 
 # ---- 5. decline flow ----
 sleep 3 # settle the relogins
-timeout 120 "$WC" TEST2 test123 dfsdfsd group-decline >/tmp/ws_group_decline.log 2>&1 &
+timeout 120 "$WC" TEST2 dfsdfsd group-decline >/tmp/ws_group_decline.log 2>&1 &
 DECL=$!
 sleep 3
-if timeout 120 "$WC" TEST test123 Ginger group-invite-expect-decline dfsdfsd >/tmp/ws_group_declflow.log 2>&1; then
+if timeout 120 "$WC" TEST Ginger group-invite-expect-decline dfsdfsd >/tmp/ws_group_declflow.log 2>&1; then
   step_ok "wire: decline flow (invite acked, SMSG_GROUP_DECLINE received)"
 else
   step_fail "wire: decline flow failed ($(tail -1 /tmp/ws_group_declflow.log))"

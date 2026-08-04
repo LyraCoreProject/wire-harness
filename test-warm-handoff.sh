@@ -4,7 +4,7 @@
 set -u
 cd "$(dirname "$0")"
 . ./scenario-lib.sh
-WC=../../target/debug/wire-client
+# $WC comes from scenario-lib.sh (the adapters/lyracore/wire.sh seam) — do not re-point it at the binary.
 DB=lyracore
 WORLD2=lyracore-world-2
 
@@ -20,8 +20,8 @@ DST_X=-9549.82; DST_Y=112.997; DST_Z=59.0065
 # fresh_char/drop_char helpers are pinned to the suite's TEST account by convention, and a char
 # created there is invisible to SEAMTEST's char enum (bit 2026-08-03).
 seamtest_fresh_char() {
-  timeout 60 "$WC" SEAMTEST seamtest123 "$1" char-delete >/dev/null 2>&1 || true
-  timeout 60 "$WC" SEAMTEST seamtest123 "$1" make-char "${2:-warrior}" >/dev/null 2>&1
+  timeout 60 "$WC" SEAMTEST "$1" char-delete >/dev/null 2>&1 || true
+  timeout 60 "$WC" SEAMTEST "$1" make-char "${2:-warrior}" >/dev/null 2>&1
   local guid; guid=$(char_guid "$1")
   [ -n "$guid" ] && scall debug_set_level "$guid" "${3:-5}"
   echo "$guid"
@@ -39,7 +39,7 @@ sqlq "SELECT map_id, x, y FROM game_character WHERE guid = $GUID" "$DB"
 sqlq "SELECT guid FROM game_character WHERE guid = $GUID" "$WORLD2"
 
 echo "== leg 1: log in on core and walk across the seam (expect-handoff)"
-timeout 90 "$WC" SEAMTEST seamtest123 SeamHandoff seamwalk "$SRC_X" "$SRC_Y" "$SRC_Z" "$DST_X" "$DST_Y" "$DST_Z" expect-handoff
+timeout 90 "$WC" SEAMTEST SeamHandoff seamwalk "$SRC_X" "$SRC_Y" "$SRC_Z" "$DST_X" "$DST_Y" "$DST_Z" expect-handoff
 RC=$?
 echo "seamwalk rc=$RC"
 
@@ -58,9 +58,9 @@ sqlq "SELECT * FROM game_transfer_out WHERE character_guid = $GUID" "$WORLD2"
 sqlq "SELECT * FROM game_transfer_in WHERE character_guid = $GUID" "$WORLD2"
 
 echo "== leg 2: re-login (bare M1 smoke — no mode) — must land on world-2 with NO second transfer"
-timeout 30 "$WC" SEAMTEST seamtest123 SeamHandoff
+timeout 30 "$WC" SEAMTEST SeamHandoff
 RC2=$?
 echo "relogin rc=$RC2"
 
 echo "== teardown"
-timeout 60 "$WC" SEAMTEST seamtest123 SeamHandoff char-delete >/dev/null 2>&1 || true
+timeout 60 "$WC" SEAMTEST SeamHandoff char-delete >/dev/null 2>&1 || true

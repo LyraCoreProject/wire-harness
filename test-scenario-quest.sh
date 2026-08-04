@@ -27,7 +27,7 @@ PAD_X=-8960; PAD_Y=-460; PAD_Z=81
 sqlq "DELETE FROM game_character_quest WHERE character_guid = $GINGER AND quest_entry = $QUEST" >/dev/null
 
 # ---- stage: park Ginger on the pad, spawn the giver + two weakened wolves at her feet ----
-stay_start TEST test123 "$QCHAR" || exit 1
+stay_start TEST "$QCHAR" || exit 1
 scall debug_teleport "$GINGER" 0 $PAD_X $PAD_Y $PAD_Z 0
 scall debug_set_health "$GINGER" 100000
 GIVER=$(spawn_at "$GINGER" $GIVER_ENTRY 4)
@@ -75,7 +75,7 @@ WATCH=$!
 # the controlled kill flow — the intermittent stray-interference class). Keep the fixtures.
 purge_creatures_near "$PAD_X" "$PAD_Y" 30 "$GIVER" "$WOLF1" "$WOLF2"
 # ---- the wire scenario (SMSG assertions per step; nonzero exit = the failed step is named) ----
-timeout 240 "$WC" TEST test123 "$QCHAR" scenario-quest "$GIVER" $QUEST "$WOLF1" "$WOLF2"
+timeout 240 "$WC" TEST "$QCHAR" scenario-quest "$GIVER" $QUEST "$WOLF1" "$WOLF2"
 RC=$?
 wait "$WATCH" 2>/dev/null || FAILED=1
 [ $RC -ne 0 ] && { echo "[orch] wire scenario failed (rc=$RC)"; FAILED=1; }

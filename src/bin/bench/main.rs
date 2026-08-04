@@ -101,7 +101,7 @@ const WALK_ARC_RADIUS_YDS: f32 = 20.0;
 
 /// #184 (AOI subscription-churn experiment): `WALK_SPAN` / `--walk-span` replaces the #288 arc with
 /// a straight back-and-forth line of this many yards, walked at `WALK_SPEED` below. The arc's ~40yd
-/// excursion sits mostly inside one 50yd AOI grid cell (`lyracore_shared::spatial::GRID_CELL_SIZE`) by
+/// excursion sits mostly inside one 50yd AOI grid cell (`wire_client::spatial::DEFAULT_GRID_CELL_SIZE`) by
 /// construction, so it cannot be dialled up to cross cells at a chosen rate.
 ///
 /// ⚠ **Measured, not assumed: `WALK_SPAN` alone does NOT sweep a churn continuum.** Once a span
@@ -337,15 +337,22 @@ impl WalkPath {
 }
 
 const USAGE: &str = "\
-bench — 50→200 synthetic-player capacity benchmark
+vanilla-wire-bench — 50→200 synthetic-player capacity benchmark
 
 USAGE:
-  bench [OPTIONS]
+  printf '%s' \"$PASSWORD\" | vanilla-wire-bench [OPTIONS]
 
 TARGET (re-runnable per shard):
-  --logon HOST[:PORT]     logon tier of the gateway under test     [127.0.0.1:3724]
+  --logon HOST[:PORT]     logon tier of the server under test      [127.0.0.1:3724]
   --world HOST:PORT       world tier override                      [realm-list answer]
-  --metrics URL           SpacetimeDB node metrics endpoint        [http://127.0.0.1:3000/v1/metrics]
+  --metrics URL           SERVER ADAPTER: a Prometheus endpoint exposing the server-side writer /
+                          transaction / table counters. The shape parsed is SpacetimeDB's, and
+                          --db/--witness-db select a database within it, so this whole section is
+                          the one part of this benchmark that is not server-agnostic.
+                          --metrics none runs the generic half only: the ramp still drives real
+                          5875 sessions and still reports client-observed movement latency and
+                          throughput, and the server-side columns are reported as unmeasured.
+                                                                   [http://127.0.0.1:3000/v1/metrics]
   --db PREFIX             db= label prefix selecting ONE database  [required if the node hosts >1]
   --witness-db PREFIX     a SECOND database sampled over the same measured windows and reported
                           alongside the first. Nothing in this harness drives it — it is how one
@@ -389,7 +396,8 @@ WORKLOAD:
 
 IDENTITY:
   --account-prefix P      accounts are P0000..                     [BENCH]
-  --password PASS         shared password for those accounts       [benchpass]
+  --password-stdin        read the shared password for those accounts from stdin. REQUIRED —
+                          there is no password flag and no default password (#244).
   --char-prefix P         characters are Paaa, Paab, …             [Bench]
 
 OUTPUT:
@@ -427,6 +435,12 @@ impl Args {
             let Some(key) = k.strip_prefix("--") else {
                 bail!("unexpected positional argument {k:?}\n\n{USAGE}");
             };
+            // The one BARE flag: a password read from stdin has no value to put on the command
+            // line — that is the entire point of it (#244).
+            if key == "password-stdin" {
+                m.insert(key.to_string(), "1".to_string());
+                continue;
+            }
             let v = it
                 .next()
                 .with_context(|| format!("--{key} needs a value\n\n{USAGE}"))?;
@@ -482,6 +496,28 @@ impl Args {
         }
         Ok([parts[0], parts[1], parts[2]])
     }
+}
+
+/// The shared password for the synthetic accounts, off STDIN — never a flag, never a default
+/// (#244: a benchmark that ships working credentials only ever runs against the one stack those
+/// accounts exist on, and a password on argv is visible in `ps` and in every CI log).
+/// A run that connects nobody (`--dry-run`, or the observe-only `--stages 0`) needs no password
+/// and must not block reading one off a terminal.
+fn bench_password(args: &Args, connects_players: bool) -> Result<String> {
+    if !connects_players {
+        return Ok(String::new());
+    }
+    if args.opt("password-stdin").is_none() {
+        bail!(
+            "--password-stdin is required: pipe the shared account password in, e.g.\n  \
+             printf '%s' \"$PASSWORD\" | vanilla-wire-bench --label my-run …"
+        );
+    }
+    let (password, _) = wire_client::cli::read_passwords_from_stdin()?;
+    if password.is_empty() {
+        bail!("--password-stdin was given but stdin was empty");
+    }
+    Ok(password)
 }
 
 /// A numeric default read from the environment. Unset falls back to `default`; SET-BUT-GARBAGE is
@@ -1065,6 +1101,12 @@ fn main() -> Result<()> {
     let hold = args.num::<u64>("hold", 60)?;
     let stagger = args.num::<u64>("login-stagger-ms", 40)?;
     let metrics_url = args.str("metrics", "http://127.0.0.1:3000/v1/metrics");
+    // THE SERVER ADAPTER SWITCH (#244). Everything else in this binary is build-5875 protocol and
+    // runs against any compatible server; the writer/tx/table columns are scraped from a
+    // SpacetimeDB-shaped Prometheus endpoint. `--metrics none` turns that half off, so the ramp is
+    // still a real load test (client-observed movement latency and throughput) against a server
+    // that exposes no such endpoint at all.
+    let metrics_off = metrics_url.is_empty() || metrics_url.eq_ignore_ascii_case("none");
     let db = args.str("db", "");
     let dbf = metrics::db_filter(&db);
     // #21: the second database, sampled but never driven. Empty = absent; the whole feature is one
@@ -1079,13 +1121,14 @@ fn main() -> Result<()> {
     // explicit --label is the smallest thing that can't be typed by accident, and it is the same
     // argument that names the recorded artifact, so a real run always passes it anyway.
     let label = args.opt("label").filter(|l| !l.is_empty());
+    let dry_run = args.opt("dry-run").is_some();
 
     let cfg = Arc::new(Cfg {
-        logon: args.str("logon", wire_client::DEFAULT_LOGON_ADDR),
+        logon: args.str("logon", &wire_client::Endpoints::default().logon_addr),
         world: args.opt("world"),
         account_prefix: args.str("account-prefix", "BENCH"),
         account_start: args.num::<usize>("account-start", 0)?,
-        password: args.str("password", "benchpass"),
+        password: bench_password(&args, !dry_run && stages != vec![0])?,
         char_prefix: args.str("char-prefix", "Bench"),
         center: args.vec3("center", [-8920.0, -180.0, 82.0])?,
         spread: args.num::<f32>("spread", 40.0)?,
@@ -1131,11 +1174,21 @@ fn main() -> Result<()> {
     });
 
     // Fail fast on an unreachable metrics endpoint — a whole ramp that produces no server-side
-    // numbers is worse than no run at all.
-    let preflight = metrics::scrape(&metrics_url)
-        .with_context(|| format!("metrics preflight against {metrics_url}"))?;
-    if args.opt("dry-run").is_some() {
-        dry_run(&preflight, &metrics_url, &db, &dbf, &table_filter)?;
+    // numbers is worse than no run at all. (Unless they were switched off deliberately.)
+    let scrape = |off: bool| -> Result<metrics::Snapshot> {
+        if off {
+            Ok(metrics::parse(""))
+        } else {
+            metrics::scrape(&metrics_url)
+                .with_context(|| format!("metrics preflight against {metrics_url}"))
+        }
+    };
+    let preflight = scrape(metrics_off)?;
+    if dry_run {
+        if metrics_off {
+            bail!("--dry-run only checks the server-side metrics selection, which --metrics none turns off");
+        }
+        print_dry_run(&preflight, &metrics_url, &db, &dbf, &table_filter)?;
         // Validate AFTER printing, so the operator sees the node's actual identities alongside the
         // complaint — but still fail, so the runner script's `|| exit 1` catches a bad selection
         // before it commits the machine to an eight-minute ramp that measures nothing.
@@ -1153,8 +1206,10 @@ fn main() -> Result<()> {
             cfg.logon,
         );
     };
-    validate_db_selection(&preflight, &db, &dbf)?;
-    validate_witness_selection(&preflight, &db, &witness_db, &witness_dbf)?;
+    if !metrics_off {
+        validate_db_selection(&preflight, &db, &dbf)?;
+        validate_witness_selection(&preflight, &db, &witness_db, &witness_dbf)?;
+    }
 
     let sh = Arc::new(Shared {
         epoch: Instant::now(),
@@ -1186,7 +1241,11 @@ fn main() -> Result<()> {
         Target {
             logon: cfg.logon.clone(),
             world: cfg.world.clone().unwrap_or_else(|| "<realm-list>".into()),
-            metrics_url: metrics_url.clone(),
+            metrics_url: if metrics_off {
+                "none — server-side writer/tx/table columns were NOT measured".to_string()
+            } else {
+                metrics_url.clone()
+            },
             db: db.clone(),
             witness_db: witness_db.clone(),
         },
@@ -1247,12 +1306,12 @@ fn main() -> Result<()> {
         sh.wakeup_lags.lock().expect("lag lock").clear();
         let dropped0 = sh.dropped.load(Ordering::Relaxed);
         let c0 = sh.counters.snapshot();
-        let m0 = metrics::scrape(&metrics_url)?;
+        let m0 = scrape(metrics_off)?;
         let t0 = Instant::now();
         eprintln!("[bench] measuring {hold}s at {} players…", step.target);
         thread::sleep(Duration::from_secs(hold));
         let secs = t0.elapsed().as_secs_f64();
-        let m1 = metrics::scrape(&metrics_url)?;
+        let m1 = scrape(metrics_off)?;
         let c1 = sh.counters.snapshot();
         let lat: Vec<u32> = std::mem::take(&mut *sh.latencies.lock().expect("latency lock"));
         let lag: Vec<u32> = std::mem::take(&mut *sh.wakeup_lags.lock().expect("lag lock"));
@@ -1349,7 +1408,7 @@ fn main() -> Result<()> {
 /// Scrapes once and shows which databases the node exposes, whether each of the four required
 /// metric families is present, and which reducers/tables the `--db` / `--tables-filter`
 /// selection currently matches. Connects no players and writes nothing.
-fn dry_run(
+fn print_dry_run(
     s: &metrics::Snapshot,
     url: &str,
     db: &str,

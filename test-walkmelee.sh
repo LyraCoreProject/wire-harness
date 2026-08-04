@@ -5,13 +5,13 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 DB=lyracore
-WC=./target/debug/wire-client
+# $WC comes from scenario-lib.sh (the adapters/lyracore/wire.sh seam) — do not re-point it at the binary.
 source tools/wire-client/scenario-lib.sh
 
 GINGER=$(char_guid Ginger)
 [ -z "$GINGER" ] && { echo "[walkmelee] no Ginger" >&2; exit 1; }
 
-stay_start TEST test123 Ginger || exit 1
+stay_start TEST Ginger || exit 1
 scall debug_teleport "$GINGER" 0 -8960.0 -440.0 81.0 0 # probed LoS-clear pad (danger-zones §2)
 WOLF=$(spawn_at "$GINGER" 51000 2)
 stay_stop
@@ -20,7 +20,7 @@ WX=$(sql1 "SELECT x FROM game_world_entity WHERE guid = $WOLF")
 WY=$(sql1 "SELECT y FROM game_world_entity WHERE guid = $WOLF")
 
 RC=0
-timeout 60 "$WC" TEST test123 Ginger walkmelee "$WOLF" "$WX" "$WY" 81.0 || RC=1
+timeout 60 "$WC" TEST Ginger walkmelee "$WOLF" "$WX" "$WY" 81.0 || RC=1
 
 sqlq "DELETE FROM game_melee_attack WHERE attacker_guid = $GINGER" >/dev/null
 sqlq "DELETE FROM game_creature_spawn WHERE entry = 51000" >/dev/null

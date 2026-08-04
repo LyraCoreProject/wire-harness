@@ -7,7 +7,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 DB=lyracore
-WC=./target/debug/wire-client
+# $WC comes from scenario-lib.sh (the adapters/lyracore/wire.sh seam) — do not re-point it at the binary.
 GWLOG=${GWLOG:-/tmp/gw.log}
 source tools/wire-client/scenario-lib.sh
 
@@ -21,7 +21,7 @@ BEFORE=$(grep -c "packet-lint VIOLATION" "$GWLOG" || true)
 # live (the SET_FACTION_STANDING raw relay), and an aura-bearing cast (raw aura VALUES).
 S=/tmp/wc_lint_stay_$$
 rm -f "$S"
-( timeout 30 "$WC" TEST test123 Ginger stay "$S" 25 >/dev/null 2>&1 & )
+( timeout 30 "$WC" TEST Ginger stay "$S" 25 >/dev/null 2>&1 & )
 sleep 5
 scall debug_grant_reputation "$GINGER" 50900 10
 scall debug_grant_reputation "$GINGER" 50900 -10

@@ -27,7 +27,7 @@ orchestrate() {
 }
 orchestrate &
 ORCH=$!
-timeout 60 cargo run -q -p wire-client -- TEST test123 "$CHAR" repop "$CGUID" "$REPOP_READY"
+timeout 60 "$WC" TEST "$CHAR" repop "$CGUID" "$REPOP_READY"
 RC=$?
 wait "$ORCH" 2>/dev/null || true
 rm -f "$REPOP_READY"

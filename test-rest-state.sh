@@ -25,7 +25,7 @@ cval(){ spacetime sql lyracore "SELECT $1 FROM game_character WHERE guid = $G" 2
 sqlq "DELETE FROM game_rest_state_event WHERE character_guid = $G" >/dev/null
 sqlq "UPDATE game_character SET resting = false, rested_since_micros = 0 WHERE guid = $G" >/dev/null
 spacetime call lyracore -- debug_set_health $G 200 >/dev/null 2>&1
-stay_start TEST test123 Ginger || exit 1
+stay_start TEST Ginger || exit 1
 sleep 1
 
 # ENTER the inn: RESTED byte, resting flag on, accrual clock started.
@@ -51,7 +51,7 @@ OUT=$(mktemp)
 # The EXPECTED VALUE (4th arg) is load-bearing: this watcher's own login relays field 194 carrying
 # the pre-crossing NORMAL byte, and without it the watch passed on that and stopped before the
 # RESTED flip it exists to prove.
-timeout 30 "$WC" TEST test123 Ginger values-watch "$G" 194 20 16777216 >"$OUT" 2>&1 &
+timeout 30 "$WC" TEST Ginger values-watch "$G" 194 20 16777216 >"$OUT" 2>&1 &
 WPID=$!
 sleep 6
 scall debug_check_rest_at $G 0 "$INN_X" "$INN_Y"

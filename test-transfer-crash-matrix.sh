@@ -314,7 +314,7 @@ bring_home() {
     # requiring callers to reassign the global $DB around the call — it would otherwise poll
     # `game_world_entity` on the world shard for a character who is live on the INSTANCE shard, and
     # time out with "never went live".
-    if ! stay_start TEST test123 Ginger 60 "$IDB"; then
+    if ! stay_start TEST Ginger 60 "$IDB"; then
       echo "[xcrash] bring_home: could not open a session on '$IDB' to materialise Ginger" >&2
       return 1
     fi
@@ -326,7 +326,7 @@ bring_home() {
     fi
     stay_stop
     # The world entry on the NEXT login is what drives `settle_transfer` back to '$DB'.
-    timeout 90 "$WC" TEST test123 Ginger logout >/dev/null 2>&1
+    timeout 90 "$WC" TEST Ginger logout >/dev/null 2>&1
   fi
   if [ "$(has_char "$DB" "$guid")" != "1" ]; then
     echo "[xcrash] could not bring Ginger home to '$DB' — aborting the matrix rather than reporting" \
@@ -394,7 +394,7 @@ fi
 gw_start "" || exit 2
 GINGER=$(char_guid Ginger)
 if [ -z "$GINGER" ]; then
-  timeout 60 "$WC" TEST test123 Ginger logout >/dev/null 2>&1
+  timeout 60 "$WC" TEST Ginger logout >/dev/null 2>&1
   GINGER=$(char_guid Ginger)
 fi
 [ -n "$GINGER" ] || { echo "[xcrash] no Ginger character on '$DB'" >&2; exit 2; }
@@ -435,7 +435,7 @@ for STEP in "${STEPS[@]}"; do
   # 3. drive the portal. A HELD session is required: the transfer runs inside the client's loading
   #    screen (the WORLDPORT_ACK handler), and `stay` drains with the decoding recv() that answers
   #    SMSG_NEW_WORLD. Deadline well past the whole window — `stay` exits rc 0 on timeout, silently.
-  if ! stay_start TEST test123 Ginger 180; then
+  if ! stay_start TEST Ginger 180; then
     bad "Ginger never went live before the portal — cannot attribute what follows to the injection"
     pkill -x wire-client 2>/dev/null; MATRIX+=("HARNESS $STEP"); continue
   fi
@@ -516,7 +516,7 @@ for STEP in "${STEPS[@]}"; do
   #    re-driven forward or rolled back is the protocol's business; a character that cannot log in
   #    after a restart is a FAILURE either way.
   gw_start "" || { bad "clean gateway would not restart after the injected crash"; MATRIX+=("HARNESS $STEP"); continue; }
-  if timeout 90 "$WC" TEST test123 Ginger logout >/tmp/xcrash_reentry_${BOUNDARY}_$STEP.log 2>&1; then
+  if timeout 90 "$WC" TEST Ginger logout >/tmp/xcrash_reentry_${BOUNDARY}_$STEP.log 2>&1; then
     good "re-entry: a fresh wire session logged Ginger back into the world after the crash"
   elif grep -q 'M1 OK — in world' "/tmp/xcrash_reentry_${BOUNDARY}_$STEP.log"; then
     # The assertion is "can she get back IN", and the wire client prints M1 OK the moment she is in

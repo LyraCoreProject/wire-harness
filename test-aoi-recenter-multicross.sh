@@ -20,7 +20,7 @@ cd "$(dirname "$0")/../.."
 source tools/wire-client/scenario-lib.sh
 scenario_preflight aoi-recenter-multicross
 DFS=$(char_guid dfsdfsd)
-[ -z "$DFS" ] && timeout 60 "$WC" TEST2 test123 dfsdfsd logout >/dev/null 2>&1 && DFS=$(char_guid dfsdfsd)
+[ -z "$DFS" ] && timeout 60 "$WC" TEST2 dfsdfsd logout >/dev/null 2>&1 && DFS=$(char_guid dfsdfsd)
 [ -z "$DFS" ] && { echo "[orch] no dfsdfsd character" >&2; exit 1; }
 
 # Geometry: observer starts at pad O, loops E/N/W/S around it and back; peer (mover) sits at pad N,
@@ -35,20 +35,20 @@ CMD_OBS=/tmp/ws_aoimc_cmd_$$; ACK_OBS=/tmp/ws_aoimc_ack_$$; CMD_MOV=/tmp/ws_aoim
 OBS_READY=/tmp/ws_aoimc_obs_ready_$$; MOV_READY=/tmp/ws_aoimc_mover_ready_$$
 rm -f "$CMD_OBS" "$ACK_OBS" "$CMD_MOV" "$OBS_READY" "$MOV_READY"
 
-stay_start TEST test123 Ginger || exit 1
+stay_start TEST Ginger || exit 1
 scall debug_teleport "$GINGER" 0 $OX $OY $OZ 0
 stay_stop
-stay_start TEST2 test123 dfsdfsd || exit 1
+stay_start TEST2 dfsdfsd || exit 1
 scall debug_teleport "$DFS" 0 $FX $FY $FZ 0
 stay_stop
 
 # mover first (so the observer's login precondition sees it already in-world but FAR)
-timeout 240 "$WC" TEST2 test123 dfsdfsd aoi-mover "$CMD_MOV" "$MOV_READY" >/tmp/ws_aoimc_mover.log 2>&1 &
+timeout 240 "$WC" TEST2 dfsdfsd aoi-mover "$CMD_MOV" "$MOV_READY" >/tmp/ws_aoimc_mover.log 2>&1 &
 MOVER=$!
 wait_for_file 20 "$MOV_READY" || { echo "[orch] mover never ready" >&2; kill $MOVER 2>/dev/null; exit 1; }
 rm -f "$MOV_READY"
 
-timeout 240 "$WC" TEST test123 Ginger aoi-observer "$DFS" "$CMD_OBS" "$ACK_OBS" "$OBS_READY" >/tmp/ws_aoimc_observer.log 2>&1 &
+timeout 240 "$WC" TEST Ginger aoi-observer "$DFS" "$CMD_OBS" "$ACK_OBS" "$OBS_READY" >/tmp/ws_aoimc_observer.log 2>&1 &
 OBS=$!
 wait_for_file 20 "$OBS_READY" || { echo "[orch] observer never ready (peer visible at login?)" >&2; cat /tmp/ws_aoimc_observer.log; kill $OBS $MOVER 2>/dev/null; exit 1; }
 rm -f "$OBS_READY"

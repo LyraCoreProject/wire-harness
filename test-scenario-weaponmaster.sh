@@ -33,7 +33,7 @@ ORIG_LEVEL=$(sql1 "SELECT level FROM game_character WHERE guid = $GINGER")
 sqlq "DELETE FROM game_player_skill WHERE character_guid = $GINGER AND skill_line = $AXE_LINE" >/dev/null
 scall debug_set_money "$GINGER" 1000
 
-stay_start TEST test123 Ginger || exit 1
+stay_start TEST Ginger || exit 1
 scall debug_teleport "$GINGER" 0 $PAD_X $PAD_Y $PAD_Z 0
 scall debug_set_level "$GINGER" $TEST_LEVEL
 TRAINER=$(spawn_at "$GINGER" $WEAPON_MASTER_ENTRY 4)

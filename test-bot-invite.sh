@@ -62,7 +62,7 @@ assert_eq "staging: …and no session (game_character.online false)" "$(sql1 "SE
 # deadline: a hang must report as a failure, never as a pass.
 HOLD=/tmp/ws_bot_invite_$$
 rm -f "$HOLD" "$HOLD.ingroup"
-timeout 180 "$WC" TEST test123 Ginger party-bots "$HOLD" Dpsbot1 >/tmp/ws_bot_invite.log 2>&1 &
+timeout 180 "$WC" TEST Ginger party-bots "$HOLD" Dpsbot1 >/tmp/ws_bot_invite.log 2>&1 &
 LEADER=$!
 if wait_for_file 60 "$HOLD.ingroup"; then
   step_ok "wire: the player's client decoded SMSG_GROUP_LIST carrying the bot (invite answered)"

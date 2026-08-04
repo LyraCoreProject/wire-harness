@@ -23,7 +23,7 @@ cd "$(dirname "$0")/../.."
 source scripts/import-manifest.sh
 
 DB=lyracore
-WC=./target/debug/wire-client
+# $WC comes from scenario-lib.sh (the adapters/lyracore/wire.sh seam) — do not re-point it at the binary.
 LYRACORE_PORT=8085
 LOGDIR="${WS_LOGDIR:-/tmp/wire-suite}"
 mkdir -p "$LOGDIR"
@@ -110,7 +110,7 @@ done
 # lyracore-world-2; a duplicate created by an old create-on-miss fallback can also shadow her at
 # login) and every test below assumes she is. dfsdfsd has no such shard-drift history (say-range/
 # move-relay keep her pinned near Ginger's canonical spot) so the plain check still covers her.
-[ -z "$(char_guid dfsdfsd)" ] && timeout 60 "$WC" TEST2 test123 dfsdfsd logout >/dev/null 2>&1
+[ -z "$(char_guid dfsdfsd)" ] && timeout 60 "$WC" TEST2 dfsdfsd logout >/dev/null 2>&1
 GINGER=$(ensure_ginger_home Ginger); DFS=$(char_guid dfsdfsd)
 if [ -z "$GINGER" ] || [ -z "$DFS" ]; then
   echo "[suite] FATAL: fixture characters missing (Ginger=$GINGER dfsdfsd=$DFS)" >&2
@@ -135,41 +135,41 @@ HAS_HEALER=$(countq "game_world_entity WHERE entry = $GATE_HEALER_ENTRY")
 # ===================================================================================
 
 t_logout()           { bash tools/wire-client/test-logout.sh; }
-t_who()              { timeout 60 "$WC" TEST test123 Ginger who; }
-t_roll()             { timeout 60 "$WC" TEST test123 Ginger roll 1 100; }
-t_text_emote()       { timeout 60 "$WC" TEST test123 Ginger text-emote; }
-t_played_time()      { timeout 60 "$WC" TEST test123 Ginger played-time; }
-t_played_time_live() { timeout 60 "$WC" TEST test123 Ginger played-time-live 3; }
+t_who()              { timeout 60 "$WC" TEST Ginger who; }
+t_roll()             { timeout 60 "$WC" TEST Ginger roll 1 100; }
+t_text_emote()       { timeout 60 "$WC" TEST Ginger text-emote; }
+t_played_time()      { timeout 60 "$WC" TEST Ginger played-time; }
+t_played_time_live() { timeout 60 "$WC" TEST Ginger played-time-live 3; }
 # decode-smoke: no ids asserted — on a no-import sandbox the starter book is loadout-fallback;
 # the probe still proves SMSG_INITIAL_SPELLS arrives and decodes.
-t_initial_spells()   { timeout 60 "$WC" TEST test123 Ginger initial-spells; }
+t_initial_spells()   { timeout 60 "$WC" TEST Ginger initial-spells; }
 # slot 15 = main-hand; the starter loadout grants a weapon even on a no-import node (Warrior fallback).
-t_char_enum_gear()   { timeout 60 "$WC" TEST test123 Ginger char-enum-gear 15; }
+t_char_enum_gear()   { timeout 60 "$WC" TEST Ginger char-enum-gear 15; }
 # entry 25 (Worn Shortsword) is init-seeded everywhere; asserts the reply decodes with its known armor.
-t_query_item()       { timeout 60 "$WC" TEST test123 Ginger query-item 25 0; }
-t_char_delete()      { timeout 60 "$WC" TEST test123 Wsthrowaway char-delete; }
+t_query_item()       { timeout 60 "$WC" TEST Ginger query-item 25 0; }
+t_char_delete()      { timeout 60 "$WC" TEST Wsthrowaway char-delete; }
 # 180: a FRESH never-logged-in character must already carry gear on char select — the loadout is
 # granted at creation. Uses (and deletes) its own throwaway so first-login grants can't mask it.
-t_char_create_gear() { timeout 60 "$WC" TEST test123 Wsnakedcheck char-create-gear 15; }
+t_char_create_gear() { timeout 60 "$WC" TEST Wsnakedcheck char-create-gear 15; }
 
 t_bindpoint() {
   # Fixture: home at A, then move to B and logout — SMSG_BINDPOINTUPDATE must carry A (not B).
   local AX=-8873.0 AY=-134.0 AZ=81.0 BX=-8968.0 BY=-129.0 BZ=83.4
-  stay_start TEST test123 Ginger || exit 1
+  stay_start TEST Ginger || exit 1
   spacetime call "$DB" -- debug_teleport "$GINGER" 0 $AX $AY $AZ 0 || { stay_stop; exit 1; }
   spacetime call "$DB" -- debug_bind_home "$GINGER" || { stay_stop; exit 1; }
   spacetime call "$DB" -- debug_teleport "$GINGER" 0 $BX $BY $BZ 0 || { stay_stop; exit 1; }
   stay_stop
-  timeout 60 "$WC" TEST test123 Ginger bindpoint $AX $AY $AZ
+  timeout 60 "$WC" TEST Ginger bindpoint $AX $AY $AZ
 }
 
 t_inspect() {
   # dfsdfsd parked <10yd from Ginger's stored position; far guid is a nonexistent player.
   local pos gx gy gz
   pos=$(char_pos "$GINGER"); gx=$(awk -F'|' '{print $1+0}' <<<"$pos"); gy=$(awk -F'|' '{print $2+0}' <<<"$pos"); gz=$(awk -F'|' '{print $3+0}' <<<"$pos")
-  stay_start TEST2 test123 dfsdfsd || exit 1
+  stay_start TEST2 dfsdfsd || exit 1
   spacetime call "$DB" -- debug_teleport "$DFS" 0 "$(awk "BEGIN{print $gx+3}")" "$gy" "$gz" 0 || { stay_stop; exit 1; }
-  timeout 60 "$WC" TEST test123 Ginger inspect "$DFS" 999999999
+  timeout 60 "$WC" TEST Ginger inspect "$DFS" 999999999
   local rc=$?
   stay_stop
   return $rc
@@ -177,8 +177,8 @@ t_inspect() {
 
 t_friend() {
   # friend-list Online assertion needs the target connected — park dfsdfsd in a stay session.
-  stay_start TEST2 test123 dfsdfsd || exit 1
-  timeout 60 "$WC" TEST test123 Ginger friend dfsdfsd
+  stay_start TEST2 dfsdfsd || exit 1
+  timeout 60 "$WC" TEST Ginger friend dfsdfsd
   local rc=$?
   stay_stop
   return $rc
@@ -234,7 +234,7 @@ t_init_factions() {
   local want
   want=$(sqlq "SELECT standing FROM game_player_reputation WHERE character_guid = $GINGER AND faction_id = 50900" | grep -oE '\-?[0-9]+' | tail -1)
   [ -z "$want" ] && skip "debug_grant_reputation left no game_player_reputation row for fixture faction 50900"
-  timeout 60 "$WC" TEST test123 Ginger init-factions 60 "$want"
+  timeout 60 "$WC" TEST Ginger init-factions 60 "$want"
 }
 
 t_levelup_info() {
@@ -253,7 +253,7 @@ t_levelup_info() {
     spacetime call "$DB" -- debug_kill_nearest "$GINGER" 51000 >/dev/null 2>&1
   ) &
   local orch=$!
-  timeout 90 "$WC" TEST test123 Ginger levelup-info "$ready" 1
+  timeout 90 "$WC" TEST Ginger levelup-info "$ready" 1
   local rc=$?
   wait "$orch" 2>/dev/null
   spacetime call "$DB" -- debug_set_xp_rate 1 >/dev/null 2>&1 || true
