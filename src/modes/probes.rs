@@ -557,7 +557,8 @@ fn values_watch(
                 }
                 for &(idx, v) in &u.fields {
                     println!("[values] guid={guid:#x} field {idx} = {v} ({v:#x})");
-                    if idx == field && expect.is_none_or(|want| want == v) {
+                    // MSRV 1.80 (`Option::is_none_or` needs 1.82): `map_or(true, ..)` is equivalent.
+                    if idx == field && expect.map_or(true, |want| want == v) {
                         println!("[wire] VALUES-WATCH PASS \u{2713} field {field} arrived");
                         return Ok(());
                     }
