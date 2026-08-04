@@ -86,18 +86,44 @@ struct DecodedFrame {
     actual_body_len: usize,
 }
 
+/// A frame this session is in the middle of assembling from the wire, spanning however many
+/// [`read_guarded_world_message`] calls it takes to get all the bytes (issue #209 fix): the header
+/// has already been read in full and decrypted EXACTLY ONCE (`header_raw`/`opcode`/`payload_len`),
+/// `parser_dec` is the pre-header-decrypt cipher clone the generated decoder needs, and `body` is
+/// however many of `payload_len` raw (still-encrypted) body bytes have been pulled off the socket
+/// so far. Kept on [`FrameLog`] so a read timeout mid-body doesn't lose it.
+struct PendingFrame {
+    opcode: u16,
+    payload_len: usize,
+    header_raw: [u8; 4],
+    parser_dec: DecrypterHalf,
+    body: Vec<u8>,
+}
+
 /// Per-session crash-capture state (issue #209 probe, deliverable 1): a ring buffer of the last
 /// [`CRASH_RING_CAPACITY`] successfully-decoded frames, plus whatever [`read_guarded_world_message`]
 /// read of the CURRENT (possibly failing) frame's header/body before it gave up. [`WireClient::recv`]
 /// updates this on every attempt and — only at the point a decode failure actually ends the session
 /// (the panic path, the huge-alloc guard, or the accumulated-skip desync bailout) — dumps it under
 /// `crash_dump_dir()`, turning "it crashed" into the exact byte sequence that did it.
+///
+/// Also carries the #209 read-timeout fix's resumable-read state: `pending_header` (bytes of the
+/// 4-byte header collected so far, when a header read is in flight) and `pending_frame` (the rest,
+/// once the header is complete). Both survive across separate [`read_guarded_world_message`] calls
+/// — the shape a caller like `recv_for` produces when it swallows a socket-timeout `Err` and retries
+/// — so a timeout landing mid multi-byte read never drops already-consumed bytes onto the floor.
+/// Losing those bytes was issue #209's actual bug: the next call would resume reading from whatever
+/// stream position the partial read left off at, decrypt THOSE (wrong) 4 bytes as if they were a
+/// fresh header, and permanently desync the header-cipher's `index`/`previous_value` state from the
+/// real byte stream — every later frame decodes as garbage from that point on.
 struct FrameLog {
     label: String,
     ring: std::collections::VecDeque<DecodedFrame>,
     last_header_raw: [u8; 4],
     last_opcode: Option<u16>,
     last_body_preview: Vec<u8>,
+    pending_header: Vec<u8>,
+    pending_frame: Option<PendingFrame>,
 }
 
 impl FrameLog {
@@ -108,6 +134,8 @@ impl FrameLog {
             last_header_raw: [0; 4],
             last_opcode: None,
             last_body_preview: Vec::new(),
+            pending_header: Vec::new(),
+            pending_frame: None,
         }
     }
 
@@ -255,9 +283,47 @@ fn unsafe_frame(opcode: u16, payload_prefix: &[u8], reason: impl Into<String>) -
     })
 }
 
-/// Read the encrypted header and only the first few payload bytes before invoking the generated
-/// decoder. The rest of the payload streams straight through; cloning the pre-header cipher state
-/// lets the decoder see the original encrypted header while the live state advances exactly once.
+/// Fill `acc` up to `target` bytes by reading from `r`, appending every successfully-read chunk
+/// immediately (not just on full completion).
+///
+/// This is the issue #209 fix's core primitive: a caller like `recv_for` treats a socket-read
+/// timeout as "the world is quiet, try again" and calls back in — but the ORIGINAL code read every
+/// multi-byte field (the 4-byte header, the body) into a fresh stack buffer via `read_exact`, whose
+/// std impl discards whatever it had already read into that buffer the moment any call errors. A
+/// timeout landing after 1-3 of a header's 4 bytes had already arrived (more likely the fuller a
+/// socket gets under crowd load, since more bytes in flight means more chances a read syscall
+/// returns short before the rest lands within the read-timeout window) meant those bytes were gone:
+/// the retry started a fresh `read_exact` at the CURRENT stream position — now offset by however
+/// many bytes were silently dropped — decrypted THOSE wrong bytes as a header, and the header
+/// cipher's `index`/`previous_value` (a running, per-byte-position stream state) never recovered.
+/// Buffering into `acc`, which the caller persists across retries in [`FrameLog`], means a timeout
+/// only ever pauses a read — it can never rewind or skip the stream.
+fn fill_resumable<R: Read>(r: &mut R, acc: &mut Vec<u8>, target: usize) -> std::io::Result<()> {
+    while acc.len() < target {
+        let mut chunk = vec![0u8; target - acc.len()];
+        let n = r.read(&mut chunk)?;
+        if n == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "connection closed mid-frame",
+            ));
+        }
+        acc.extend_from_slice(&chunk[..n]);
+    }
+    Ok(())
+}
+
+/// Read one full frame (header + body) off the wire and hand it to the generated decoder.
+///
+/// Issue #209 fix: the header and body are each assembled into a persistent buffer on `log`
+/// ([`FrameLog::pending_header`] / [`FrameLog::pending_frame`]) via [`fill_resumable`] rather than a
+/// stack-local `read_exact` — so if this call returns a socket-timeout error partway through either
+/// one, the bytes already read are NOT lost; the next call to this function resumes filling the same
+/// buffer instead of restarting at (and permanently desyncing from) the wrong stream position. The
+/// header is decrypted via `dec.decrypt_server_header` exactly once, only after all 4 raw bytes are
+/// in hand — never partially, never twice. Once the full body is buffered, decoding runs entirely
+/// in memory (a `Cursor`, not the live socket), so nothing past this point can time out or leave the
+/// frame half-consumed.
 ///
 /// `log` records the attempt (issue #209 crash-capture, deliverable 1) regardless of outcome: the
 /// header/opcode/body-preview are stashed BEFORE the decode is attempted (so a header/payload read
@@ -268,44 +334,70 @@ fn read_guarded_world_message<R: Read>(
     dec: &mut DecrypterHalf,
     log: &mut FrameLog,
 ) -> Result<WorldSmsg> {
-    let mut parser_dec = dec.clone();
-    let mut encrypted_header = [0u8; 4];
-    r.read_exact(&mut encrypted_header)
-        .map_err(|e| anyhow!("world frame header: {e}"))?;
-    let header = dec.decrypt_server_header(encrypted_header);
-    if header.size < 2 {
-        log.record_attempt(encrypted_header, header.opcode, &[]);
-        return Err(unsafe_frame(
-            header.opcode,
-            &[],
-            format!(
-                "invalid server-frame size {} (the size must include the 2-byte opcode)",
-                header.size
-            ),
-        ));
-    }
+    if log.pending_frame.is_none() {
+        // Header phase: resume (or start) filling the 4 raw header bytes. On error, whatever was
+        // read this call and any prior call is already in `log.pending_header` — nothing lost.
+        fill_resumable(r, &mut log.pending_header, 4)
+            .map_err(|e| anyhow!("world frame header: {e}"))?;
 
-    let payload_len = usize::from(header.size - 2);
-    let preview_len = payload_len.min(FRAME_DIAGNOSTIC_BYTES);
-    let mut preview = vec![0u8; preview_len];
-    r.read_exact(&mut preview)
-        .map_err(|e| anyhow!("world frame payload: {e}"))?;
-    log.record_attempt(encrypted_header, header.opcode, &preview);
+        // Clone BEFORE the real `dec` advances — the generated decoder re-derives the header from
+        // this pre-advance clone as part of its own decode, exactly as the pre-#209-fix code did.
+        let parser_dec = dec.clone();
+        let mut header_raw = [0u8; 4];
+        header_raw.copy_from_slice(&log.pending_header);
+        log.pending_header.clear();
 
-    if header.opcode == SMSG_COMPRESSED_MOVES_OPCODE {
-        if payload_len < 4 {
+        let header = dec.decrypt_server_header(header_raw);
+        if header.size < 2 {
+            log.record_attempt(header_raw, header.opcode, &[]);
             return Err(unsafe_frame(
                 header.opcode,
+                &[],
+                format!(
+                    "invalid server-frame size {} (the size must include the 2-byte opcode)",
+                    header.size
+                ),
+            ));
+        }
+        let payload_len = usize::from(header.size - 2);
+        log.pending_frame = Some(PendingFrame {
+            opcode: header.opcode,
+            payload_len,
+            header_raw,
+            parser_dec,
+            body: Vec::new(),
+        });
+    }
+
+    // Body phase: resume (or start) filling `payload_len` raw body bytes. Left in `log.pending_frame`
+    // (not yet taken) so a timeout here keeps the header decrypt result AND the partial body.
+    {
+        let pf = log.pending_frame.as_mut().expect("just ensured Some above");
+        fill_resumable(r, &mut pf.body, pf.payload_len)
+            .map_err(|e| anyhow!("world frame payload: {e}"))?;
+    }
+    // The full frame is in memory now — take ownership; a later call starts the NEXT frame fresh.
+    let PendingFrame { opcode, payload_len, header_raw, mut parser_dec, body } =
+        log.pending_frame.take().expect("just ensured Some above");
+
+    let preview_len = payload_len.min(FRAME_DIAGNOSTIC_BYTES);
+    let preview = body[..preview_len].to_vec();
+    log.record_attempt(header_raw, opcode, &preview);
+
+    if opcode == SMSG_COMPRESSED_MOVES_OPCODE {
+        if payload_len < 4 {
+            return Err(unsafe_frame(
+                opcode,
                 &preview,
                 format!(
                     "compressed-moves payload is {payload_len} bytes; the decompressed-size prefix needs 4"
                 ),
             ));
         }
-        let declared = u32::from_le_bytes(preview[..4].try_into().unwrap()) as usize;
+        let declared = u32::from_le_bytes(body[..4].try_into().unwrap()) as usize;
         if declared > MAX_DECOMPRESSED_FRAME_BYTES {
             return Err(unsafe_frame(
-                header.opcode,
+                opcode,
                 &preview,
                 format!(
                     "declares {declared} decompressed bytes; limit is {MAX_DECOMPRESSED_FRAME_BYTES}"
@@ -314,22 +406,21 @@ fn read_guarded_world_message<R: Read>(
         }
     }
 
-    let remaining = payload_len - preview_len;
     let consumed = std::rc::Rc::new(std::cell::Cell::new(0usize));
-    let tail = CountingRead { inner: r.take(remaining as u64), consumed: consumed.clone() };
-    let mut frame = Cursor::new(encrypted_header).chain(Cursor::new(preview.as_slice())).chain(tail);
+    let counting_body = CountingRead { inner: Cursor::new(body), consumed: consumed.clone() };
+    let mut frame = Cursor::new(header_raw).chain(counting_body);
     let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         WorldSmsg::read_encrypted(&mut frame, &mut parser_dec)
     }));
     match decoded {
         Ok(Ok(m)) => {
-            let actual_body_len = preview_len + consumed.get();
-            log.record_decoded(header.opcode, payload_len, actual_body_len);
+            let actual_body_len = consumed.get();
+            log.record_decoded(opcode, payload_len, actual_body_len);
             Ok(m)
         }
         Ok(Err(e)) => Err(anyhow::Error::new(e)),
         Err(payload) => Err(unsafe_frame(
-            header.opcode,
+            opcode,
             &preview,
             format!("decoder panicked: {}", panic_message(payload.as_ref())),
         )),
@@ -1312,6 +1403,167 @@ mod tests {
         assert!(text.contains("decoder panicked"), "missing the actual error text: {text}");
 
         cleanup_dumps_labeled(label);
+    }
+
+    /// Mock [`Read`] for the #209 read-timeout-fix tests: a scripted sequence of "read steps" that
+    /// can deliver fewer bytes than requested (a legitimate short read, same as a real socket under
+    /// load) or fail with a `WouldBlock` error (what `TcpStream` read-timeout expiry actually
+    /// produces). Once the script is exhausted it falls back to delivering everything remaining in
+    /// one shot, so a test only has to script the interesting fragmentation points.
+    struct ScriptedReader {
+        data: Vec<u8>,
+        pos: usize,
+        script: std::collections::VecDeque<ReadStep>,
+    }
+
+    enum ReadStep {
+        /// Deliver up to this many bytes (capped by the caller's buffer and what's left).
+        Bytes(usize),
+        /// Fail this call exactly like an expired socket read timeout.
+        Timeout,
+    }
+
+    impl Read for ScriptedReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let take_from = |pos: &mut usize, data: &[u8], buf: &mut [u8], n: usize| {
+                let take = n.min(buf.len()).min(data.len() - *pos);
+                buf[..take].copy_from_slice(&data[*pos..*pos + take]);
+                *pos += take;
+                take
+            };
+            match self.script.pop_front() {
+                Some(ReadStep::Timeout) => Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "would block (scripted timeout)",
+                )),
+                Some(ReadStep::Bytes(n)) => Ok(take_from(&mut self.pos, &self.data, buf, n)),
+                None => Ok(take_from(&mut self.pos, &self.data, buf, buf.len())),
+            }
+        }
+    }
+
+    /// Raw wire bytes for a fixed 3-frame sequence shared by the fragmentation tests below: an
+    /// empty-body frame, an 8-byte-body frame (so body fragmentation has something to bite), then
+    /// another empty-body frame.
+    fn fragmentation_test_wire(enc: &mut EncrypterHalf) -> Vec<u8> {
+        let mut wire = Vec::new();
+        wire.extend_from_slice(&enc.encrypt_server_header(2, 0x004D)); // SMSG_LOGOUT_COMPLETE
+        wire.extend_from_slice(&enc.encrypt_server_header(10, 0x01CD)); // SMSG_PLAYED_TIME
+        wire.extend_from_slice(&1234u32.to_le_bytes());
+        wire.extend_from_slice(&99u32.to_le_bytes());
+        wire.extend_from_slice(&enc.encrypt_server_header(2, 0x004F)); // SMSG_LOGOUT_CANCEL_ACK
+        wire
+    }
+
+    /// Drive [`read_guarded_world_message`] the way `WireClient::recv`'s callers actually do under a
+    /// socket read timeout (`recv_for`, `recv_raw_for`, and the hand-rolled loops `is_read_timeout`
+    /// exists for): swallow a timeout error and call straight back in with the SAME `dec`/`log` —
+    /// exactly the retry shape that exposed issue #209 (a lost partial read permanently desyncing the
+    /// header cipher). Returns the decoded messages in order; panics on any OTHER kind of error.
+    fn drain_with_retries(
+        r: &mut ScriptedReader,
+        dec: &mut DecrypterHalf,
+        log: &mut FrameLog,
+        count: usize,
+    ) -> Vec<WorldSmsg> {
+        let mut out = Vec::new();
+        let mut retries = 0;
+        while out.len() < count {
+            match read_guarded_world_message(r, dec, log) {
+                Ok(m) => out.push(m),
+                Err(e) => {
+                    let msg = e.to_string().to_lowercase();
+                    assert!(msg.contains("would block"), "unexpected non-timeout error: {e}");
+                    retries += 1;
+                    assert!(retries < 1000, "retried too many times — likely an infinite loop");
+                }
+            }
+        }
+        out
+    }
+
+    /// Issue #209's actual fix, pinned: fragmenting the exact same wire bytes with 1-byte dribbles
+    /// and timeouts landing mid-header and mid-body — then retrying exactly like a real caller does
+    /// — must decode to the IDENTICAL sequence of messages as reading the same bytes with no
+    /// fragmentation at all. Before the fix, a timeout mid multi-byte read silently dropped the bytes
+    /// already read and resumed at the wrong stream offset, permanently desyncing the header cipher;
+    /// this pins that it no longer does.
+    #[test]
+    fn resumable_read_survives_adversarial_fragmentation_and_matches_the_unfragmented_decode() {
+        let (_, crypto) =
+            ProofSeed::new().into_client_header_crypto(&ns("TEST").unwrap(), [7; 40], 0x1234_5678);
+        let (mut enc, dec) = crypto.split();
+        let wire = fragmentation_test_wire(&mut enc);
+
+        // Baseline: the mock's "script exhausted" fallback delivers everything a single `read()`
+        // call asks for — i.e. no artificial fragmentation at all.
+        let mut baseline_reader =
+            ScriptedReader { data: wire.clone(), pos: 0, script: Default::default() };
+        let mut baseline_dec = dec.clone();
+        let mut baseline_log = FrameLog::new("BASELINE");
+        let baseline = drain_with_retries(&mut baseline_reader, &mut baseline_dec, &mut baseline_log, 3);
+
+        // Adversarial: 1-byte dribbles, a timeout mid-header (on two different frames), and a
+        // timeout mid-body (twice, on the 8-byte-body frame) — then the script runs out and the
+        // fallback delivers the rest (frame 3's header) in one shot.
+        let script = std::collections::VecDeque::from([
+            ReadStep::Bytes(1), // header1 byte 0
+            ReadStep::Timeout,  // timeout mid-header1
+            ReadStep::Bytes(1), // header1 byte 1
+            ReadStep::Bytes(2), // header1 bytes 2-3 (complete) — empty body, no body read
+            ReadStep::Bytes(1), // header2 byte 0
+            ReadStep::Bytes(1), // header2 byte 1
+            ReadStep::Timeout,  // timeout mid-header2
+            ReadStep::Bytes(2), // header2 bytes 2-3 (complete)
+            ReadStep::Bytes(3), // body2 bytes 0-2 (of 8)
+            ReadStep::Timeout,  // timeout mid-body2
+            ReadStep::Bytes(2), // body2 bytes 3-4
+            ReadStep::Timeout,  // timeout mid-body2 again
+            ReadStep::Bytes(3), // body2 bytes 5-7 (complete)
+        ]);
+        let mut adversarial_reader = ScriptedReader { data: wire, pos: 0, script };
+        let mut adversarial_dec = dec.clone();
+        let mut adversarial_log = FrameLog::new("ADVERSARIAL");
+        let adversarial =
+            drain_with_retries(&mut adversarial_reader, &mut adversarial_dec, &mut adversarial_log, 3);
+
+        assert_eq!(baseline.len(), 3);
+        assert_eq!(baseline, adversarial, "fragmented decode diverged from the clean decode");
+        assert!(matches!(baseline[0], WorldSmsg::SMSG_LOGOUT_COMPLETE));
+        assert!(matches!(baseline[2], WorldSmsg::SMSG_LOGOUT_CANCEL_ACK));
+        match &baseline[1] {
+            WorldSmsg::SMSG_PLAYED_TIME(p) => {
+                assert_eq!(p.total_played_time, 1234);
+                assert_eq!(p.level_played_time, 99);
+            }
+            other => panic!("expected SMSG_PLAYED_TIME, got {other:?}"),
+        }
+    }
+
+    /// A single byte at a time, for EVERY byte in the frame (not just at a few chosen points) — the
+    /// most extreme legal fragmentation a real (if pathological) socket could produce, with no
+    /// timeouts involved at all. Guards the resumable-fill loop itself, independent of the
+    /// timeout-retry path the test above exercises.
+    #[test]
+    fn resumable_read_survives_single_byte_dribbles_with_no_timeouts() {
+        let (_, crypto) =
+            ProofSeed::new().into_client_header_crypto(&ns("TEST").unwrap(), [7; 40], 0x1234_5678);
+        let (mut enc, dec) = crypto.split();
+        let wire = fragmentation_test_wire(&mut enc);
+
+        let mut baseline_reader =
+            ScriptedReader { data: wire.clone(), pos: 0, script: Default::default() };
+        let mut baseline_dec = dec.clone();
+        let mut baseline_log = FrameLog::new("BASELINE-DRIBBLE");
+        let baseline = drain_with_retries(&mut baseline_reader, &mut baseline_dec, &mut baseline_log, 3);
+
+        let script = std::collections::VecDeque::from_iter((0..wire.len()).map(|_| ReadStep::Bytes(1)));
+        let mut dribble_reader = ScriptedReader { data: wire, pos: 0, script };
+        let mut dribble_dec = dec.clone();
+        let mut dribble_log = FrameLog::new("DRIBBLE");
+        let dribbled = drain_with_retries(&mut dribble_reader, &mut dribble_dec, &mut dribble_log, 3);
+
+        assert_eq!(baseline, dribbled, "byte-at-a-time decode diverged from the clean decode");
     }
 
     /// The ring buffer is BOUNDED (`CRASH_RING_CAPACITY`) — a long-lived session must not grow its
