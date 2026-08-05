@@ -4,7 +4,7 @@
 # heartbeat-stream walk, which unlocks range/leash/AOI scenarios headlessly.
 set -uo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/adapter-env.sh" # two roots; cds to $LYRACORE_DIR
-DB=lyracore
+DB=${DB:-lyracore}
 # $WC comes from scenario-lib.sh (the adapters/lyracore/wire.sh seam) — do not re-point it at the binary.
 source "$ADAPTER_DIR/scenario-lib.sh"
 

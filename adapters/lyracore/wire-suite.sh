@@ -22,7 +22,7 @@ set -uo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/adapter-env.sh" # two roots; cds to $LYRACORE_DIR
 source scripts/import-manifest.sh
 
-DB=lyracore
+DB=${DB:-lyracore}
 # $WC comes from scenario-lib.sh (the adapters/lyracore/wire.sh seam) — do not re-point it at the binary.
 LYRACORE_PORT=8085
 LOGDIR="${WS_LOGDIR:-/tmp/wire-suite}"

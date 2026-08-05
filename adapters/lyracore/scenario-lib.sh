@@ -4,7 +4,10 @@
 # per-scenario pad via a short stay session, (3) runs the wire-client scenario mode, (4) sql-asserts
 # server state at each seam, (5) tears down every spawned row and ASSERTS the teardown.
 
-DB=lyracore
+# The world shard these orchestrators drive. `${DB:-}` rather than a bare assignment so a caller
+# (LyraCore's adapters/lyracore/run-suite.sh --database, #246) can point a run at another shard
+# without editing a pinned release; unset, it is the dev stack's default shard exactly as before.
+DB=${DB:-lyracore}
 # THE CLIENT IS REACHED THROUGH THE ADAPTER, NEVER DIRECTLY (#244). `vanilla-wire` is a standalone
 # build-5875 client with no default account, no default password and no knowledge of this project;
 # adapters/lyracore/wire.sh is where this repo's fixture credentials, class default and endpoints

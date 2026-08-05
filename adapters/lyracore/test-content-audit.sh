@@ -8,7 +8,7 @@
 # (missing giver / bad objective) or a class ability (unmapped effect) fails HERE, headlessly.
 set -uo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/adapter-env.sh" # two roots; cds to $LYRACORE_DIR
-DB=lyracore
+DB=${DB:-lyracore}
 FAILED=0
 ok()   { echo "[audit] OK: $*"; }
 fail() { echo "[audit] FAIL: $*" >&2; FAILED=1; }

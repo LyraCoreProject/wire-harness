@@ -5,7 +5,7 @@ set -u
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/adapter-env.sh" # two roots; cds to $LYRACORE_DIR
 . "$ADAPTER_DIR/scenario-lib.sh"
 # $WC comes from scenario-lib.sh (the adapters/lyracore/wire.sh seam) — do not re-point it at the binary.
-DB=lyracore
+DB=${DB:-lyracore}
 WORLD2=lyracore-world-2
 
 # The live seam (docs/region-sharding.md / SESSION-HANDOFF): region 2 (Goldshire, gx 530-545,
