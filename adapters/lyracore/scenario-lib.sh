@@ -103,6 +103,42 @@ leave_any_group() { # $1=character guid
   return 0
 }
 
+# Bridge legacy GW_* topology vars to their LYRACORE_* counterparts (LyraCore issue #265).
+#
+# A stack launched before the #259 rebrand still exports GW_SHARD_MAP/GW_REALM_CORE/etc, but the
+# lyracore-gateway binary these scripts relaunch into only reads LYRACORE_*. Harvesting the old
+# process's environment verbatim and re-execing the new binary with it is the exact silent-topology-
+# loss failure danger-zones warns about: it LOOKS like a restart, starts clean, and quietly drops
+# Kalimdor/instances/realm-core/AOI routing. Bridging makes restart_gateway safe on both a
+# pre-cutover stack (only GW_* present) and a post-cutover one (only LYRACORE_* present, nothing to
+# bridge) without guessing which era the running process belongs to.
+#
+# $@ = harvested "KEY=VALUE" env lines. Echoes each input line back unchanged, then for every
+# GW_X=v that has no LYRACORE_X already among the inputs, also echoes LYRACORE_X=v. No grep -P, no
+# associative arrays, no bash-4-only builtins — plain case/glob matching so this runs under the
+# stock bash macOS ships too.
+bridge_gw_lyracore_env() {
+  local line key suffix check have
+  for line in "$@"; do
+    printf '%s\n' "$line"
+  done
+  for line in "$@"; do
+    case "$line" in
+      GW_*=*)
+        key=${line%%=*}
+        suffix=${key#GW_}
+        have=0
+        for check in "$@"; do
+          case "$check" in
+            "LYRACORE_${suffix}="*) have=1; break ;;
+          esac
+        done
+        [ "$have" -eq 0 ] && printf 'LYRACORE_%s=%s\n' "$suffix" "${line#*=}"
+        ;;
+    esac
+  done
+}
+
 # Restart the gateway WITH ITS OWN ENVIRONMENT. $1 = log path (default /tmp/gw.log).
 #
 # A test that relaunches the gateway from a hardcoded command silently redefines the realm's
@@ -126,7 +162,9 @@ restart_gateway() {
   fi
   [ -x "$bin" ] || { echo "[lib] restart_gateway: cannot locate the gateway binary ($bin)" >&2; return 1; }
   local envs=()
-  while IFS= read -r line; do envs+=("$line"); done < <(tr '\0' '\n' < "/proc/$pid/environ" | grep -E '^(GW_[A-Z_]*|RUST_LOG)=')
+  local -a harvested=()
+  while IFS= read -r line; do harvested+=("$line"); done < <(tr '\0' '\n' < "/proc/$pid/environ" | grep -E '^(LYRACORE_[A-Z_]*|GW_[A-Z_]*|RUST_LOG)=')
+  while IFS= read -r line; do envs+=("$line"); done < <(bridge_gw_lyracore_env "${harvested[@]+"${harvested[@]}"}")
   pkill -x lyracore-gatewa; sleep 1
   setsid nohup env "${envs[@]}" "$bin" </dev/null >"$log" 2>&1 &
   for i in $(seq 1 30); do

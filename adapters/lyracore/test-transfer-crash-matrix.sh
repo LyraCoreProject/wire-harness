@@ -195,7 +195,11 @@ TOKEN=$(grep -oP 'spacetimedb_token = "\K[^"]+' ~/.config/spacetime/cli.toml || 
 _ORIG_PID=$(pgrep -x lyracore-gatewa | head -1)
 if [ -n "${_ORIG_PID:-}" ]; then
   _ORIG_BIN=$(readlink -f "/proc/$_ORIG_PID/exe" 2>/dev/null); _ORIG_BIN=${_ORIG_BIN% (deleted)}
-  mapfile -t _ORIG_ENV < <(tr '\0' '\n' < "/proc/$_ORIG_PID/environ" 2>/dev/null | grep -E '^(GW_[A-Z_]*|RUST_LOG)=')
+  mapfile -t _ORIG_ENV_RAW < <(tr '\0' '\n' < "/proc/$_ORIG_PID/environ" 2>/dev/null | grep -E '^(LYRACORE_[A-Z_]*|GW_[A-Z_]*|RUST_LOG)=')
+  # bridge_gw_lyracore_env (scenario-lib.sh, LyraCore issue #265): a pre-cutover gateway carries
+  # only GW_* topology vars, but the binary this restores into reads LYRACORE_*. Without the bridge,
+  # restore_original_gateway relaunches with none of the original topology — silently.
+  mapfile -t _ORIG_ENV < <(bridge_gw_lyracore_env "${_ORIG_ENV_RAW[@]+"${_ORIG_ENV_RAW[@]}"}")
 fi
 restore_original_gateway() {
   [ -n "${_ORIG_BIN:-}" ] && [ -x "${_ORIG_BIN:-}" ] || return 0
