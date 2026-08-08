@@ -13,7 +13,7 @@ are the worked example of what a server adapter for this client looks like.
 | A **running LyraCore stack** | every assertion is a read of live server state | SpacetimeDB node + gateway, per LyraCore's `docs/danger-zones.md` §3 |
 | The **`spacetime` CLI** on `$PATH` | `spacetime sql` / `spacetime call` are how they stage and assert | authenticated against that node |
 | The module published **with `--features=debug_reducers`** | they drive `debug_*` reducers to stage fixtures, damage characters, seed spawns | LyraCore's `scripts/publish-module.sh` |
-| This repository's **fixture accounts** | `TEST*` / `SEAMTEST*`, with the passwords `wire.sh` documents | provision them on that stack |
+| This repository's **fixture accounts** | `TEST*`, with the passwords `wire.sh` documents | provision them on that stack |
 
 Miss any of these and the orchestrator fails loudly at its first assertion rather than reporting a
 false green — but the failure will name the missing server state, not the missing prerequisite, so

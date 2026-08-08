@@ -95,7 +95,6 @@ with `--features=debug_reducers`, and the fixture accounts.
 | `WIRE_CLASS` | Class for characters the harness creates | `warlock` (the suite's historical default) |
 | `WIRE_PASSWORD_<ACCOUNT>` | One account's password | see below |
 | `WIRE_FIXTURE_PASSWORD` | Password for the `TEST*` accounts | `test123` |
-| `WIRE_SEAM_PASSWORD` | Password for the `SEAMTEST*` accounts | `seamtest123` |
 
 Fixture credentials are **defaults of the adapter, never of the client**. They describe local
 throwaway accounts on a local dev server; the client itself refuses to run without being told an
