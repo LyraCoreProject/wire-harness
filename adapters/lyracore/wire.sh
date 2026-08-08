@@ -25,7 +25,6 @@
 #                           default, from when it was hardcoded in the client]
 #   WIRE_PASSWORD_<ACCOUNT> that account's password           [see fixture_password below]
 #   WIRE_FIXTURE_PASSWORD   password for the TEST* accounts    [test123]
-#   WIRE_SEAM_PASSWORD      password for the SEAMTEST* accounts [seamtest123]
 set -u
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -38,10 +37,7 @@ BIN=${WIRE_BIN:-$repo/target/debug/vanilla-wire}
 fixture_password() { # $1=account
   local var="WIRE_PASSWORD_$1"
   if [ -n "${!var:-}" ]; then printf '%s' "${!var}"; return; fi
-  case "$1" in
-    SEAMTEST*) printf '%s' "${WIRE_SEAM_PASSWORD:-seamtest123}" ;;
-    *)         printf '%s' "${WIRE_FIXTURE_PASSWORD:-test123}" ;;
-  esac
+  printf '%s' "${WIRE_FIXTURE_PASSWORD:-test123}"
 }
 
 [ $# -ge 2 ] || { echo "usage: wire.sh <account> <character> [scenario [args…]]" >&2; exit 2; }

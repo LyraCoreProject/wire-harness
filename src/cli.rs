@@ -411,11 +411,11 @@ mod tests {
     #[test]
     fn scenario_args_pass_through_including_negative_coordinates() {
         let p = parse_args(argv(
-            "scenario seamwalk -8968 -129 83.4 -8800 -129 83.4 oneway \
+            "scenario walkmelee -8968 -129 83.4 -8800 -129 83.4 oneway \
              --account A --character C --password-stdin",
         ))
         .unwrap();
-        assert_eq!(p.command, Command::Scenario("seamwalk".into()));
+        assert_eq!(p.command, Command::Scenario("walkmelee".into()));
         assert_eq!(p.args, argv("-8968 -129 83.4 -8800 -129 83.4 oneway"));
     }
 

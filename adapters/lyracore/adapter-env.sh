@@ -21,7 +21,7 @@
 #   * the `spacetime` CLI on $PATH       — authenticated against that node
 #   * the module published WITH          — `--features=debug_reducers`; the orchestrators drive
 #     debug reducers                       debug_* reducers to stage and assert server state
-#   * this repository's fixture accounts — TEST*/SEAMTEST*, provisioned on that stack (see wire.sh)
+#   * this repository's fixture accounts — TEST*, provisioned on that stack (see wire.sh)
 #
 # CONFIGURATION:
 #   LYRACORE_DIR  path to the LyraCore checkout   [autodetected from $PWD]
