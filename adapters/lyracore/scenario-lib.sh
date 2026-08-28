@@ -518,12 +518,39 @@ ensure_ginger_home() { # $1=name (default Ginger)
 scenario_preflight() { # $1=scenario name
   wire_build || exit 1
   scall debug_seed_scenario_fixtures || true
-  # Re-arm the creature tick per scenario (2026-07-18): across a full ~40-test suite run the shared
-  # node's combat processing degrades and combat-dependent tests intermittently see no mob swing /
-  # no projectile impact (each PASSES standalone). A fresh tick schedule before each scenario is a
-  # cheap robustness floor for the shared-state suite. See 270.
-  scall debug_rearm_creature_tick || true
+  # Re-arm every schedule per scenario (2026-07-18, renamed 2026-08-28 per LyraCore #378/#372):
+  # across a full ~40-test suite run the shared node's combat processing degrades and
+  # combat-dependent tests intermittently see no mob swing / no projectile impact (each PASSES
+  # standalone). A fresh repair pass before each scenario is a cheap robustness floor for the
+  # shared-state suite. See 270. `debug_rearm_creature_tick` was retired into the consolidated
+  # `debug_repair_after_publish` (module/src/debug/repair.rs); unlike the old call this one is NOT
+  # swallowed — a repair failure means the shared node is in a state no scenario can trust, and
+  # preflight should say so instead of limping on.
+  scall debug_repair_after_publish || { echo "[orch] $1: debug_repair_after_publish failed" >&2; exit 1; }
   GINGER=$(ensure_ginger_home Ginger)
   [ -z "$GINGER" ] && { echo "[orch] no Ginger character" >&2; exit 1; }
   echo "[orch] $1: Ginger=$GINGER"
+}
+
+# Bot-scenario preflight add-on (LyraCore #372/#306): every bot scenario needs the playerbots
+# Package installed before its first spawn, so call this right after scenario_preflight — only from
+# the bot scenarios, never from a non-bot one.
+#
+# Idempotent: a checkout that already has packages/playerbots/ on disk is left alone; `packages add`
+# runs only when the folder is absent. playerbots is NOT YET in the Official Package Collection
+# (LyraCoreProject/packages) as of this writing, so `lyracore packages add playerbots` fails there
+# today — that is expected, not a suite bug. Any install failure (unpublished Package, no `lyracore`
+# shim, no network) means this checkout cannot run bot scenarios yet, which is exactly what SKIP
+# (exit 77) means throughout this suite (see test-playerbots.sh's pkg_playerbots_bot gate below it).
+# Exits the whole scenario directly rather than returning a status, the same as every other SKIP
+# check in this file.
+ensure_playerbots_package() { # $1=scenario name (for the SKIP message)
+  [ -d "$LYRACORE_DIR/packages/playerbots" ] && return 0
+  local lyra="$LYRACORE_DIR/lyracore" log="/tmp/ws_playerbots_pkg_add_$$.log"
+  if [ -x "$lyra" ] && "$lyra" packages add playerbots --yes >"$log" 2>&1; then
+    return 0
+  fi
+  echo "SKIP: playerbots Package not installed, and \`lyracore packages add playerbots\` did not" \
+       "succeed (it is not yet in the Official Package Collection) — see $log"
+  exit 77
 }

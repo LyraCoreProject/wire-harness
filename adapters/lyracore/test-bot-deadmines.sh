@@ -15,6 +15,7 @@ set -uo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/adapter-env.sh" # two roots; cds to $LYRACORE_DIR
 source "$ADAPTER_DIR/scenario-lib.sh"
 scenario_preflight bot-deadmines
+ensure_playerbots_package bot-deadmines
 
 PAD_X=-8930.0; PAD_Y=-250.0; PAD_Z=80.0
 DM_TRIGGER=78 # "Deadmines - Entering" → map 36 (-14.57, -385.48, 62.46)

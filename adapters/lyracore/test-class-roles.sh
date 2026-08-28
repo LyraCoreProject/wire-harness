@@ -14,6 +14,7 @@ set -uo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/adapter-env.sh" # two roots; cds to $LYRACORE_DIR
 source "$ADAPTER_DIR/scenario-lib.sh"
 scenario_preflight class-roles
+ensure_playerbots_package class-roles
 
 WOLF=51002 # Test Wolf Elder (266): level 8, non-grey to the leveled bots (the L1 wolf 51000 greyed out)
 PAD_X=-8890.0; PAD_Y=-460.0; PAD_Z=82.0
