@@ -4,12 +4,14 @@
 #      (areatrigger 78 → resolve_or_create_instance → map 36, fresh instance). The TRANSFER pair
 #      rides the coordinator connection (277 fix) and the held wire session auto-acks
 #      SMSG_NEW_WORLD — she lands inside directly, no relog.
-#   2. Her bots TELEPORT-FOLLOW into the same instance (goals.rs cross-map follow — server-side
-#      rebuild, no client handshake needed for session-less bots).
+#   2. Her bots FOLLOW into the same instance. On one database that is goals.rs's cross-map follow
+#      (a server-side rebuild — a session-less bot needs no client handshake); with map 36 routed
+#      to its own shard it is a Transfer each, decided by the same tick and driven by the gateway.
 #   3. The tank is engaged onto a real Defias pack ~45yd in; the melee chase closes, social aggro
 #      drags the pack, and the role brains fight it INSIDE the instance. A keeper tops the party
 #      (this proves COORDINATION in WMO corridors, not level tuning).
 #   4. At least one Defias dies to the party; teardown reaps the instance.
+#   5. The leader leaves the shard and the bots come home to the pad on their own.
 # Straight-line movement indoors is the accepted ceiling (map 36 has no nav by design).
 set -uo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/adapter-env.sh" # two roots; cds to $LYRACORE_DIR
@@ -85,38 +87,22 @@ for i in $(seq 1 15); do
   sleep 1
 done
 [ "$IDB" = "$DB" ] || echo "[orch] the instance lives on '$IDB' (shard-map routed) — querying it for every instance-side assert"
-# …and STOP there when it is a different database, because the thing this test measures next cannot
-# happen in that topology. `goals.rs`'s teleport-follow reads the LEADER'S ENTITY out of its own
-# database and teleports the bot to `l.map_id / l.instance_id` — with map 36 routed to another
-# shard the leader has no row where the bots are, so the follow cannot even see that she left. A
-# module cannot read another database; this needs the gateway to drive the bots' transfer the way
-# it drives a player's. Reported as a SKIP with the reason rather than a FAIL, because nothing here
-# is broken — the capability is unbuilt. Run this test on a single-database realm to exercise it.
-if [ "$IDB" != "$DB" ]; then
-  echo "SKIP: map 36 routes to '$IDB' and cross-DATABASE bot teleport-follow is not implemented" \
-       "(goals.rs reads the leader's entity from its own database) — run on a single-database realm"
-  leave_any_group "$GINGER"
-  ginger_home
-  sqlq "UPDATE game_character SET x = $PAD_X, y = $PAD_Y, z = $PAD_Z, map_id = 0 WHERE guid = $GINGER" >/dev/null
-  scall playerbots_despawn_all || true
-  scall_on "$IDB" playerbots_despawn_all || true
-  [ -n "$INST" ] && scall_on "$IDB" debug_reap_instance "$INST"
-  kill "$LEADER" 2>/dev/null; pkill -x wire-client 2>/dev/null
-  exit 77
-fi
 [ "$GMAP" = "36" ] && [ "$INST" != "0" ] \
   && step_ok "enter: portal created instance $INST and Ginger landed INSIDE (coordinator-relayed transfer + auto-ack, no relog)" \
   || step_fail "enter: Ginger not live in a map-36 instance (row '$ROW')"
 
-# ---- 2. the bots teleport-follow ----
+# ---- 2. the bots follow ----
+# 45s, not the old 20s: on one database the follow is an in-place rebuild and lands on the next
+# tick, but a sharded realm crosses each bot separately — one Transfer each, decided a second apart
+# and driven one at a time — and each bot only rebuilds its entity on the tick AFTER it arrives.
 IN=0
-for i in $(seq 1 20); do
+for i in $(seq 1 45); do
   IN=$(sql1 "SELECT COUNT(*) AS n FROM game_world_entity WHERE map_id = 36 AND instance_id = $INST AND (guid = $TANK OR guid = $HEAL OR guid = $DPS)" "$IDB")
   [ "${IN:-0}" = "3" ] && break
   sleep 1
 done
-[ "${IN:-0}" = "3" ] && step_ok "follow: all three bots teleport-followed into instance $INST" \
-  || step_fail "follow: only ${IN:-0}/3 bots inside within 20s"
+[ "${IN:-0}" = "3" ] && step_ok "follow: all three bots followed Ginger into instance $INST on '$IDB'" \
+  || step_fail "follow: only ${IN:-0}/3 bots inside within 45s"
 
 # ---- 3. pull a real Defias pack; the role brains fight it ----
 MOB=$(sqlq "SELECT guid FROM game_world_entity WHERE map_id = 36 AND instance_id = $INST AND entry = 634" "$IDB" | grep -oE '[0-9]{15,}' | head -1)
@@ -144,8 +130,27 @@ done
 [ "$KILLED" = 1 ] && step_ok "kill: a Defias died to the bot party inside Deadmines" \
   || step_fail "kill: no Defias death within 300s"
 
-# ---- teardown ----
+# ---- 5. the return: the leader leaves the shard and the bots come home by themselves ----
+# Dropping the wire session removes Ginger's entity, so the bots have no leader on the shard they
+# are standing on. They hold for the goal tick's wait (ten seconds — long enough that a bot which
+# merely ARRIVED first does not turn round) and then cross back to the pad on their own.
+#
+# Home is the pad on "$DB" in BOTH topologies: on one database the crossing is a teleport the
+# gateway has nothing left to do about, and on a sharded realm it is a Transfer back off "$IDB".
 kill "$LEADER" 2>/dev/null; pkill -x wire-client 2>/dev/null
+HOME_AGAIN=0
+for i in $(seq 1 60); do
+  HOME_AGAIN=$(sql1 "SELECT COUNT(*) AS n FROM game_world_entity WHERE map_id = 0 AND instance_id = 0 AND (guid = $TANK OR guid = $HEAL OR guid = $DPS)" "$DB")
+  [ "${HOME_AGAIN:-0}" = "3" ] && break
+  sleep 1
+done
+[ "${HOME_AGAIN:-0}" = "3" ] && step_ok "return: all three bots crossed home to '$DB' once their leader left" \
+  || step_fail "return: only ${HOME_AGAIN:-0}/3 bots home within 60s"
+[ "$(sql1 "SELECT COUNT(*) AS n FROM pkg_playerbots_goal WHERE kind = 5" "$DB")" = "0" ] \
+  && step_ok "return: no bot is left marked in transit" \
+  || step_fail "return: a bot is still marked in transit after the crossing settled"
+
+# ---- teardown ----
 scall playerbots_despawn_all || true
 [ "${IDB:-$DB}" = "$DB" ] || scall_on "$IDB" playerbots_despawn_all || true
 leave_any_group "$GINGER"
@@ -155,7 +160,9 @@ sqlq "DELETE FROM game_group_member WHERE character_guid = $GINGER" >/dev/null
 sqlq "DELETE FROM game_instance_binding WHERE character_guid = $GINGER" >/dev/null
 sqlq "UPDATE game_character SET x = $PAD_X, y = $PAD_Y, z = $PAD_Z, map_id = 0 WHERE guid = $GINGER" >/dev/null
 scall debug_set_level "$GINGER" 5
-[ -n "$INST" ] && scall debug_reap_instance "$INST" || true
+# On "$IDB": the instance is hosted by whichever database the shard map routed map 36 to, so
+# reaping it on "$DB" would leave a sharded realm's dungeon standing until its own 30-minute timer.
+[ -n "$INST" ] && scall_on "${IDB:-$DB}" debug_reap_instance "$INST" || true
 assert_eq "teardown: zero bot rows" "$(sql1 "SELECT COUNT(*) AS n FROM pkg_playerbots_bot")" "0"
 
 if [ "$FAILED" -eq 0 ]; then echo "[bot-deadmines] PASS"; exit 0; else echo "[bot-deadmines] FAIL"; exit 1; fi
