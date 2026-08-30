@@ -14,6 +14,7 @@ set -uo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/adapter-env.sh" # two roots; cds to $LYRACORE_DIR
 source "$ADAPTER_DIR/scenario-lib.sh"
 scenario_preflight bot-goals
+ensure_playerbots_package bot-goals
 
 WOLF=51000; WOLF_ELDER=51002; GIVER=51003; QUEST=50900
 # ~64yd from the Northshire graveyard (-8935,-188): a spirit-res drops the bot back INSIDE the

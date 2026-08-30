@@ -16,6 +16,7 @@ set -uo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/adapter-env.sh" # two roots; cds to $LYRACORE_DIR
 source "$ADAPTER_DIR/scenario-lib.sh"
 scenario_preflight party-brains
+ensure_playerbots_package party-brains
 
 WOLF_ENTRY=51002 # Test Wolf Elder (266): non-grey to the leveled role trio (L1 wolf 51000 greyed out)
 PAD_X=-8890.0; PAD_Y=-460.0; PAD_Z=82.0

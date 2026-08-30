@@ -24,10 +24,11 @@ set -uo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/adapter-env.sh" # two roots; cds to $LYRACORE_DIR
 source "$ADAPTER_DIR/scenario-lib.sh"
 scenario_preflight bot-invite
+ensure_playerbots_package bot-invite
 
 # package-installed gate (the drop-in may legitimately be absent) — same shape as test-playerbots.sh
 if ! sqlq "SELECT id FROM pkg_playerbots_bot" | grep -q "id"; then
-  echo "[bot-invite] SKIP: pkg_playerbots_bot table absent — playerbots package not installed/published"
+  echo "SKIP: pkg_playerbots_bot table absent — playerbots package not installed/published"
   exit 77
 fi
 

@@ -8,6 +8,7 @@ set -uo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/adapter-env.sh" # two roots; cds to $LYRACORE_DIR
 source "$ADAPTER_DIR/scenario-lib.sh"
 scenario_preflight bot-follow
+ensure_playerbots_package bot-follow
 
 PAD_X=-8930.0; PAD_Y=-250.0; PAD_Z=80.0
 HOP1_X=-8990.0; HOP1_Y=-300.0   # ~78yd southwest
