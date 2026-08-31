@@ -9,7 +9,8 @@
 #   3. DEATH RECOVERY: killed mid-grind, the bot releases (repop -> GHOST), spirit-resses
 #      (res sickness and all), and RESUMES the still-active goal — the pad sits inside the goal
 #      fence of the Northshire graveyard so the wolves are still in its area after the res.
-#   4. HISTORY: finished goal rows are kept — the decision trail is sql-visible.
+#   4. ONE ROW PER BOT: the goal row is rewritten in place (kind 6 QUEST_TRAVEL, 7 QUEST_HUNT,
+#      8 GRIND, 9 RESURRECTING); there is no history table, so the trail is the kill count.
 set -uo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/adapter-env.sh" # two roots; cds to $LYRACORE_DIR
 source "$ADAPTER_DIR/scenario-lib.sh"
@@ -44,12 +45,12 @@ XP0=$(sql1 "SELECT xp FROM game_world_entity WHERE guid = $BOT"); XP0=${XP0:-0}
 M0=$(sql1 "SELECT money FROM game_world_entity WHERE guid = $BOT"); M0=${M0:-0}
 
 # ---- 1. the autonomous quest loop ----
-wait_for_sql_ge 45 "SELECT COUNT(*) AS n FROM pkg_playerbots_goal WHERE kind = 1" 1 \
-  && step_ok "selection: bot chose QUEST $QUEST (goal row)" || step_fail "selection: no QUEST goal within 45s"
+wait_for_sql_ge 45 "SELECT COUNT(*) AS n FROM pkg_playerbots_goal WHERE character_guid = $BOT AND (kind = 6 OR kind = 7)" 1 \
+  && step_ok "selection: bot chose QUEST $QUEST (goal kind 6/7)" || step_fail "selection: no QUEST goal within 45s"
 wait_for_sql_ge 30 "SELECT COUNT(*) AS n FROM game_character_quest WHERE character_guid = $BOT" 1 \
   && step_ok "accept: quest row landed in the bot's log (walked to the giver)" || step_fail "accept: no quest row within 30s"
 DONE=0
-for i in $(seq 1 90); do
+for _ in $(seq 1 90); do
   R=$(sqlq "SELECT rewarded FROM game_character_quest WHERE character_guid = $BOT" | grep -c true)
   [ "${R:-0}" -ge 1 ] && DONE=1 && break
   sleep 1
@@ -59,49 +60,48 @@ XP1=$(sql1 "SELECT xp FROM game_world_entity WHERE guid = $BOT")
 M1=$(sql1 "SELECT money FROM game_world_entity WHERE guid = $BOT")
 assert_ge "xp: kill + quest reward XP granted" "$(( ${XP1:-0} - XP0 ))" 90
 assert_gt "loot: money above the 150 quest reward (corpse purses looted)" "$(( ${M1:-0} - M0 ))" 150
-assert_ge "history: the finished QUEST goal row is kept (state done)" "$(sql1 "SELECT COUNT(*) AS n FROM pkg_playerbots_goal WHERE kind = 1 AND state = 1")" 1
+assert_eq "goal row: one per bot, rewritten in place" "$(sql1 "SELECT COUNT(*) AS n FROM pkg_playerbots_goal WHERE character_guid = $BOT")" "1"
 
 # ---- 2+3. grind + death recovery + resume ----
-# 266: ELDER wolves (51002, L8) for the grind — an L10 bot's GRIND ±3 band excludes the L1 51000,
-# and the offsets sit OUTSIDE the elder's 20yd aggro radius so the bot INITIATES (not proximity-
-# aggroed). Four (the 3 GRIND_KILLS + 1 slack for a pre-selection uncredited kill).
+# ELDER wolves (51002, L8) for the grind — an L10 bot's GRIND ±3 band excludes the L1 51000, and the
+# offsets sit OUTSIDE the elder's 20yd aggro radius so the bot INITIATES (not proximity-aggroed).
+# Four: three for the resume assertion plus one slack for a pre-selection uncredited kill.
 scall debug_spawn_at_feet "$BOT" $WOLF_ELDER 25
 scall debug_spawn_at_feet "$BOT" $WOLF_ELDER 28
 scall debug_spawn_at_feet "$BOT" $WOLF_ELDER 31
 scall debug_spawn_at_feet "$BOT" $WOLF_ELDER 34
-# 90s not 45 (266): a post-quest REST goal (fight damage) can occupy a full selection cycle
-# before GRIND gets picked — the known suite-load timing family (270).
-wait_for_sql_ge 90 "SELECT COUNT(*) AS n FROM pkg_playerbots_goal WHERE kind = 0 AND state = 0" 1 \
-  && step_ok "selection: next goal is GRIND $WOLF_ELDER" || step_fail "selection: no GRIND goal within 90s"
-# 90s, matching the selection wait above it and the post-death resume below. 45s covered the KILL
-# but not the work in front of it: the bot has to finish selecting the goal, walk the 25-34yd out to
-# an elder that was deliberately staged outside its aggro radius, and win an L8 fight — and the two
-# assertions on either side of this one already budget 90s for exactly that reasoning (266/270).
-wait_for_sql_ge 90 "SELECT progress FROM pkg_playerbots_goal WHERE kind = 0 AND state = 0" 1 \
-  && step_ok "grind: a kill advanced progress (on_kill credit)" || step_fail "grind: no kill credit within 90s"
+elders_dead() { sqlq "SELECT dead FROM game_world_entity WHERE entry = $WOLF_ELDER" | grep -c true; }
+# 90s: a post-quest fight or a walk home can occupy a full selection cycle before GRIND gets picked.
+wait_for_sql_ge 90 "SELECT COUNT(*) AS n FROM pkg_playerbots_goal WHERE character_guid = $BOT AND kind = 8" 1 \
+  && step_ok "selection: next goal is GRIND $WOLF_ELDER (kind 8)" || step_fail "selection: no GRIND goal within 90s"
+# 90s: select, walk 25-34yd out to an elder staged outside its aggro radius, and win an L8 fight.
+KILLED=0
+for _ in $(seq 1 90); do
+  [ "$(elders_dead)" -ge 1 ] && KILLED=1 && break
+  sleep 1
+done
+[ "$KILLED" = 1 ] && step_ok "grind: an elder died to the bot" || step_fail "grind: no elder kill within 90s"
 
 scall debug_set_health "$BOT" 0
-D0=$(sql1 "SELECT dead FROM game_world_entity WHERE guid = $BOT" | head -1)
 DEADNOW=$(sqlq "SELECT dead FROM game_world_entity WHERE guid = $BOT" | grep -c true)
 assert_eq "death: the bot is down mid-goal" "${DEADNOW:-0}" "1"
 REVIVED=0
-for i in $(seq 1 15); do
+for _ in $(seq 1 15); do
   ALIVE=$(sqlq "SELECT dead FROM game_world_entity WHERE guid = $BOT" | grep -c false)
   [ "${ALIVE:-0}" -ge 1 ] && REVIVED=1 && break
   sleep 1
 done
 [ "$REVIVED" = 1 ] && step_ok "recovery: released + spirit-ressed (alive again, sql-observed)" || step_fail "recovery: still dead after 15s"
-STILL=$(sql1 "SELECT COUNT(*) AS n FROM pkg_playerbots_goal WHERE kind = 0 AND state = 0")
-assert_ge "recovery: the GRIND goal survived the death (resumes)" "${STILL:-0}" 1
-# 180s: this step is the most expensive assertion in the file and had the SAME budget as the single
-# kill above it — it needs a corpse run plus THREE real L8 fights (the bot flees at 15% and re-engages,
-# so a fight is several approach/flee cycles). Observed completing in ~100-140s and failing at 90 in
-# about half of the runs; the window was the flake, not the behaviour.
-wait_for_sql_ge 180 "SELECT COUNT(*) AS n FROM pkg_playerbots_goal WHERE kind = 0 AND state = 1" 1 \
-  && step_ok "resume: the grind completed after the death (3 kills, state done)" || step_fail "resume: grind never completed within 180s"
-
-# ---- 4. the decision trail ----
-assert_ge "history: >= 2 finished goal rows kept (the sql-visible mind)" "$(sql1 "SELECT COUNT(*) AS n FROM pkg_playerbots_goal WHERE state = 1")" 2
+wait_for_sql_ge 90 "SELECT COUNT(*) AS n FROM pkg_playerbots_goal WHERE character_guid = $BOT AND kind = 8" 1 \
+  && step_ok "recovery: the bot is back on GRIND after the death (resumes)" || step_fail "recovery: no GRIND goal within 90s of the res"
+# 180s: a corpse run plus THREE real L8 fights (the bot flees at 15% and re-engages, so a fight is
+# several approach/flee cycles). Observed completing in ~100-140s.
+RESUMED=0
+for _ in $(seq 1 180); do
+  [ "$(elders_dead)" -ge 3 ] && RESUMED=1 && break
+  sleep 1
+done
+[ "$RESUMED" = 1 ] && step_ok "resume: three elders dead after the death (the grind carried on)" || step_fail "resume: fewer than 3 elders dead within 180s"
 
 # ---- teardown (asserted) ----
 scall playerbots_despawn_all || true
