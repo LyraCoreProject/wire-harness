@@ -79,7 +79,7 @@ echo "[orch] wolves: $W1 $W2"
 # baseline that reaping later drops BELOW made real casts read as "no change".
 TAUNTED=0; DPS_CASTS=0; TANK_TOP=0; ONTANK_SEEN=0
 # 270: 45 not 20 — the bot sense/brain tick that arms an assist row slides under suite load.
-for i in $(seq 1 45); do
+for _ in $(seq 1 45); do
   # keeper: the party stays alive through the pack (bots are L1) AND the wolves stay alive
   # through the party (a Fireball rotation one-shots half a wolf — the asserts need live,
   # swinging wolves, not corpses)
@@ -120,7 +120,7 @@ RUN=0; BEST=0
 # danger from the elder's 2-4 damage swings. 45 iterations (~45s) span FOUR 10s-cooldown taunt
 # cycles: live telemetry shows the hold CONVERGES by cycle three (tank tops via Sunder threat,
 # both wolves settle on it and stay) — a shorter window sampled the pre-convergence churn.
-for i in $(seq 1 45); do
+for _ in $(seq 1 45); do
   ON=$(sql1 "SELECT COUNT(*) AS n FROM game_melee_attack WHERE target_guid = $TANK")
   if [ "${ON:-0}" -ge 1 ]; then RUN=$((RUN+1)); [ $RUN -gt $BEST ] && BEST=$RUN; else RUN=0; fi
   [ $BEST -ge 3 ] && break
@@ -137,7 +137,7 @@ assert_ge "dps: melee assist row armed" "$(sql1 "SELECT COUNT(*) AS n FROM game_
 # HEALER: hurt the dps bot below the 80% threshold and watch Renew land + tick it back up.
 # Any stale Renew from the fight (a wolf-damage dip) is waited out first — the fresh cast on the
 # watched member is the assertion. Tank/healer stay topped so the pack can't kill them meanwhile.
-for i in $(seq 1 20); do
+for _ in $(seq 1 20); do
   AURA=$(sql1 "SELECT COUNT(*) AS n FROM game_aura WHERE target_guid = $DPS AND spell_id = 139")
   [ "${AURA:-0}" = "0" ] && break
   # GINGER topped too (266): the wolves chew the leader below the dps's 40% hold, and the healer
@@ -147,7 +147,7 @@ for i in $(seq 1 20); do
 done
 scall debug_set_health "$DPS" "$DPS_HOLD" # 266: ~40% of leveled max — under the healer's 80% threshold, over the dps 15% flee
 HEALED=0
-for i in $(seq 1 10); do
+for _ in $(seq 1 10); do
   scall debug_set_health "$TANK" 10000; scall debug_set_health "$HEAL" 10000; scall debug_set_health "$GINGER" 10000
   sleep 1
   # AURA row alone is the assertion (266): cast events reap on a 1s TTL — shorter than this
@@ -161,7 +161,7 @@ done
 # The HoT ticks 8/1s; retry the rising-health sample a few times in case a stray wolf swing lands
 # between samples (the taunt phase normally has the pack on the tank by now).
 HP_UP=0
-for i in $(seq 1 6); do
+for _ in $(seq 1 6); do
   HP0=$(sql1 "SELECT health FROM game_world_entity WHERE guid = $DPS")
   sleep 2
   HP1=$(sql1 "SELECT health FROM game_world_entity WHERE guid = $DPS")
@@ -193,12 +193,15 @@ assert_eq "divergence: flee_at_pct=95 bot broke off" "${FLEE_ROW:-0}" "0"
 touch "$HOLD"
 wait "$LEADER"; RC_L=$?
 [ $RC_L -eq 0 ] && step_ok "wire: leader flow green (roster -> hold -> disband -> DESTROYED)" || { step_fail "leader wire flow rc=$RC_L"; tail -4 /tmp/ws_party_bots.log; }
-# A 4-member group SURVIVES the leader leaving — leadership transfers to a bot (the leaver still
-# gets SMSG_GROUP_DESTROYED for its own party UI). The bot party dissolves when the despawn
-# sweep removes its members below 2.
-assert_eq "sql: the bot party lives on after the leader leaves (3 members)" "$(sql1 "SELECT COUNT(*) AS n FROM game_group_member")" "3"
-NEWLEAD=$(sql1 "SELECT leader_guid FROM game_group")
-case "$NEWLEAD" in "$TANK"|"$HEAL"|"$DPS") step_ok "sql: leadership transferred to a bot ($NEWLEAD)";; *) step_fail "sql: leader after leave is $NEWLEAD (want a bot)";; esac
+# A 4-member group SURVIVES the leader leaving: leadership transfers to a bot (the leaver still
+# gets SMSG_GROUP_DESTROYED for its own party UI). It does not survive for long. The Package's
+# parting rule is that a BOT leader sharing no un-rewarded quest with anybody in its party leaves
+# it, and these three hold no quests at all — so each inherited leader leaves in turn and the
+# party is gone within a few brain ticks. Reading the roster once would race that, so this asserts
+# the dissolution the transfer leads to rather than a member count at one instant.
+wait_for_sql_eq 30 "SELECT COUNT(*) AS n FROM game_group_member" 0 \
+  && step_ok "sql: the party the leader left dissolved itself (bot leader, no shared quest work)" \
+  || step_fail "sql: $(sql1 "SELECT COUNT(*) AS n FROM game_group_member") member row(s) still stand 30s after the leader left"
 
 # ---- teardown (asserted) ----
 scall playerbots_despawn_all || true
