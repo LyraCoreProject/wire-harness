@@ -2,8 +2,8 @@
 # no network beyond crates.io. That is the property worth protecting — the moment CI needs a running
 # LyraCore to go green, the boundary this repository exists to draw has quietly moved.
 #
-# The scripts under adapters/ are live tests against a real server and are NEVER run here; they get
-# a shellcheck-grade syntax check only.
+# Live scenarios under adapters/ require a running Realm and do not run here. The suite runner
+# has an offline shell test that uses temporary scenario scripts.
 name: ci
 
 on:
@@ -64,6 +64,10 @@ jobs:
       # that the binaries the adapters and #246 consume actually link.
       - name: Build release binaries
         run: cargo build --release --locked --bins
+
+      - name: Test suite dispatch without a Realm
+        shell: bash
+        run: bash tests/lyracore-suite.sh
 
       - name: Syntax-check the adapter scripts
         shell: bash

@@ -5,7 +5,8 @@
 # fails the loop instead of waiting for luck.
 #
 #   bash adapters/lyracore/wire-suite.sh              # full suite
-#   WS_ONLY="who roll" bash adapters/lyracore/wire-suite.sh   # subset by test name
+#   bash adapters/lyracore/wire-suite.sh who roll    # subset by test name
+#   WS_ONLY="who roll" bash adapters/lyracore/wire-suite.sh   # equivalent
 #
 # Design rules (the item's spec):
 #   - per-test PASS/FAIL lines + a summary table; exit NONZERO on any FAIL.
@@ -19,52 +20,103 @@
 # Prereqs: local STDB node + gateway up (this script verifies both), module published WITH
 # --features=debug_reducers (scripts/publish-module.sh), cargo able to build wire-client.
 set -uo pipefail
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/adapter-env.sh" # two roots; cds to $LYRACORE_DIR
-source scripts/import-manifest.sh
+prepare_suite() {
+  source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/adapter-env.sh" || return 2
+  source importer/scripts/import-manifest.sh || return 2
 
-DB=${DB:-lyracore}
-# $WC comes from scenario-lib.sh (the adapters/lyracore/wire.sh seam) — do not re-point it at the binary.
-LYRACORE_PORT=8085
-LOGDIR="${WS_LOGDIR:-/tmp/wire-suite}"
-mkdir -p "$LOGDIR"
+  DB=${DB:-lyracore}
+  # $WC comes from scenario-lib.sh (the adapters/lyracore/wire.sh seam) — do not re-point it at the binary.
+  LYRACORE_PORT=8085
+  LOGDIR="${WS_LOGDIR:-/tmp/wire-suite}"
+  mkdir -p "$LOGDIR" || return 2
 
-# ---------- tiny helpers ----------
-# The canonical sqlq/char_guid/scall/stay_start/stay_stop (and sql assert_*) implementations live
-# in scenario-lib.sh — ONE copy of the fiddly stay_start relogin-race settle/verify/retry, not a
-# drifting suite-local fork (the fork that used to live here had already lost that race fix).
-# SC_STAY_LOG_DIR makes the lib capture each stay session's wire log like the old fork did —
-# exported so the test-*.sh child processes (which now own their staging, work-item 162) keep
-# capturing their staging stay logs under suite runs too.
-export SC_STAY_LOG_DIR="$LOGDIR"
-source "$ADAPTER_DIR/scenario-lib.sh"
-# COUNT(*) helper — equality-filter only (spacetime sql 2.x range-filter gotcha, danger-zones §2).
-countq() { sqlq "SELECT COUNT(*) AS n FROM $1" | grep -oE '[0-9]+' | tail -1; }
-char_pos() { sqlq "SELECT x, y, z FROM game_character WHERE guid = $1" | tail -1; }
+  # ---------- tiny helpers ----------
+  # The canonical sqlq/char_guid/scall/stay_start/stay_stop (and sql assert_*) implementations live
+  # in scenario-lib.sh — ONE copy of the fiddly stay_start relogin-race settle/verify/retry, not a
+  # drifting suite-local fork (the fork that used to live here had already lost that race fix).
+  # SC_STAY_LOG_DIR makes the lib capture each stay session's wire log like the old fork did —
+  # exported so the test-*.sh child processes (which now own their staging, work-item 162) keep
+  # capturing their staging stay logs under suite runs too.
+  export SC_STAY_LOG_DIR="$LOGDIR"
+  source "$ADAPTER_DIR/scenario-lib.sh" || return 2
+  # COUNT(*) helper — equality-filter only (spacetime sql 2.x range-filter gotcha, danger-zones §2).
+  countq() { sqlq "SELECT COUNT(*) AS n FROM $1" | grep -oE '[0-9]+' | tail -1; }
+  char_pos() { sqlq "SELECT x, y, z FROM game_character WHERE guid = $1" | tail -1; }
+
+  # ---------- preflight ----------
+  echo "[suite] preflight: node, gateway, wire-client build, accounts, characters…"
+  if ! sqlq "SELECT username FROM game_account" >/dev/null; then
+    echo "[suite] FATAL: spacetime node/database '$DB' unreachable (is the local node up + module published?)" >&2
+    exit 2
+  fi
+  if ! (exec 3<>"/dev/tcp/127.0.0.1/$LYRACORE_PORT") 2>/dev/null; then
+    echo "[suite] FATAL: gateway world port $LYRACORE_PORT closed (start it per docs/danger-zones.md §3)" >&2
+    exit 2
+  fi
+  wire_build || exit 2
+
+  # Accounts: provision is operator-gated; tolerate "already provisioned", then ASSERT the row exists.
+  TOKEN=$(awk -F'"' '/^[[:space:]]*spacetimedb_token[[:space:]]*=/{print $2; exit}' \
+    "${XDG_CONFIG_HOME:-$HOME/.config}/spacetime/cli.toml" 2>/dev/null || true)
+  for acct in TEST TEST2; do
+    if [ -z "$(sqlq "SELECT username FROM game_account WHERE username = '$acct'" | grep -o "$acct")" ]; then
+      printf '%s\n' test123 \
+        | LYRACORE_COORDINATOR_TOKEN="$TOKEN" ./target/debug/lyracore-gateway provision "$acct" --password-stdin \
+            >/dev/null 2>&1 || true
+    fi
+    if [ -z "$(sqlq "SELECT username FROM game_account WHERE username = '$acct'" | grep -o "$acct")" ]; then
+      echo "[suite] FATAL: account $acct missing and provision failed (operator claimed? token valid?)" >&2
+      exit 2
+    fi
+  done
+  # Characters: the wire client creates-on-login; `logout` mode is the cheapest clean round-trip.
+  # Ginger goes through ensure_ginger_home (issue #213), not a bare char_guid check — she is not
+  # guaranteed to still be ON lyracore (a region-boundary login can transfer her live row to
+  # lyracore-world-2; a duplicate created by an old create-on-miss fallback can also shadow her at
+  # login) and every test below assumes she is. dfsdfsd has no such shard-drift history (say-range/
+  # move-relay keep her pinned near Ginger's canonical spot) so the plain check still covers her.
+  [ -z "$(char_guid dfsdfsd)" ] && timeout 60 "$WC" TEST2 dfsdfsd logout >/dev/null 2>&1
+  GINGER=$(ensure_ginger_home Ginger); DFS=$(char_guid dfsdfsd)
+  if [ -z "$GINGER" ] || [ -z "$DFS" ]; then
+    echo "[suite] FATAL: fixture characters missing (Ginger=$GINGER dfsdfsd=$DFS)" >&2
+    exit 2
+  fi
+  echo "[suite] fixtures: Ginger=$GINGER dfsdfsd=$DFS"
+
+  # ---------- data-gate probes (sandbox vs fully-imported node) ----------
+  HAS_SPELL_686=$(countq "game_spell WHERE spell_id = $GATE_SPELL_SHADOWBOLT")
+  HAS_SPELL_635=$(countq "game_spell WHERE spell_id = $GATE_SPELL_PALADIN")   # curated paladin kit imported? (176)
+  HAS_CREATURE_103=$(countq "game_creature_template WHERE entry = $GATE_CREATURE_TEST")
+  HAS_COMBAT_REGEN_EFFECT=$(countq "game_spell_effect WHERE kind = 169")
+  HAS_FACTIONS=$(countq "game_faction")
+  HAS_LEVEL_STATS=$(countq "game_level_stats")
+  HAS_HEALER=$(countq "game_world_entity WHERE entry = $GATE_HEALER_ENTRY")
+
+}
 
 # ---------- result accounting ----------
-PASS_N=0; FAIL_N=0; SKIP_N=0
+PASS_N=0; FAIL_N=0; SKIP_N=0; SPAWN_N=0
 RESULTS=() # "STATUS name reason-or-log"
 SKIP_REASON="" # a test fn sets this then returns 77
 
 run_test() { # $1 = test name (fn t_$1 must exist)
   local name=$1
-  if [ -n "${WS_ONLY:-}" ] && ! grep -qw "$name" <<<"$WS_ONLY"; then return 0; fi
   SKIP_REASON=""
-  # ISOLATION (267): no test may inherit a party from the one before it — see reset_party_state's
-  # header for why they leak in the first place (realm-core owns the roster; the sweep runs on the
-  # world shard and cannot reach it). Four suite failures in the 2026-07-28 run were this and
-  # nothing else, each reported as a party bug in a test that had not formed a party yet.
-  reset_party_state
   local log="$LOGDIR/$name.log"
   echo "── [$name] running…"
-  ( "t_$name" ) >"$log" 2>&1
-  local rc=$?
+  local rc=0
+  ( "t_$name" ) >"$log" 2>&1 || rc=$?
   # a fixture/gate fn may export the reason via the log's first SKIP: line
   if [ $rc -eq 77 ]; then
     local reason; reason=$(grep -m1 '^SKIP:' "$log" | sed 's/^SKIP: //')
     echo "   SKIP  $name — ${reason:-no reason recorded (fix the test: skips must be loud)}"
     RESULTS+=("SKIP $name ${reason:-unspecified}")
     SKIP_N=$((SKIP_N + 1))
+  elif [ $rc -eq 126 ] || [ $rc -eq 127 ]; then
+    echo "   SPAWN FAILURE  $name (rc=$rc), log: $log"
+    tail -5 "$log"
+    RESULTS+=("SPAWN $name $log")
+    SPAWN_N=$((SPAWN_N + 1))
   elif [ $rc -eq 0 ]; then
     echo "   PASS  $name"
     RESULTS+=("PASS $name -")
@@ -78,55 +130,6 @@ run_test() { # $1 = test name (fn t_$1 must exist)
 }
 skip() { echo "SKIP: $*"; exit 77; } # call from inside a test fn (subshell)
 
-# ---------- preflight ----------
-echo "[suite] preflight: node, gateway, wire-client build, accounts, characters…"
-if ! sqlq "SELECT username FROM game_account" >/dev/null; then
-  echo "[suite] FATAL: spacetime node/database '$DB' unreachable (is the local node up + module published?)" >&2
-  exit 2
-fi
-if ! (exec 3<>"/dev/tcp/127.0.0.1/$LYRACORE_PORT") 2>/dev/null; then
-  echo "[suite] FATAL: gateway world port $LYRACORE_PORT closed (start it per docs/danger-zones.md §3)" >&2
-  exit 2
-fi
-wire_build || exit 2
-
-# Accounts: provision is operator-gated; tolerate "already provisioned", then ASSERT the row exists.
-TOKEN=$(awk -F'"' '/^[[:space:]]*spacetimedb_token[[:space:]]*=/{print $2; exit}' \
-  "${XDG_CONFIG_HOME:-$HOME/.config}/spacetime/cli.toml" 2>/dev/null || true)
-for acct in TEST TEST2; do
-  if [ -z "$(sqlq "SELECT username FROM game_account WHERE username = '$acct'" | grep -o "$acct")" ]; then
-    printf '%s\n' test123 \
-      | LYRACORE_COORDINATOR_TOKEN="$TOKEN" ./target/debug/lyracore-gateway provision "$acct" --password-stdin \
-          >/dev/null 2>&1 || true
-  fi
-  if [ -z "$(sqlq "SELECT username FROM game_account WHERE username = '$acct'" | grep -o "$acct")" ]; then
-    echo "[suite] FATAL: account $acct missing and provision failed (operator claimed? token valid?)" >&2
-    exit 2
-  fi
-done
-# Characters: the wire client creates-on-login; `logout` mode is the cheapest clean round-trip.
-# Ginger goes through ensure_ginger_home (issue #213), not a bare char_guid check — she is not
-# guaranteed to still be ON lyracore (a region-boundary login can transfer her live row to
-# lyracore-world-2; a duplicate created by an old create-on-miss fallback can also shadow her at
-# login) and every test below assumes she is. dfsdfsd has no such shard-drift history (say-range/
-# move-relay keep her pinned near Ginger's canonical spot) so the plain check still covers her.
-[ -z "$(char_guid dfsdfsd)" ] && timeout 60 "$WC" TEST2 dfsdfsd logout >/dev/null 2>&1
-GINGER=$(ensure_ginger_home Ginger); DFS=$(char_guid dfsdfsd)
-if [ -z "$GINGER" ] || [ -z "$DFS" ]; then
-  echo "[suite] FATAL: fixture characters missing (Ginger=$GINGER dfsdfsd=$DFS)" >&2
-  exit 2
-fi
-echo "[suite] fixtures: Ginger=$GINGER dfsdfsd=$DFS"
-
-# ---------- data-gate probes (sandbox vs fully-imported node) ----------
-HAS_SPELL_686=$(countq "game_spell WHERE spell_id = $GATE_SPELL_SHADOWBOLT")
-HAS_SPELL_635=$(countq "game_spell WHERE spell_id = $GATE_SPELL_PALADIN")   # curated paladin kit imported? (176)
-HAS_CREATURE_103=$(countq "game_creature_template WHERE entry = $GATE_CREATURE_TEST")
-HAS_COMBAT_REGEN_EFFECT=$(countq "game_spell_effect WHERE kind = 169")
-HAS_FACTIONS=$(countq "game_faction")
-HAS_LEVEL_STATS=$(countq "game_level_stats")
-HAS_HEALER=$(countq "game_world_entity WHERE entry = $GATE_HEALER_ENTRY")
-
 # ===================================================================================
 #  Tests. Every wire-client probe mode + orchestrated .sh test is either RUN here or
 #  LOUDLY SKIPPED with its data gate. (Modes stay/relay-observer/relay-sender are
@@ -134,7 +137,7 @@ HAS_HEALER=$(countq "game_world_entity WHERE entry = $GATE_HEALER_ENTRY")
 #  gossip are diagnostic dumps with no assertion — nothing to gate a PASS on.)
 # ===================================================================================
 
-t_logout()           { bash adapters/lyracore/test-logout.sh; }
+t_logout()           { bash "$ADAPTER_DIR"/test-logout.sh; }
 t_who()              { timeout 60 "$WC" TEST Ginger who; }
 t_roll()             { timeout 60 "$WC" TEST Ginger roll 1 100; }
 t_text_emote()       { timeout 60 "$WC" TEST Ginger text-emote; }
@@ -188,14 +191,14 @@ t_friend() {
 # purge/restore in test-ignore-whisper.sh, the position_apart geometry in test-say-range.sh /
 # test-move-relay.sh (via scenario-lib), the heal/resurrect teardowns in test-persist-health.sh /
 # test-repop-delay.sh — standalone runs and suite runs are now the same path.
-t_ignore_whisper() { bash adapters/lyracore/test-ignore-whisper.sh; }
-t_say_range()      { bash adapters/lyracore/test-say-range.sh; }
-t_move_relay()     { bash adapters/lyracore/test-move-relay.sh; }
-t_persist_health() { bash adapters/lyracore/test-persist-health.sh; }
-t_repop_delay()    { bash adapters/lyracore/test-repop-delay.sh; }
-t_respec()         { bash adapters/lyracore/test-respec.sh; }
+t_ignore_whisper() { bash "$ADAPTER_DIR"/test-ignore-whisper.sh; }
+t_say_range()      { bash "$ADAPTER_DIR"/test-say-range.sh; }
+t_move_relay()     { bash "$ADAPTER_DIR"/test-move-relay.sh; }
+t_persist_health() { bash "$ADAPTER_DIR"/test-persist-health.sh; }
+t_repop_delay()    { bash "$ADAPTER_DIR"/test-repop-delay.sh; }
+t_respec()         { bash "$ADAPTER_DIR"/test-respec.sh; }
 
-t_ding()         { bash adapters/lyracore/test-ding.sh; }
+t_ding()         { bash "$ADAPTER_DIR"/test-ding.sh; }
 t_combat_regen() {
   # The probe needs a spell whose effect is kind 169 (A_COMBAT_HEALTH_REGEN_PCT). The 092-era
   # fixture rode on Demon Skin 696 until work-item 024 reclassified its regen to A_PERIODIC_HEAL;
@@ -204,25 +207,25 @@ t_combat_regen() {
   # kind-169 fixture, e.g. the Troll Regeneration racial).
   [ "${HAS_COMBAT_REGEN_EFFECT:-0}" -ge 1 ] \
     || skip "no kind-169 (A_COMBAT_HEALTH_REGEN_PCT) spell effect on this node — the 092 fixture went with 024's Demon-Skin reclassification; needs a kind-169 source (Troll Regeneration import or a new fixture)"
-  bash adapters/lyracore/test-combat-regen.sh
+  bash "$ADAPTER_DIR"/test-combat-regen.sh
 }
 
 t_cast_flow() {
   [ "${HAS_SPELL_686:-0}" -ge 1 ] && [ "${HAS_CREATURE_103:-0}" -ge 1 ] \
     || skip "spell 686 (Shadow Bolt) / creature 103 not imported — needs the cmangos+DBC world import (scripts/import-world.sh), absent on a mock-seed sandbox"
-  bash adapters/lyracore/test-cast-flow.sh
+  bash "$ADAPTER_DIR"/test-cast-flow.sh
 }
 
 t_cast_interrupt() {
   [ "${HAS_SPELL_686:-0}" -ge 1 ] && [ "${HAS_CREATURE_103:-0}" -ge 1 ] \
     || skip "spell 686 (Shadow Bolt) / creature 103 not imported — needs the cmangos+DBC world import, absent on a mock-seed sandbox"
-  bash adapters/lyracore/test-cast-interrupt.sh
+  bash "$ADAPTER_DIR"/test-cast-interrupt.sh
 }
 
 t_ghost_reveal() {
   [ "${HAS_HEALER:-0}" -ge 1 ] || skip "no spirit healer (entry 6491) spawned — world-import-gated; test also requires a LYRACORE_AOI=0 gateway (isolates the on_update reveal path)"
   [ "${LYRACORE_AOI:-1}" = "0" ] || skip "gateway running with LYRACORE_AOI=1 — this test isolates the on_update reveal and needs LYRACORE_AOI=0 (see its header)"
-  bash adapters/lyracore/test-ghost-reveal.sh
+  bash "$ADAPTER_DIR"/test-ghost-reveal.sh
 }
 
 t_init_factions() {
@@ -263,68 +266,68 @@ t_levelup_info() {
 # ---- multi-client AOI/relay regression + soak (work-item 141) ----
 t_aoi_relay() {
   [ "${LYRACORE_AOI:-1}" = "1" ] || skip "gateway must run with LYRACORE_AOI=1 (grid-scoped subscriptions) for the AOI boundary assertions"
-  bash adapters/lyracore/test-aoi-relay.sh
+  bash "$ADAPTER_DIR"/test-aoi-relay.sh
 }
 # Suite gate runs a 60s soak (SOAK_SECS overrides); the >=10-minute acceptance run is recorded in
 # the 141 resolution — a 10-minute wait per suite iteration would make the gate impractical.
-t_soak() { SOAK_SECS="${SOAK_SECS:-60}" bash adapters/lyracore/test-soak.sh; }
+t_soak() { SOAK_SECS="${SOAK_SECS:-60}" bash "$ADAPTER_DIR"/test-soak.sh; }
 
 # ---- scenario runner (work-item 140): the four multi-step gameplay flows ----
-t_scenario_quest()  { bash adapters/lyracore/test-scenario-quest.sh; }
-t_scenario_vendor() { bash adapters/lyracore/test-scenario-vendor.sh; }
-t_scenario_weaponmaster() { bash adapters/lyracore/test-scenario-weaponmaster.sh; }
-t_scenario_train()  { bash adapters/lyracore/test-scenario-train.sh; }
-t_scenario_death()  { bash adapters/lyracore/test-scenario-death.sh; }
+t_scenario_quest()  { bash "$ADAPTER_DIR"/test-scenario-quest.sh; }
+t_scenario_vendor() { bash "$ADAPTER_DIR"/test-scenario-vendor.sh; }
+t_scenario_weaponmaster() { bash "$ADAPTER_DIR"/test-scenario-weaponmaster.sh; }
+t_scenario_train()  { bash "$ADAPTER_DIR"/test-scenario-train.sh; }
+t_scenario_death()  { bash "$ADAPTER_DIR"/test-scenario-death.sh; }
 
 # ---- party/group system (work-item 066): two-session invite/accept/list/xp-split/quest-credit/
 # range-gate/disband/decline acceptance ----
-t_group() { bash adapters/lyracore/test-group.sh; }
-t_party_brains() { bash adapters/lyracore/test-party-brains.sh; }
-t_bot_goals() { bash adapters/lyracore/test-bot-goals.sh; }
-t_bot_serendipity() { bash adapters/lyracore/test-bot-serendipity.sh; }
-t_bot_follow() { bash adapters/lyracore/test-bot-follow.sh; }
+t_group() { bash "$ADAPTER_DIR"/test-group.sh; }
+t_party_brains() { bash "$ADAPTER_DIR"/test-party-brains.sh; }
+t_bot_goals() { bash "$ADAPTER_DIR"/test-bot-goals.sh; }
+t_bot_serendipity() { bash "$ADAPTER_DIR"/test-bot-serendipity.sh; }
+t_bot_follow() { bash "$ADAPTER_DIR"/test-bot-follow.sh; }
 # #51: a PLAYER invites a BOT. Self-SKIPs (exit 77) without the playerbots drop-in, and says so
 # loudly when run single-database — the plane the bug could not occur on (see the script header).
-t_bot_invite() { bash adapters/lyracore/test-bot-invite.sh; }
-t_bot_deadmines() { bash adapters/lyracore/test-bot-deadmines.sh; }
-t_eventai_cast() { bash adapters/lyracore/test-eventai-cast.sh; }
-t_relay_stress() { bash adapters/lyracore/test-relay-stress.sh; }
-t_addon_bridge() { bash adapters/lyracore/test-addon-bridge.sh; }
+t_bot_invite() { bash "$ADAPTER_DIR"/test-bot-invite.sh; }
+t_bot_deadmines() { bash "$ADAPTER_DIR"/test-bot-deadmines.sh; }
+t_eventai_cast() { bash "$ADAPTER_DIR"/test-eventai-cast.sh; }
+t_relay_stress() { bash "$ADAPTER_DIR"/test-relay-stress.sh; }
+t_addon_bridge() { bash "$ADAPTER_DIR"/test-addon-bridge.sh; }
 t_class_roles() {
   # 176: rotations cast REAL imported ids — a no-import sandbox skips loudly, like the other
   # DBC-gated probes (the mechanism itself is covered headlessly by cargo tests).
   [ "${HAS_SPELL_635:-0}" -ge 1 ] || skip "needs the curated class-spell import (game_spell 635 absent)"
-  bash adapters/lyracore/test-class-roles.sh
+  bash "$ADAPTER_DIR"/test-class-roles.sh
 }
 
 # ---- playerbots package acceptance (work-item 142) — the script self-SKIPs (exit 77) when the
 # packages/playerbots drop-in isn't installed/published. ----
-t_playerbots() { bash adapters/lyracore/test-playerbots.sh; }
+t_playerbots() { bash "$ADAPTER_DIR"/test-playerbots.sh; }
 
 # ---- 195: standing/at-war reaction gating on the interaction windows (fixture faction 50900). ----
-t_vendor_reaction() { bash adapters/lyracore/test-vendor-reaction.sh; }
+t_vendor_reaction() { bash "$ADAPTER_DIR"/test-vendor-reaction.sh; }
 # ---- 195B: the rep pane At-War checkbox round-trips CMSG -> row -> INITIALIZE_FACTIONS flag. ----
-t_atwar() { bash adapters/lyracore/test-atwar.sh; }
+t_atwar() { bash "$ADAPTER_DIR"/test-atwar.sh; }
 
 # ---- 1-20 CONTENT regression gate (2026-07-17): class kits + quest chains stayed healthy. ----
-t_content_audit() { bash adapters/lyracore/test-content-audit.sh; }
+t_content_audit() { bash "$ADAPTER_DIR"/test-content-audit.sh; }
 # ---- real imported quest completes end-to-end (accept->kill-credit->turn-in->XP on real data). ----
-t_real_quest() { bash adapters/lyracore/test-real-quest-loop.sh; }
+t_real_quest() { bash "$ADAPTER_DIR"/test-real-quest-loop.sh; }
 # ---- testing-hardening §3.3: walk_to closes real distance (walk 12yd into reach -> swing fires). ----
-t_walkmelee() { bash adapters/lyracore/test-walkmelee.sh; }
+t_walkmelee() { bash "$ADAPTER_DIR"/test-walkmelee.sh; }
 # ---- testing-hardening §3.2: zero packet-lint violations across a login + rep-relay flow. ----
-t_packet_lint() { bash adapters/lyracore/test-packet-lint.sh; }
+t_packet_lint() { bash "$ADAPTER_DIR"/test-packet-lint.sh; }
 # ---- warlock pet command bar (CMSG_PET_ACTION): each bar action sets state + pass_pet honors it. ----
-t_pet_control() { bash adapters/lyracore/test-pet-control.sh; }
+t_pet_control() { bash "$ADAPTER_DIR"/test-pet-control.sh; }
 # ---- exploration/discovery XP (200): entering a fresh subzone awards discovery XP once (+ dedup). ----
-t_exploration() { bash adapters/lyracore/test-exploration.sh; }
+t_exploration() { bash "$ADAPTER_DIR"/test-exploration.sh; }
 # ---- rest state (196): inn fixture flips the PLAYER_BYTES_2 rest byte + resting flag, relays live. ----
-t_rest_state() { bash adapters/lyracore/test-rest-state.sh; }
+t_rest_state() { bash "$ADAPTER_DIR"/test-rest-state.sh; }
 # ---- #19 AC#3: deterministic crash at each of the seven cross-database transfer steps. Self-SKIPs
 # (77) on a single-database node. Deliberately LAST in ALL_TESTS: it OWNS the gateway process for
 # its duration (seven kill/restart cycles) and leaves it running with LYRACORE_SHARD_MAP set, so anything
 # scheduled after it would be running against a differently-configured gateway. ----
-t_transfer_crash_matrix() { bash adapters/lyracore/test-transfer-crash-matrix.sh; }
+t_transfer_crash_matrix() { bash "$ADAPTER_DIR"/test-transfer-crash-matrix.sh; }
 
 # ---------- the run ----------
 ALL_TESTS=(
@@ -337,24 +340,80 @@ ALL_TESTS=(
   aoi_relay soak playerbots pet_control exploration rest_state group party_brains bot_goals class_roles bot_serendipity bot_follow bot_invite bot_deadmines eventai_cast relay_stress addon_bridge
   transfer_crash_matrix
 )
-START=$(date +%s)
-for t in "${ALL_TESTS[@]}"; do run_test "$t"; done
+select_tests() {
+  local requested known candidate name
+  local -a requested_tests=()
+  if [ "$#" -gt 0 ]; then
+    requested_tests=("$@")
+  elif [ -n "${WS_ONLY:-}" ]; then
+    read -r -a requested_tests <<< "${WS_ONLY//$'\n'/ }"
+  else
+    SELECTED_TESTS=("${ALL_TESTS[@]}")
+    return 0
+  fi
+  if [ "${#requested_tests[@]}" -eq 0 ]; then
+    echo "[suite] no tests selected" >&2
+    return 2
+  fi
+  for requested in "${requested_tests[@]}"; do
+    known=0
+    for candidate in "${ALL_TESTS[@]}"; do
+      [ "$requested" = "$candidate" ] && known=1
+    done
+    if [ "$known" -eq 0 ]; then
+      echo "[suite] unknown test: $requested" >&2
+      return 2
+    fi
+  done
+  SELECTED_TESTS=()
+  for name in "${ALL_TESTS[@]}"; do
+    for requested in "${requested_tests[@]}"; do
+      if [ "$name" = "$requested" ]; then
+        SELECTED_TESTS+=("$name")
+        break
+      fi
+    done
+  done
+}
 
-echo
-echo "════════ wire-suite summary ($(( $(date +%s) - START ))s) ════════"
-for r in "${RESULTS[@]}"; do
-  status=${r%% *}; rest=${r#* }; name=${rest%% *}; info=${rest#* }
-  case $status in
-    PASS) printf "  PASS  %s\n" "$name" ;;
-    SKIP) printf "  SKIP  %-18s %s\n" "$name" "$info" ;;
-    FAIL) printf "  FAIL  %-18s log: %s\n" "$name" "$info" ;;
-  esac
-done
-echo "──────────────────────────────────────────────"
-echo "  $PASS_N passed, $FAIL_N failed, $SKIP_N skipped (skip = missing sandbox data, reason above)"
-if [ "$FAIL_N" -gt 0 ]; then
-  echo "  RESULT: FAIL"
-  exit 1
+summarize_results() {
+  echo
+  echo "════════ wire-suite summary ($(( $(date +%s) - START ))s) ════════"
+  for r in "${RESULTS[@]}"; do
+    status=${r%% *}; rest=${r#* }; name=${rest%% *}; info=${rest#* }
+    case $status in
+      PASS) printf "  PASS  %s\n" "$name" ;;
+      SKIP) printf "  SKIP  %-18s %s\n" "$name" "$info" ;;
+      SPAWN) printf "  SPAWN FAILURE  %-18s log: %s\n" "$name" "$info" ;;
+      FAIL) printf "  FAIL  %-18s log: %s\n" "$name" "$info" ;;
+    esac
+  done
+  echo "──────────────────────────────────────────────"
+  echo "  $PASS_N passed, $FAIL_N failed, $SKIP_N skipped, $SPAWN_N startup failures (skip = missing sandbox data, reason above)"
+  if [ "$SPAWN_N" -gt 0 ]; then
+    echo "  RESULT: ERROR, scenarios could not run"
+    return 2
+  fi
+  if [ "$FAIL_N" -gt 0 ]; then
+    echo "  RESULT: FAIL"
+    return 1
+  fi
+  echo "  RESULT: GREEN"
+  return 0
+}
+
+main() {
+  select_tests "$@" || return $?
+  prepare_suite || return $?
+  START=$(date +%s)
+  for t in "${SELECTED_TESTS[@]}"; do
+    reset_party_state
+    run_test "$t"
+  done
+
+  summarize_results
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
 fi
-echo "  RESULT: GREEN"
-exit 0
