@@ -70,6 +70,7 @@ jobs:
         run: |
           bash tests/lyracore-suite.sh
           bash tests/lyracore-bank-flow.sh
+          bash tests/lyracore-dive-flow.sh
 
       - name: Syntax-check the adapter scripts
         shell: bash

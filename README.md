@@ -160,6 +160,12 @@ and money. It takes the account, Character and banker template explicitly, reads
 stdin, and checks open, deposit, relog persistence, withdrawal and bank bag purchase in order. See
 `adapters/lyracore/test-bank-flow.sh` for its exact command and prerequisites.
 
+The LyraCore dive adapter is also Operator-run. It requires explicit imported-liquid coordinates
+and a disposable Character whose name starts with `Dive`. It checks the imported terrain cell
+before changing the Character, then requires the Breath timer start, matching own Character
+drowning log and health drop, timer stop on surfacing, and durable health and position changes.
+See `adapters/lyracore/test-dive-flow.sh` for its command and prerequisites.
+
 ## Build support
 
 Build **5875** (WoW 1.12.1) only. The logon handshake, the world handshake, the opcode numbering

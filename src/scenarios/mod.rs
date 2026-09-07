@@ -5,6 +5,7 @@
 //! main.rs's numeric M2 cast-assertion fallback.
 
 mod bank;
+mod dive;
 mod group;
 mod probes;
 mod relay;
@@ -48,6 +49,7 @@ pub(crate) fn dispatch(
     mcx: &ModeCtx<'_>,
 ) -> Result<bool> {
     Ok(bank::try_dispatch(mode, c, args, mcx)?
+        || dive::try_dispatch(mode, c, args, mcx)?
         || probes::try_dispatch(mode, c, args, mcx)?
         || social::try_dispatch(mode, c, args, mcx)?
         || relay::try_dispatch(mode, c, args, mcx)?
