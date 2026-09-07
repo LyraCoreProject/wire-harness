@@ -9,6 +9,7 @@ mkdir -p "$LYRACORE_DIR"
 source "$root/adapters/lyracore/scenario-lib.sh"
 
 spacetime() {
+  printf '%s\n' "$*" >>"${CALL_LOG:-/dev/null}"
   case "${SQL_CASE:-value}" in
     value) printf ' n\n---\n 0\n' ;;
     empty) printf ' n\n---\n' ;;
@@ -30,6 +31,28 @@ if sql1_required 'SELECT COUNT(*) AS n FROM game_group' fixture >"$test_dir/fail
 fi
 grep -q "SQL failed on 'fixture'" "$test_dir/failure.err"
 grep -q 'database unavailable' "$test_dir/failure.err"
+
+SQL_CASE=value
+[ "$(party_authority_db)" = lyracore-realm ]
+SQL_CASE=failure
+if party_authority_db >"$test_dir/authority.out" 2>"$test_dir/authority.err"; then
+  echo 'failed Realm-core discovery unexpectedly selected the World Shard' >&2
+  exit 1
+fi
+grep -q 'could not discover the party authority' "$test_dir/authority.err"
+CALL_LOG="$test_dir/calls.log"
+: >"$CALL_LOG"
+if leave_any_group 42; then
+  echo 'party cleanup unexpectedly succeeded without a known authority' >&2
+  exit 1
+fi
+! grep -q 'DELETE FROM game_group_member' "$CALL_LOG"
+REALM_CORE_DB=known-realm
+[ "$(party_authority_db)" = known-realm ]
+unset REALM_CORE_DB
+LYRACORE_REALM_CORE=configured-realm
+[ "$(party_authority_db)" = configured-realm ]
+unset LYRACORE_REALM_CORE
 
 ! grep -R -q 'reset_party_state' "$root/adapters/lyracore"
 if grep -n -E 'SELECT (COUNT\(\*\) AS n|leader_guid|loot_method) FROM game_group(_member)?[";]' \

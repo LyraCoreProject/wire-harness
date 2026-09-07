@@ -98,10 +98,12 @@ sql1_required() { # $1=query $2=database (optional)
 party_authority_db() {
   if [ -n "${REALM_CORE_DB:-}" ]; then printf '%s\n' "$REALM_CORE_DB"; return; fi
   if [ -n "${REALM_DB:-}" ]; then printf '%s\n' "$REALM_DB"; return; fi
+  if [ -n "${LYRACORE_REALM_CORE:-}" ]; then printf '%s\n' "$LYRACORE_REALM_CORE"; return; fi
   if spacetime sql lyracore-realm "SELECT COUNT(*) AS n FROM game_group" >/dev/null 2>&1; then
     printf '%s\n' lyracore-realm
   else
-    printf '%s\n' "$DB"
+    echo "[adapter] could not discover the party authority; set REALM_CORE_DB or REALM_DB" >&2
+    return 1
   fi
 }
 
@@ -172,7 +174,7 @@ purge_creatures_near() { # $1=x $2=y $3=radius [$4... = guids to KEEP (fixtures:
 leave_any_group() { # $1=character guid
   local actor rc members
   actor=$(operator_actor "$1") || return $?
-  rc=$(party_authority_db)
+  rc=$(party_authority_db) || return $?
   members=$(sql1_required "SELECT COUNT(*) AS n FROM game_group_member WHERE character_guid = $1" "$rc") \
     || return $?
   if [ "$members" != 0 ] \

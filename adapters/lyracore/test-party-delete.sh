@@ -7,7 +7,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/adapter-env.sh"
 source "$ADAPTER_DIR/scenario-lib.sh"
 scenario_preflight party-delete
 
-RC=$(party_authority_db)
+RC=$(party_authority_db) || exit 1
 NAME=Wspartydel
 SURVIVOR_A_NAME=Wspartyone
 SURVIVOR_B_NAME=Wspartytwo
@@ -43,6 +43,14 @@ party_call() { # $1=op $2=actor guid $3=target guid
   spacetime call "$RC" -- realm_group_op "$1" "$actor" "$3" 0 0 >/dev/null
 }
 
+assert_unrelated_party() { # $1=lifecycle label $2=database $3=plane label
+  local label=$1 database=$2 plane=$3
+  assert_eq "$label: unrelated $plane party row and settings remain" \
+    "$(read_one "$database" "SELECT COUNT(*) AS n FROM game_group WHERE group_id = $OTHER_GROUP AND leader_guid = $OTHER_A AND loot_method = 3 AND loot_threshold = 2 AND master_looter_guid = 0")" "1"
+  assert_eq "$label: unrelated $plane party keeps both members" \
+    "$(read_one "$database" "SELECT COUNT(*) AS n FROM game_group_member WHERE group_id = $OTHER_GROUP AND (character_guid = $OTHER_A OR character_guid = $OTHER_B)")" "2"
+}
+
 for FIXTURE_NAME in "$OTHER_A_NAME" "$OTHER_B_NAME"; do
   [ -z "$(char_guid "$FIXTURE_NAME")" ] \
     || wire_delete "$FIXTURE_NAME" "clear_$FIXTURE_NAME" || exit 1
@@ -54,7 +62,7 @@ party_call 0 "$OTHER_A" "$OTHER_B" || exit 1
 party_call 1 "$OTHER_B" 0 || exit 1
 OTHER_GROUP=$(read_one "$RC" "SELECT group_id FROM game_group_member WHERE character_guid = $OTHER_A") \
   || exit 1
-sync_operator_group_mirror "$DB" "$OTHER_GROUP" "$OTHER_A" 0 2 0 \
+sync_operator_group_mirror "$DB" "$OTHER_GROUP" "$OTHER_A" 3 2 0 \
   "[$OTHER_A,$OTHER_B]" "$OTHER_A" >/dev/null || exit 1
 
 for PASS in 1 2; do
@@ -110,10 +118,8 @@ for PASS in 1 2; do
     "$(read_one "$RC" "SELECT COUNT(*) AS n FROM game_group_member WHERE character_guid = $DELETED OR character_guid = $SURVIVOR_A OR character_guid = $SURVIVOR_B")" "0"
   assert_eq "lifecycle $PASS: no Shard fixture members remain" \
     "$(read_one "$DB" "SELECT COUNT(*) AS n FROM game_group_member WHERE character_guid = $DELETED OR character_guid = $SURVIVOR_A OR character_guid = $SURVIVOR_B")" "0"
-  assert_eq "lifecycle $PASS: unrelated Realm-core party remains" \
-    "$(read_one "$RC" "SELECT COUNT(*) AS n FROM game_group_member WHERE group_id = $OTHER_GROUP AND (character_guid = $OTHER_A OR character_guid = $OTHER_B)")" "2"
-  assert_eq "lifecycle $PASS: unrelated Shard mirror remains" \
-    "$(read_one "$DB" "SELECT COUNT(*) AS n FROM game_group_member WHERE group_id = $OTHER_GROUP AND (character_guid = $OTHER_A OR character_guid = $OTHER_B)")" "2"
+  assert_unrelated_party "lifecycle $PASS" "$RC" Realm-core
+  assert_unrelated_party "lifecycle $PASS" "$DB" "Shard mirror"
 done
 
 wire_delete "$OTHER_A_NAME" delete_other_a || exit 1
