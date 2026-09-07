@@ -632,11 +632,11 @@ struct Shared {
     epoch: Instant,
     stop: AtomicBool,
     /// Cumulative: players that ever reached the world. Used only to decide when a rung has
-    /// finished logging in — NEVER as the offered load (see `live`).
+    /// finished logging in — NEVER as the offered load (see `population`).
     connected: AtomicUsize,
-    /// Players currently in the world. Decremented when a session dies, so a rung that quietly
-    /// loses half its players reports the load it actually offered.
-    live: AtomicUsize,
+    /// Current connected, dead, and known-state populations. One lock makes each client transition
+    /// and measured-window snapshot one logical update.
+    population: Mutex<ClientPopulation>,
     dropped: AtomicUsize,
     failed: AtomicUsize,
     counters: Counters,
@@ -649,6 +649,71 @@ struct Shared {
 impl Shared {
     fn now_ms(&self) -> u32 {
         self.epoch.elapsed().as_millis() as u32
+    }
+}
+
+#[derive(Default)]
+struct ClientPopulation {
+    connected: usize,
+    known: usize,
+    dead: usize,
+}
+
+impl ClientPopulation {
+    fn add_state(&mut self, state: Option<bool>) {
+        if let Some(dead) = state {
+            self.known += 1;
+            self.dead += usize::from(dead);
+        }
+    }
+
+    fn remove_state(&mut self, state: Option<bool>) {
+        if let Some(dead) = state {
+            self.known = self.known.checked_sub(1).expect("known client underflow");
+            if dead {
+                self.dead = self.dead.checked_sub(1).expect("dead client underflow");
+            }
+        }
+    }
+
+    fn snapshot(&self) -> (usize, usize, usize) {
+        (self.connected, self.dead, self.connected - self.known)
+    }
+}
+
+struct ConnectedClientTracker<'a> {
+    population: &'a Mutex<ClientPopulation>,
+    state: Option<bool>,
+}
+
+impl<'a> ConnectedClientTracker<'a> {
+    fn new(population: &'a Mutex<ClientPopulation>, state: Option<bool>) -> Self {
+        let mut current = population.lock().expect("population lock");
+        current.connected += 1;
+        current.add_state(state);
+        drop(current);
+        Self { population, state }
+    }
+
+    fn observe(&mut self, state: Option<bool>) {
+        if state == self.state {
+            return;
+        }
+        let mut current = self.population.lock().expect("population lock");
+        current.remove_state(self.state);
+        current.add_state(state);
+        self.state = state;
+    }
+}
+
+impl Drop for ConnectedClientTracker<'_> {
+    fn drop(&mut self) {
+        let mut current = self.population.lock().expect("population lock");
+        current.remove_state(self.state);
+        current.connected = current
+            .connected
+            .checked_sub(1)
+            .expect("connected client underflow");
     }
 }
 
@@ -674,7 +739,8 @@ fn run_player(idx: usize, cfg: Arc<Cfg>, sh: Arc<Shared>) {
         }
     };
     sh.connected.fetch_add(1, Ordering::Relaxed);
-    sh.live.fetch_add(1, Ordering::Relaxed);
+    let mut client_population =
+        ConnectedClientTracker::new(&sh.population, c.own_character_is_dead());
 
     let combat = idx % 100 < cfg.combat_pct;
 
@@ -813,7 +879,9 @@ fn run_player(idx: usize, cfg: Arc<Cfg>, sh: Arc<Shared>) {
                 }
                 break;
             }
-            match c.recv() {
+            let received = c.recv();
+            client_population.observe(c.own_character_is_dead());
+            match received {
                 Ok(m) => {
                     last_was_ok = true;
                     sh.counters.frames.fetch_add(1, Ordering::Relaxed);
@@ -864,7 +932,6 @@ fn run_player(idx: usize, cfg: Arc<Cfg>, sh: Arc<Shared>) {
             .expect("lag lock")
             .extend(local_lag.drain(..));
     }
-    sh.live.fetch_sub(1, Ordering::Relaxed);
     if left_early {
         sh.dropped.fetch_add(1, Ordering::Relaxed);
     }
@@ -1216,7 +1283,7 @@ fn main() -> Result<()> {
         epoch: Instant::now(),
         stop: AtomicBool::new(false),
         connected: AtomicUsize::new(0),
-        live: AtomicUsize::new(0),
+        population: Mutex::new(ClientPopulation::default()),
         dropped: AtomicUsize::new(0),
         failed: AtomicUsize::new(0),
         counters: Counters::default(),
@@ -1318,7 +1385,7 @@ fn main() -> Result<()> {
         let lag: Vec<u32> = std::mem::take(&mut *sh.wakeup_lags.lock().expect("lag lock"));
         // Read the LIVE population at window close, not the cumulative login tally: a rung that
         // quietly lost sessions must not report the load it briefly had.
-        let live = sh.live.load(Ordering::Relaxed);
+        let (live, dead, death_unknown) = sh.population.lock().expect("population lock").snapshot();
         let dropped = sh.dropped.load(Ordering::Relaxed).saturating_sub(dropped0);
 
         let d = m0.delta(&m1);
@@ -1342,6 +1409,8 @@ fn main() -> Result<()> {
         let stage = Stage {
             players_target: step.target,
             players_connected: live,
+            players_dead: Some(dead),
+            players_death_unknown: Some(death_unknown),
             players_failed: failed,
             window_secs: secs,
             counter_reset: counter_reset.is_some(),
@@ -1476,6 +1545,39 @@ fn write_out(path: &str, body: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dead_population_tracks_transitions_and_disconnect() {
+        let population = Mutex::new(ClientPopulation::default());
+        {
+            let mut client = ConnectedClientTracker::new(&population, None);
+            assert_eq!(population.lock().unwrap().snapshot(), (1, 0, 1));
+            client.observe(Some(false));
+            assert_eq!(population.lock().unwrap().snapshot(), (1, 0, 0));
+
+            client.observe(Some(true));
+            client.observe(Some(true));
+            assert_eq!(population.lock().unwrap().snapshot(), (1, 1, 0));
+
+            client.observe(None);
+            assert_eq!(population.lock().unwrap().snapshot(), (1, 0, 1));
+
+            client.observe(Some(true));
+            client.observe(Some(false));
+            assert_eq!(population.lock().unwrap().snapshot(), (1, 0, 0));
+
+            client.observe(None);
+            assert_eq!(population.lock().unwrap().snapshot(), (1, 0, 1));
+            client.observe(Some(false));
+            client.observe(Some(true));
+            assert_eq!(population.lock().unwrap().snapshot(), (1, 1, 0));
+        }
+        assert_eq!(
+            population.lock().unwrap().snapshot(),
+            (0, 0, 0),
+            "disconnect removes the client and its state"
+        );
+    }
 
     /// The metric→report reduction is the one piece of glue that can silently report zeros, so
     /// drive it with a synthetic before/after scrape pair over a known 10s window.
