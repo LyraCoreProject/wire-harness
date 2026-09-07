@@ -34,9 +34,10 @@ scall_on() { local _db=$1; shift; spacetime call "$_db" -- "$@" >/dev/null 2>&1;
 # Operator arguments to SessionActor. Null ownership permits only a Character without a live claim;
 # cleanup must wait for its World Session to release or expire, never adopt a replacement's token.
 operator_actor() {
-  [[ "$1" =~ ^[0-9]+$ ]] || { echo "[adapter] invalid Character guid" >&2; return 2; }
+  [[ "$1" =~ ^(0|[1-9][0-9]*)$ ]] || { echo "[adapter] invalid Character guid" >&2; return 2; }
   if [ -f "${LYRACORE_DIR:-$PWD}/module/src/account_ownership.rs" ]; then
-    printf '{"guid":"%s","ownership":null}' "$1"
+    # Structured u64 fields require JSON numbers. Print the digits without numeric conversion.
+    printf '{"guid":%s,"ownership":null}' "$1"
   else
     printf '%s' "$1"
   fi

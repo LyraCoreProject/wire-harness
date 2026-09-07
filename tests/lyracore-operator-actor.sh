@@ -44,8 +44,8 @@ check_transfer_release() {
 check_cleanup "$guid"
 check_transfer_release '' 5
 touch "$LYRACORE_DIR/module/src/account_ownership.rs"
-check_cleanup '{"guid":"9007199254740993","ownership":null}'
-check_transfer_release '{"guid":"9007199254740993","ownership":null}' 6
+check_cleanup '{"guid":9007199254740993,"ownership":null}'
+check_transfer_release '{"guid":9007199254740993,"ownership":null}' 6
 
 rm -f "$test_dir/mirror-changed"
 CALL_RESULT=1
@@ -61,9 +61,11 @@ fi
 unset CALL_RESULT
 
 : > "$test_dir/calls"
-if leave_any_group '1","ownership":{}'; then
-  echo 'invalid guid unexpectedly reached cleanup' >&2
-  exit 1
-fi
+for invalid_guid in '001' '1","ownership":{}'; do
+  if leave_any_group "$invalid_guid"; then
+    echo 'invalid guid unexpectedly reached cleanup' >&2
+    exit 1
+  fi
+done
 [ ! -s "$test_dir/calls" ]
 echo 'PASS: Operator cleanup preserves old arguments and encodes unowned SessionActor precisely'
