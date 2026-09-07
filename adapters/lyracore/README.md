@@ -41,6 +41,18 @@ Against a pinned release of the client instead of a local build:
 LYRACORE_DIR=~/src/LyraCore WIRE_BIN=/path/to/vanilla-wire bash adapters/lyracore/wire-suite.sh
 ```
 
+The bank flow is an attended Operator check and is excluded from `wire-suite.sh`. It deletes and
+recreates the named Character, moves its starter item through bank slot 39, and spends 1,000 copper:
+
+```sh
+printf '%s\n' "$PASSWORD" | LYRACORE_DIR=~/src/LyraCore \
+  bash adapters/lyracore/test-bank-flow.sh TEST Banktester 2455
+```
+
+Replace `2455` with a creature template that has `UNIT_NPC_FLAG_BANKER`. The script refuses a
+missing password, malformed identity, unsafe database name, missing template, or non-banker
+template before it changes Character state.
+
 ## Operator gate
 
 These open real sessions against a real server. In an attended session they can collide with

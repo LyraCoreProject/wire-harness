@@ -155,6 +155,11 @@ cipher-state continuity, oversized/corrupt compressed frames, the crash-dump rin
 The scripts under `adapters/` are **live** tests: they need a running server and that server's
 fixtures. They are not part of `cargo test` and CI never runs them.
 
+The LyraCore bank adapter is Operator-run because it changes a disposable Character's inventory
+and money. It takes the account, Character and banker template explicitly, reads the password from
+stdin, and checks open, deposit, relog persistence, withdrawal and bank bag purchase in order. See
+`adapters/lyracore/test-bank-flow.sh` for its exact command and prerequisites.
+
 ## Build support
 
 Build **5875** (WoW 1.12.1) only. The logon handshake, the world handshake, the opcode numbering
