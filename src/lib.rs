@@ -31,7 +31,7 @@ pub use cli::{endpoints, set_endpoints, Endpoints};
 
 use std::io::{Cursor, Read};
 use std::net::{Shutdown, TcpStream};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 
@@ -1108,6 +1108,47 @@ impl WireClient {
             .collect())
     }
 
+    fn wait_for_character_match(
+        &mut self,
+        expected_present: bool,
+        mut matches: impl FnMut(u64, &str) -> bool,
+    ) -> Result<Option<u64>> {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let match_guid = self
+                .char_enum()?
+                .into_iter()
+                .find(|(guid, name, _)| matches(*guid, name))
+                .map(|(guid, _, _)| guid);
+            if match_guid.is_some() == expected_present || Instant::now() >= deadline {
+                return Ok(match_guid);
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    /// Poll character enumeration until `name` reaches the expected presence state, or for three
+    /// seconds. A successful response can precede the next Character-list update.
+    pub fn wait_for_character_presence(
+        &mut self,
+        name: &str,
+        expected_present: bool,
+    ) -> Result<Option<u64>> {
+        self.wait_for_character_match(expected_present, |_, candidate| {
+            candidate.eq_ignore_ascii_case(name)
+        })
+    }
+
+    /// Poll character enumeration until `guid` reaches the expected presence state, or for three
+    /// seconds. A successful response can precede the next Character-list update.
+    pub fn wait_for_character_guid_presence(
+        &mut self,
+        guid: u64,
+        expected_present: bool,
+    ) -> Result<Option<u64>> {
+        self.wait_for_character_match(expected_present, |candidate, _| candidate == guid)
+    }
+
     /// Request the character list and return the raw equipment display_ids for each character.
     /// Returns `(guid, name, display_ids)` where display_ids is a 19-element vec indexed by
     /// equipment slot (slot 15 = main-hand weapon).
@@ -1170,10 +1211,7 @@ impl WireClient {
             WorldResult::CharCreateSuccess | WorldResult::CharCreateNameInUse => {}
             other => bail!("char create failed: {other:?}"),
         }
-        self.char_enum()?
-            .into_iter()
-            .find(|(_, n, _)| n.eq_ignore_ascii_case(name))
-            .map(|(g, _, _)| g)
+        self.wait_for_character_presence(name, true)?
             .ok_or_else(|| anyhow!("character {name:?} not found after create"))
     }
 

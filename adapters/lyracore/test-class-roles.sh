@@ -26,10 +26,9 @@ scall playerbots_despawn_all || true
 # A crashed or failed prior run leaves Ginger in a party with now-despawned bots, and the invite
 # below then fails with GroupFull — which fails the party assert AND every party-scoped rotation
 # assertion after it (tank peel, healer heal, blessing sweep), none of which are about grouping.
-leave_any_group "$GINGER"
+leave_any_group "$GINGER" || { echo "[orch] could not leave Ginger's prior party" >&2; exit 1; }
 purge_entry_rows $WOLF
 sqlq "DELETE FROM game_melee_attack" >/dev/null
-sqlq "DELETE FROM game_group_member WHERE character_guid = $GINGER" >/dev/null
 # Hostility on mock-seed needs staged faction rows (canonical helper; cleared in teardown).
 FACTION_ROWS_BEFORE=$(sql1 "SELECT COUNT(*) AS n FROM game_faction_template")
 stage_hostility
@@ -69,6 +68,9 @@ timeout 400 "$WC" TEST Ginger party-bots "$HOLD" Tankbot1 Healbot1 Dpsbot1 >/tmp
 LEADER=$!
 wait_for_file 40 "$HOLD.ingroup"
 [ -f "$HOLD.ingroup" ] && step_ok "wire: 4-member all-Paladin party formed" || { step_fail "wire: party never formed"; tail -3 /tmp/ws_class_roles.log; }
+GROUP_ID=$(sql1 "SELECT group_id FROM game_group_member WHERE character_guid = $GINGER")
+[ -n "$GROUP_ID" ] || { echo "[orch] Ginger has no group id after the bot party formed" >&2; exit 1; }
+assert_eq "sql: fixture group has four members" "$(sql1 "SELECT COUNT(*) AS n FROM game_group_member WHERE group_id = $GROUP_ID")" "4"
 
 # a real pack (3 wolves — enough for the Consecration ENEMIES_GE_N(3) row) on the squishies
 scall debug_spawn_at_feet "$HEAL" $WOLF 2
@@ -130,6 +132,9 @@ touch "$HOLD"
 wait "$LEADER"; RC_L=$?
 [ $RC_L -eq 0 ] && step_ok "wire: leader flow green (disband -> DESTROYED)" || { step_fail "leader wire flow rc=$RC_L"; tail -3 /tmp/ws_class_roles.log; }
 scall playerbots_despawn_all || true
+wait_for_sql_eq 30 "SELECT COUNT(*) AS n FROM game_group WHERE group_id = $GROUP_ID" 0 \
+  && step_ok "teardown: fixture party dissolved" \
+  || step_fail "teardown: fixture party $GROUP_ID still exists"
 purge_entry_rows $WOLF
 sqlq "DELETE FROM game_melee_attack" >/dev/null
 clear_hostility

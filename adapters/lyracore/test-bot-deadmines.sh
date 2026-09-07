@@ -47,9 +47,8 @@ ginger_home() {
 
 # ---- staging: role trio + Ginger, grouped, leveled for the instance ----
 ginger_home
-leave_any_group "$GINGER"   # a crashed run leaves her in a party; the next invite then says GroupFull
+leave_any_group "$GINGER" || { echo "[orch] could not leave Ginger's prior party" >&2; exit 1; }
 scall playerbots_despawn_all || true
-sqlq "DELETE FROM game_group_member WHERE character_guid = $GINGER" >/dev/null
 sqlq "DELETE FROM game_group_invite WHERE target_guid = $GINGER" >/dev/null
 sqlq "DELETE FROM game_instance_binding WHERE character_guid = $GINGER" >/dev/null
 sqlq "UPDATE game_character SET x = $PAD_X, y = $PAD_Y, z = $PAD_Z, map_id = 0 WHERE guid = $GINGER" >/dev/null
@@ -68,6 +67,9 @@ timeout 400 "$WC" TEST Ginger party-bots "$HOLD" Tankbot1 Healbot1 Dpsbot1 >/tmp
 LEADER=$!
 wait_for_file 40 "$HOLD.ingroup"
 [ -f "$HOLD.ingroup" ] && step_ok "wire: 4-member party formed" || { step_fail "wire: party never formed"; tail -3 /tmp/ws_bot_dm.log; }
+GROUP_ID=$(sql1 "SELECT group_id FROM game_group_member WHERE character_guid = $GINGER")
+[ -n "$GROUP_ID" ] || { echo "[orch] Ginger has no group id after the bot party formed" >&2; exit 1; }
+assert_eq "sql: fixture group has four members" "$(sql1 "SELECT COUNT(*) AS n FROM game_group_member WHERE group_id = $GROUP_ID")" "4"
 
 # ---- 1. Ginger fires the portal (instance CREATE) and lands INSIDE — no relog (277 fixed) ----
 sleep 2
@@ -153,10 +155,12 @@ done
 # ---- teardown ----
 scall playerbots_despawn_all || true
 [ "${IDB:-$DB}" = "$DB" ] || scall_on "$IDB" playerbots_despawn_all || true
-leave_any_group "$GINGER"
+leave_any_group "$GINGER" || step_fail "teardown: could not leave Ginger's fixture party"
 ginger_home
 assert_eq "teardown: Ginger came home to '$DB'" "$(sql1 "SELECT COUNT(*) AS n FROM game_character WHERE guid = $GINGER")" "1"
-sqlq "DELETE FROM game_group_member WHERE character_guid = $GINGER" >/dev/null
+wait_for_sql_eq 30 "SELECT COUNT(*) AS n FROM game_group WHERE group_id = $GROUP_ID" 0 \
+  && step_ok "teardown: fixture party dissolved" \
+  || step_fail "teardown: fixture party $GROUP_ID still exists"
 sqlq "DELETE FROM game_instance_binding WHERE character_guid = $GINGER" >/dev/null
 sqlq "UPDATE game_character SET x = $PAD_X, y = $PAD_Y, z = $PAD_Z, map_id = 0 WHERE guid = $GINGER" >/dev/null
 scall debug_set_level "$GINGER" 5

@@ -282,6 +282,7 @@ t_scenario_death()  { bash "$ADAPTER_DIR"/test-scenario-death.sh; }
 # ---- party/group system (work-item 066): two-session invite/accept/list/xp-split/quest-credit/
 # range-gate/disband/decline acceptance ----
 t_group() { bash "$ADAPTER_DIR"/test-group.sh; }
+t_party_delete() { bash "$ADAPTER_DIR"/test-party-delete.sh; }
 t_party_brains() { bash "$ADAPTER_DIR"/test-party-brains.sh; }
 t_bot_goals() { bash "$ADAPTER_DIR"/test-bot-goals.sh; }
 t_bot_serendipity() { bash "$ADAPTER_DIR"/test-bot-serendipity.sh; }
@@ -337,7 +338,7 @@ ALL_TESTS=(
   persist_health repop_delay respec ding combat_regen cast_flow cast_interrupt ghost_reveal
   init_factions levelup_info vendor_reaction atwar packet_lint walkmelee content_audit real_quest
   scenario_quest scenario_vendor scenario_train scenario_weaponmaster scenario_death
-  aoi_relay soak playerbots pet_control exploration rest_state group party_brains bot_goals class_roles bot_serendipity bot_follow bot_invite bot_deadmines eventai_cast relay_stress addon_bridge
+  aoi_relay soak playerbots pet_control exploration rest_state group party_delete party_brains bot_goals class_roles bot_serendipity bot_follow bot_invite bot_deadmines eventai_cast relay_stress addon_bridge
   transfer_crash_matrix
 )
 select_tests() {
@@ -407,7 +408,6 @@ main() {
   prepare_suite || return $?
   START=$(date +%s)
   for t in "${SELECTED_TESTS[@]}"; do
-    reset_party_state
     run_test "$t"
   done
 

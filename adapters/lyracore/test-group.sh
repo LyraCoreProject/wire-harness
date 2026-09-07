@@ -23,10 +23,10 @@ QUEST=50900; WOLF_ENTRY=51000
 PAD_X=-8905.0; PAD_Y=-440.0; PAD_Z=82.0
 FAR_X=-8905.0; FAR_Y=-640.0    # ~200yd: outside the 74yd group-XP range, same map
 
-# repeatability: no stale groups/invites/quest rows; co-locate both chars on the pad; equal level
+# repeatability: leave only these fixtures' stale parties, then co-locate both chars on the pad
 # (L2: the fixture wolf is L1 — green to both, so each side's share is deterministic base 50 / 2)
-sqlq "DELETE FROM game_group_member WHERE character_guid = $GINGER" >/dev/null
-sqlq "DELETE FROM game_group_member WHERE character_guid = $DFS" >/dev/null
+leave_any_group "$GINGER" || { echo "[orch] could not leave Ginger's prior party" >&2; exit 1; }
+leave_any_group "$DFS" || { echo "[orch] could not leave dfsdfsd's prior party" >&2; exit 1; }
 sqlq "DELETE FROM game_group_invite WHERE target_guid = $GINGER" >/dev/null
 sqlq "DELETE FROM game_group_invite WHERE target_guid = $DFS" >/dev/null
 sqlq "DELETE FROM game_character_quest WHERE character_guid = $GINGER AND quest_entry = $QUEST" >/dev/null
@@ -54,9 +54,11 @@ else
   step_fail "wire: party never formed (leader=$([ -f $HOLD_L.ingroup ] && echo ok || echo no) joiner=$([ -f $HOLD_J.ingroup ] && echo ok || echo no))"
   tail -3 /tmp/ws_group_leader.log /tmp/ws_group_join.log
 fi
-assert_eq "sql: one group row" "$(sql1 "SELECT COUNT(*) AS n FROM game_group")" "1"
-assert_eq "sql: two member rows" "$(sql1 "SELECT COUNT(*) AS n FROM game_group_member")" "2"
-assert_eq "sql: leader is the inviter" "$(sql1 "SELECT leader_guid FROM game_group")" "$GINGER"
+GROUP_ID=$(sql1 "SELECT group_id FROM game_group_member WHERE character_guid = $GINGER")
+[ -n "$GROUP_ID" ] || { echo "[orch] Ginger has no group id after both clients joined" >&2; exit 1; }
+assert_eq "sql: fixture group exists" "$(sql1 "SELECT COUNT(*) AS n FROM game_group WHERE group_id = $GROUP_ID")" "1"
+assert_eq "sql: fixture group has two members" "$(sql1 "SELECT COUNT(*) AS n FROM game_group_member WHERE group_id = $GROUP_ID")" "2"
+assert_eq "sql: fixture leader is the inviter" "$(sql1 "SELECT leader_guid FROM game_group WHERE group_id = $GROUP_ID")" "$GINGER"
 
 # ---- 2+3. XP split + shared quest credit (both sessions still live and in range) ----
 scall debug_seed_scenario_fixtures || true
@@ -114,8 +116,8 @@ wait "$LEADER"; RC_L=$?
 wait "$JOINER"; RC_J=$?
 [ $RC_L -eq 0 ] && step_ok "wire: leader flow green (disband -> SMSG_GROUP_DESTROYED)" || { step_fail "leader wire flow rc=$RC_L"; tail -3 /tmp/ws_group_leader.log; }
 [ $RC_J -eq 0 ] && step_ok "wire: joiner flow green (SMSG_GROUP_DESTROYED on disband)" || { step_fail "joiner wire flow rc=$RC_J"; tail -3 /tmp/ws_group_join.log; }
-assert_eq "sql: zero group rows after disband" "$(sql1 "SELECT COUNT(*) AS n FROM game_group")" "0"
-assert_eq "sql: zero member rows after disband" "$(sql1 "SELECT COUNT(*) AS n FROM game_group_member")" "0"
+assert_eq "sql: fixture group row removed after disband" "$(sql1 "SELECT COUNT(*) AS n FROM game_group WHERE group_id = $GROUP_ID")" "0"
+assert_eq "sql: fixture member rows removed after disband" "$(sql1 "SELECT COUNT(*) AS n FROM game_group_member WHERE group_id = $GROUP_ID")" "0"
 
 # ---- 5. decline flow ----
 sleep 3 # settle the relogins
@@ -140,6 +142,6 @@ sqlq "DELETE FROM game_character_quest WHERE character_guid = $GINGER AND quest_
 sqlq "DELETE FROM game_character_quest WHERE character_guid = $DFS AND quest_entry = $QUEST" >/dev/null
 scall debug_set_level "$GINGER" 10
 rm -f "$HOLD_L" "$HOLD_J" "$HOLD_L.ingroup" "$HOLD_J.ingroup"
-assert_eq "teardown: no lingering invites" "$(sql1 "SELECT COUNT(*) AS n FROM game_group_invite")" "0"
+assert_eq "teardown: no invite for dfsdfsd" "$(sql1 "SELECT COUNT(*) AS n FROM game_group_invite WHERE target_guid = $DFS")" "0"
 
 if [ "$FAILED" -eq 0 ]; then echo "[group] PASS"; exit 0; else echo "[group] FAIL"; exit 1; fi

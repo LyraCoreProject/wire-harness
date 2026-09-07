@@ -219,8 +219,7 @@ fn char_delete(
     if result != WorldResult::CharDeleteSuccess {
         bail!("char-delete: SMSG_CHAR_DELETE result={result:?}, want CharDeleteSuccess");
     }
-    let remaining = c2.char_enum()?;
-    if remaining.iter().any(|(g, _, _)| *g == guid) {
+    if c2.wait_for_character_guid_presence(guid, false)?.is_some() {
         bail!("char-delete: guid={guid} still present in CMSG_CHAR_ENUM after delete");
     }
     println!(
