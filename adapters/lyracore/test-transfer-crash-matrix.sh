@@ -417,8 +417,7 @@ for STEP in "${STEPS[@]}"; do
   # 1. clean gateway → known starting state on the world database.
   gw_start "" || { bad "clean gateway would not start"; MATRIX+=("HARNESS $STEP"); continue; }
   bring_home "$GINGER" || { bad "could not stage Ginger on '$DB'"; MATRIX+=("HARNESS $STEP"); continue; }
-  ACTOR=$(operator_actor "$GINGER") || exit 2
-  spacetime call "$IDB" -- release_transfer "$ACTOR" >/dev/null 2>&1 # clear any fence a previous step left
+  release_operator_transfer "$IDB" "$GINGER" "$GINGER" >/dev/null 2>&1 # clear any fence a previous step left
   # ...and PROVE the instance shard is empty of her before arming anything. `bring_home` only
   # guarantees a copy on '$DB'; it never looks at '$IDB'. A copy left there by an earlier step makes
   # ZERO-LOSS pass no matter what the injection does (the count is already >= 1 before the transfer

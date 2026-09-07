@@ -30,9 +30,22 @@ check_cleanup() {
   [ "$(wc -l < "$test_dir/calls")" -eq 18 ]
 }
 
+check_transfer_release() {
+  local expected=$1 expected_count=$2
+  : > "$test_dir/calls"
+  release_operator_transfer destination 123 "$guid"
+  [ "$(sed -n '2p' "$test_dir/calls")" = destination ]
+  [ "$(sed -n '4p' "$test_dir/calls")" = release_transfer ]
+  [ "$(sed -n '5p' "$test_dir/calls")" = 123 ]
+  [ "$(sed -n '6p' "$test_dir/calls")" = "$expected" ]
+  [ "$(wc -l < "$test_dir/calls")" -eq "$expected_count" ]
+}
+
 check_cleanup "$guid"
+check_transfer_release '' 5
 touch "$LYRACORE_DIR/module/src/account_ownership.rs"
 check_cleanup '{"guid":"9007199254740993","ownership":null}'
+check_transfer_release '{"guid":"9007199254740993","ownership":null}' 6
 
 rm -f "$test_dir/mirror-changed"
 CALL_RESULT=1
