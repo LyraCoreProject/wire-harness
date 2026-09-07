@@ -75,6 +75,12 @@ const LOGON_PORT: u16 = cli::DEFAULT_LOGON_PORT;
 /// magnitude above a legitimate 1.12 movement batch while keeping one corrupt session from asking
 /// the process allocator for hundreds of GiB (issue #210).
 const SMSG_COMPRESSED_MOVES_OPCODE: u16 = 0x02FB;
+/// Vanilla `SMSG_UPDATE_OBJECT`. Kept here because partial VALUES frames cannot pass through the
+/// generated decoder, but their fields still update client-observed state.
+const SMSG_UPDATE_OBJECT_OPCODE: u16 = 0x00A9;
+const UNIT_FIELD_HEALTH_INDEX: u16 = 22;
+const PLAYER_FLAGS_INDEX: u16 = 190;
+const PLAYER_FLAGS_GHOST: u32 = 0x0010;
 const MAX_DECOMPRESSED_FRAME_BYTES: usize = 4 * 1024 * 1024;
 /// Also doubles as the #209 crash-dump body preview length (deliverable 1 asks for 64 bytes of the
 /// failing frame's body) — bumped from the original 16 so ONE constant drives both the inline
@@ -380,6 +386,7 @@ fn read_guarded_world_message<R: Read>(
     r: &mut R,
     dec: &mut DecrypterHalf,
     log: &mut FrameLog,
+    mut observe_frame: impl FnMut(u16, &[u8]),
 ) -> Result<WorldSmsg> {
     if log.pending_frame.is_none() {
         // Header phase: resume (or start) filling the 4 raw header bytes. On error, whatever was
@@ -435,6 +442,7 @@ fn read_guarded_world_message<R: Read>(
     let preview_len = payload_len.min(FRAME_DIAGNOSTIC_BYTES);
     let preview = body[..preview_len].to_vec();
     log.record_attempt(header_raw, opcode, &preview);
+    observe_frame(opcode, &body);
 
     if opcode == SMSG_COMPRESSED_MOVES_OPCODE {
         if payload_len < 4 {
@@ -588,6 +596,9 @@ pub struct WireClient {
     pub self_guid: u64,
     /// guids seen in CREATE_OBJECT updates (mobs/peers), newest last.
     pub seen_guids: Vec<u64>,
+    /// Latest health and ghost flag observed for the logged-in Character.
+    own_character_health: Option<u32>,
+    own_character_ghost: Option<bool>,
     /// Spell ids from SMSG_INITIAL_SPELLS, captured during the `player_login` burst drain.
     pub initial_spells: Vec<u32>,
     /// Per-slot (standing, flag-empty) from SMSG_INITIALIZE_FACTIONS, captured during the
@@ -672,7 +683,7 @@ impl WireClient {
         // a lead-in to a later crash as anything post-login, so nothing is thrown away here.
         let mut frame_log = FrameLog::new(account);
         loop {
-            match read_guarded_world_message(&mut stream, &mut dec, &mut frame_log)? {
+            match read_guarded_world_message(&mut stream, &mut dec, &mut frame_log, |_, _| {})? {
                 WorldSmsg::SMSG_AUTH_RESPONSE(r) => match *r {
                     SMSG_AUTH_RESPONSE::AuthOk { .. } => break,
                     SMSG_AUTH_RESPONSE::AuthWaitQueue { queue_position } => {
@@ -699,6 +710,8 @@ impl WireClient {
             dec,
             self_guid: 0,
             seen_guids: Vec::new(),
+            own_character_health: None,
+            own_character_ghost: None,
             initial_spells: Vec::new(),
             init_factions: Vec::new(),
             init_faction_flags: Vec::new(),
@@ -808,16 +821,41 @@ impl WireClient {
         Ok((hdr.opcode, payload))
     }
 
-    /// Read the next *decodable* SMSG. Skips packets gtker can't parse (the gateway's
-    /// hand-rolled type-stripped partial-VALUES updates — health bars / quest log); their
-    /// frame is still consumed off the cipher stream so the keystream stays in lockstep.
+    /// Read the next *decodable* SMSG. Skips type-stripped partial VALUES packets that gtker cannot
+    /// parse after observing any own-Character health and ghost fields they carry. Their frame is
+    /// still consumed off the cipher stream so the keystream stays in lockstep.
     /// Records any CREATE_OBJECT guids it passes for later targeting.
     pub fn recv(&mut self) -> Result<WorldSmsg> {
         let mut skipped = 0u32;
         loop {
-            match read_guarded_world_message(&mut self.stream, &mut self.dec, &mut self.frame_log) {
+            let self_guid = self.self_guid;
+            let own_character_health = &mut self.own_character_health;
+            let own_character_ghost = &mut self.own_character_ghost;
+            match read_guarded_world_message(
+                &mut self.stream,
+                &mut self.dec,
+                &mut self.frame_log,
+                |opcode, body| {
+                    if opcode != SMSG_UPDATE_OBJECT_OPCODE || self_guid == 0 {
+                        return;
+                    }
+                    for update in values_mask::parse_values_updates(body) {
+                        if update.guid == self_guid {
+                            for (field, value) in update.fields {
+                                match field {
+                                    UNIT_FIELD_HEALTH_INDEX => *own_character_health = Some(value),
+                                    PLAYER_FLAGS_INDEX => {
+                                        *own_character_ghost = Some(value & PLAYER_FLAGS_GHOST != 0)
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                },
+            ) {
                 Ok(m) => {
-                    self.note_guids(&m);
+                    self.note_update(&m);
                     // The real 5875 client answers a cross-map transfer (SMSG_NEW_WORLD after
                     // TRANSFER_PENDING) with MSG_MOVE_WORLDPORT_ACK once its load screen ends —
                     // without the ack the server never rebuilds the entity and the character is
@@ -959,6 +997,51 @@ impl WireClient {
                     }
                 }
             }
+        }
+    }
+
+    fn note_update(&mut self, m: &WorldSmsg) {
+        self.note_guids(m);
+        let WorldSmsg::SMSG_UPDATE_OBJECT(update) = m else {
+            return;
+        };
+        use wow_world_messages::vanilla::{Object, UpdateMask};
+        for object in &update.objects {
+            let (guid, mask) = match object {
+                Object::Values { guid1, mask1 } => (guid1.guid(), mask1),
+                Object::CreateObject { guid3, mask2, .. }
+                | Object::CreateObject2 { guid3, mask2, .. } => (guid3.guid(), mask2),
+                _ => continue,
+            };
+            if guid != self.self_guid {
+                continue;
+            }
+            let (health, ghost) = match mask {
+                UpdateMask::Unit(mask) => (mask.unit_health(), None),
+                UpdateMask::Player(mask) => (
+                    mask.unit_health(),
+                    mask.player_flags()
+                        .map(|flags| flags as u32 & PLAYER_FLAGS_GHOST != 0),
+                ),
+                _ => (None, None),
+            };
+            if let Some(health) = health {
+                self.own_character_health = Some(health.max(0) as u32);
+            }
+            if let Some(ghost) = ghost {
+                self.own_character_ghost = Some(ghost);
+            }
+        }
+    }
+
+    /// Return the latest death state observed for this client's own Character. A corpse has zero
+    /// health. A released ghost has positive health plus `PLAYER_FLAGS_GHOST`. `None` means the
+    /// client has not observed enough fields to distinguish a living Character from a ghost.
+    pub fn own_character_is_dead(&self) -> Option<bool> {
+        match (self.own_character_health, self.own_character_ghost) {
+            (Some(0), _) | (_, Some(true)) => Some(true),
+            (Some(_), Some(false)) => Some(false),
+            _ => None,
         }
     }
 
@@ -1384,6 +1467,8 @@ mod tests {
             dec,
             self_guid: 0,
             seen_guids: Vec::new(),
+            own_character_health: None,
+            own_character_ghost: None,
             initial_spells: Vec::new(),
             init_factions: Vec::new(),
             init_faction_flags: Vec::new(),
@@ -1394,6 +1479,219 @@ mod tests {
 
     fn client_receiving_frame(opcode: u16, payload: &[u8]) -> WireClient {
         client_receiving_frames(&[(opcode, payload)])
+    }
+
+    fn values_frame(guid: u64, fields: &[(u16, u32)]) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&1u32.to_le_bytes());
+        body.push(0); // has_transport
+        body.push(0); // UPDATE_TYPE_VALUES
+
+        let guid_bytes = guid.to_le_bytes();
+        let guid_mask = guid_bytes
+            .iter()
+            .enumerate()
+            .fold(0u8, |mask, (index, byte)| {
+                mask | ((*byte != 0) as u8) << index
+            });
+        body.push(guid_mask);
+        body.extend(
+            guid_bytes
+                .iter()
+                .enumerate()
+                .filter_map(|(index, byte)| (guid_mask & (1 << index) != 0).then_some(*byte)),
+        );
+
+        let blocks = fields
+            .iter()
+            .map(|(field, _)| field / 32)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        body.push(blocks as u8);
+        for block in 0..blocks {
+            let mask = fields
+                .iter()
+                .filter(|(field, _)| field / 32 == block)
+                .fold(0u32, |mask, (field, _)| mask | 1 << (field % 32));
+            body.extend_from_slice(&mask.to_le_bytes());
+        }
+        let mut values = fields.to_vec();
+        values.sort_by_key(|(field, _)| *field);
+        for (_, value) in values {
+            body.extend_from_slice(&value.to_le_bytes());
+        }
+        body
+    }
+
+    fn create_object_frame(guid: u64, health: i32, player_flags: i32) -> Vec<u8> {
+        use wow_world_messages::vanilla::{
+            MovementBlock, Object, ObjectType, ServerMessage, UpdateMask, UpdatePlayer,
+            SMSG_UPDATE_OBJECT,
+        };
+
+        let message = SMSG_UPDATE_OBJECT {
+            has_transport: 0,
+            objects: vec![Object::CreateObject2 {
+                guid3: Guid::new(guid),
+                mask2: UpdateMask::Player(
+                    UpdatePlayer::builder()
+                        .set_object_guid(Guid::new(guid))
+                        .set_unit_health(health)
+                        .set_player_flags(player_flags)
+                        .finalize(),
+                ),
+                movement2: MovementBlock::default(),
+                object_type: ObjectType::Player,
+            }],
+        };
+        let mut frame = Vec::new();
+        message
+            .write_unencrypted_server(&mut std::io::Cursor::new(&mut frame))
+            .expect("encode CREATE_OBJECT2");
+        frame[4..].to_vec()
+    }
+
+    #[test]
+    fn login_snapshot_observes_the_own_character_as_alive() {
+        let guid = 0x2Au64;
+        let snapshot = create_object_frame(guid, 100, 0);
+        let mut client = client_receiving_frame(SMSG_UPDATE_OBJECT_OPCODE, &snapshot);
+        client.self_guid = guid;
+
+        assert!(matches!(
+            client.recv().unwrap(),
+            WorldSmsg::SMSG_UPDATE_OBJECT(_)
+        ));
+        assert_eq!(client.own_character_is_dead(), Some(false));
+    }
+
+    #[test]
+    fn partial_health_updates_observe_death_once_and_later_life() {
+        let guid = 0x2Au64;
+        let dead = values_frame(guid, &[(UNIT_FIELD_HEALTH_INDEX, 0)]);
+        let alive = values_frame(
+            guid,
+            &[(UNIT_FIELD_HEALTH_INDEX, 37), (PLAYER_FLAGS_INDEX, 0)],
+        );
+        let mut client = client_receiving_frames(&[
+            (SMSG_UPDATE_OBJECT_OPCODE, &dead),
+            (0x004D, &[]),
+            (SMSG_UPDATE_OBJECT_OPCODE, &dead),
+            (0x004D, &[]),
+            (SMSG_UPDATE_OBJECT_OPCODE, &alive),
+            (0x004D, &[]),
+        ]);
+        client.self_guid = guid;
+
+        assert!(matches!(
+            client.recv().unwrap(),
+            WorldSmsg::SMSG_LOGOUT_COMPLETE
+        ));
+        assert_eq!(client.own_character_is_dead(), Some(true));
+        assert!(matches!(
+            client.recv().unwrap(),
+            WorldSmsg::SMSG_LOGOUT_COMPLETE
+        ));
+        assert_eq!(client.own_character_is_dead(), Some(true));
+        assert!(matches!(
+            client.recv().unwrap(),
+            WorldSmsg::SMSG_LOGOUT_COMPLETE
+        ));
+        assert_eq!(client.own_character_is_dead(), Some(false));
+    }
+
+    #[test]
+    fn login_snapshot_with_positive_health_and_the_ghost_flag_is_dead() {
+        let guid = 0x2Au64;
+        let ghost = create_object_frame(guid, 1, PLAYER_FLAGS_GHOST as i32);
+        let mut client = client_receiving_frame(SMSG_UPDATE_OBJECT_OPCODE, &ghost);
+        client.self_guid = guid;
+
+        assert!(matches!(
+            client.recv().unwrap(),
+            WorldSmsg::SMSG_UPDATE_OBJECT(_)
+        ));
+        assert_eq!(client.own_character_is_dead(), Some(true));
+    }
+
+    #[test]
+    fn clearing_a_ghost_flag_without_health_leaves_death_unknown() {
+        let guid = 0x2Au64;
+        let ghost = values_frame(guid, &[(PLAYER_FLAGS_INDEX, PLAYER_FLAGS_GHOST)]);
+        let clear = values_frame(guid, &[(PLAYER_FLAGS_INDEX, 0)]);
+        let mut client = client_receiving_frames(&[
+            (SMSG_UPDATE_OBJECT_OPCODE, &ghost),
+            (0x004D, &[]),
+            (SMSG_UPDATE_OBJECT_OPCODE, &clear),
+            (0x004D, &[]),
+        ]);
+        client.self_guid = guid;
+
+        assert!(matches!(
+            client.recv().unwrap(),
+            WorldSmsg::SMSG_LOGOUT_COMPLETE
+        ));
+        assert_eq!(client.own_character_is_dead(), Some(true));
+        assert!(matches!(
+            client.recv().unwrap(),
+            WorldSmsg::SMSG_LOGOUT_COMPLETE
+        ));
+        assert_eq!(client.own_character_is_dead(), None);
+    }
+
+    #[test]
+    fn split_health_and_ghost_fields_classify_in_either_order() {
+        let guid = 0x2Au64;
+        let health = values_frame(guid, &[(UNIT_FIELD_HEALTH_INDEX, 37)]);
+        let clear = values_frame(guid, &[(PLAYER_FLAGS_INDEX, 0)]);
+
+        let assert_logout = |client: &mut WireClient| {
+            assert!(matches!(
+                client.recv().unwrap(),
+                WorldSmsg::SMSG_LOGOUT_COMPLETE
+            ));
+        };
+
+        let mut health_first = client_receiving_frames(&[
+            (SMSG_UPDATE_OBJECT_OPCODE, &health),
+            (0x004D, &[]),
+            (SMSG_UPDATE_OBJECT_OPCODE, &clear),
+            (0x004D, &[]),
+        ]);
+        health_first.self_guid = guid;
+        assert_logout(&mut health_first);
+        assert_eq!(health_first.own_character_is_dead(), None);
+        assert_logout(&mut health_first);
+        assert_eq!(health_first.own_character_is_dead(), Some(false));
+
+        let mut ghost_first = client_receiving_frames(&[
+            (SMSG_UPDATE_OBJECT_OPCODE, &clear),
+            (0x004D, &[]),
+            (SMSG_UPDATE_OBJECT_OPCODE, &health),
+            (0x004D, &[]),
+        ]);
+        ghost_first.self_guid = guid;
+        assert_logout(&mut ghost_first);
+        assert_eq!(ghost_first.own_character_is_dead(), None);
+        assert_logout(&mut ghost_first);
+        assert_eq!(ghost_first.own_character_is_dead(), Some(false));
+
+        let dead = values_frame(guid, &[(UNIT_FIELD_HEALTH_INDEX, 0)]);
+        let mut health_revived_without_flags = client_receiving_frames(&[
+            (SMSG_UPDATE_OBJECT_OPCODE, &dead),
+            (0x004D, &[]),
+            (SMSG_UPDATE_OBJECT_OPCODE, &health),
+            (0x004D, &[]),
+        ]);
+        health_revived_without_flags.self_guid = guid;
+        assert_logout(&mut health_revived_without_flags);
+        assert_eq!(
+            health_revived_without_flags.own_character_is_dead(),
+            Some(true)
+        );
+        assert_logout(&mut health_revived_without_flags);
+        assert_eq!(health_revived_without_flags.own_character_is_dead(), None);
     }
 
     #[test]
@@ -1625,7 +1923,7 @@ mod tests {
         let mut out = Vec::new();
         let mut retries = 0;
         while out.len() < count {
-            match read_guarded_world_message(r, dec, log) {
+            match read_guarded_world_message(r, dec, log, |_, _| {}) {
                 Ok(m) => out.push(m),
                 Err(e) => {
                     let msg = e.to_string().to_lowercase();

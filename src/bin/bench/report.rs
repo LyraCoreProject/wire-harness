@@ -137,7 +137,10 @@ impl Latency {
 
 /// 2 (#21): `target.witness_db` + `stages[].witness_writer` — the second sampled database. Purely
 /// additive and both fields are `#[serde(default)]`, so a v1 artifact still deserializes.
-pub const SCHEMA_VERSION: u32 = 2;
+///
+/// 3: `stages[].players_dead` and `stages[].players_death_unknown`. Both are optional so reports
+/// from older schema versions keep an unknown value instead of turning into a measured zero.
+pub const SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Target {
@@ -252,6 +255,14 @@ pub struct Stage {
     /// A session that dies mid-run must shrink the offered load in the report too, or a rung looks
     /// like it sustained 200 players when 60 of them had gone quiet.
     pub players_connected: usize,
+    /// Connected clients whose latest own health and ghost fields established that their Character
+    /// was dead when the measured window closed. `None` means the report predates this observation.
+    #[serde(default)]
+    pub players_dead: Option<usize>,
+    /// Connected clients whose own health and ghost fields did not yet establish alive or dead at
+    /// the measured window close. `None` means the report predates this observation.
+    #[serde(default)]
+    pub players_death_unknown: Option<usize>,
     pub players_failed: usize,
     pub window_secs: f64,
     pub movement_latency_ms: Latency,
@@ -390,19 +401,25 @@ impl fmt::Display for Report {
         writeln!(f)?;
         writeln!(
             f,
-            "| players | connected | writer occupancy % | queue wait ms | tx/s | move p50 | p95 | p99 | max | samples |"
+            "| players | connected | dead | death unknown | writer occupancy % | queue wait ms | tx/s | move p50 | p95 | p99 | max | samples |"
         )?;
         writeln!(
             f,
-            "|--------:|----------:|-------------------:|--------------:|-----:|---------:|----:|----:|----:|--------:|"
+            "|--------:|----------:|-----:|---------------:|-------------------:|--------------:|-----:|---------:|----:|----:|----:|--------:|"
         )?;
         for s in &self.stages {
             let l = &s.movement_latency_ms;
             writeln!(
                 f,
-                "| {} | {} | {} | {:.1} | {:.0} | {} | {} | {} | {} | {} |",
+                "| {} | {} | {} | {} | {} | {:.1} | {:.0} | {} | {} | {} | {} | {} |",
                 s.players_target,
                 s.players_connected,
+                s.players_dead
+                    .map(|dead| dead.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                s.players_death_unknown
+                    .map(|unknown| unknown.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
                 // A stage whose counters were reset mid-window has no valid occupancy at all —
                 // print the fact, not a number nobody can tell is wrong.
                 if s.counter_reset {
@@ -434,6 +451,18 @@ impl fmt::Display for Report {
                 s.harness.players_dropped,
                 s.window_secs
             )?;
+            match (s.players_dead, s.players_death_unknown) {
+                (Some(dead), Some(unknown)) => writeln!(
+                    f,
+                    "dead {dead}/{} connected clients at window close ({unknown} death state unknown)",
+                    s.players_connected
+                )?,
+                _ => writeln!(
+                    f,
+                    "dead count unknown among {} connected clients (older report)",
+                    s.players_connected
+                )?,
+            }
             writeln!(
                 f,
                 "client:  {} heartbeats sent ({:.1}/s), {} peer moves observed ({:.1}/s), \
@@ -615,7 +644,7 @@ mod tests {
         });
         let text = r.to_string();
         assert!(
-            text.contains("| 200 | 0 | 0.0 | 0.0 | 0 | — | — | — | — | 0 |"),
+            text.contains("| 200 | 0 | unknown | unknown | 0.0 | 0.0 | 0 | — | — | — | — | 0 |"),
             "{text}"
         );
     }
@@ -726,6 +755,8 @@ mod tests {
         r.stages.push(Stage {
             players_target: 50,
             players_connected: 50,
+            players_dead: Some(7),
+            players_death_unknown: Some(2),
             window_secs: 60.0,
             movement_latency_ms: Latency::from_samples(vec![5, 9, 40]),
             writer: Writer {
@@ -750,15 +781,52 @@ mod tests {
         let back: Report = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back.schema_version, SCHEMA_VERSION);
         assert_eq!(back.stages.len(), 1);
+        assert_eq!(back.stages[0].players_dead, Some(7));
+        assert_eq!(back.stages[0].players_death_unknown, Some(2));
         assert_eq!(back.stages[0].movement_latency_ms.p50_ms, 9);
         assert_eq!(back.stages[0].event_tables[0].reaps_per_sec, 1990.0);
 
         let text = r.to_string();
         assert!(
-            text.contains("| 50 | 50 | 31.5 |"),
+            text.contains("| 50 | 50 | 7 | 2 | 31.5 |"),
             "headline row missing:\n{text}"
+        );
+        assert!(
+            text.contains("dead 7/50 connected clients at window close (2 death state unknown)")
         );
         assert!(text.contains("movement_update"));
         assert!(text.contains("## Parked / not captured"));
+    }
+
+    #[test]
+    fn report_distinguishes_measured_zero_from_an_older_unknown_value() {
+        let mut measured = Report::new("measured", Target::default(), RunConfig::default());
+        measured.stages.push(Stage {
+            players_target: 50,
+            players_connected: 50,
+            players_dead: Some(0),
+            players_death_unknown: Some(0),
+            ..Default::default()
+        });
+        let measured_text = measured.to_string();
+        assert!(measured_text.contains("| 50 | 50 | 0 | 0 |"));
+        assert!(measured_text
+            .contains("dead 0/50 connected clients at window close (0 death state unknown)"));
+
+        let mut old_json = serde_json::to_value(&measured).expect("serialize");
+        old_json["schema_version"] = serde_json::json!(2);
+        old_json["stages"][0]
+            .as_object_mut()
+            .expect("stage object")
+            .remove("players_dead");
+        old_json["stages"][0]
+            .as_object_mut()
+            .expect("stage object")
+            .remove("players_death_unknown");
+        let older: Report = serde_json::from_value(old_json).expect("deserialize older report");
+        assert_eq!(older.stages[0].players_dead, None);
+        let older_text = older.to_string();
+        assert!(older_text.contains("| 50 | 50 | unknown | unknown |"));
+        assert!(older_text.contains("dead count unknown among 50 connected clients (older report)"));
     }
 }
