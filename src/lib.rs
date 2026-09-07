@@ -1085,6 +1085,11 @@ impl WireClient {
         }
     }
 
+    /// Return the latest health observed for this client's own Character.
+    pub fn own_character_health(&self) -> Option<u32> {
+        self.own_character_health
+    }
+
     /// Return the latest item guid observed in one own Character inventory slot.
     pub fn own_item_in_slot(&self, slot: u8) -> Option<u64> {
         self.own_character_items.get(slot as usize).copied()
@@ -1820,6 +1825,20 @@ mod tests {
             .expect_err("partial VALUES has no later typed packet");
         assert_eq!(client.own_item_in_slot(23), Some(0));
         assert_eq!(client.own_item_in_slot(39), Some(item));
+    }
+
+    #[test]
+    fn health_drop_is_observed_without_a_followup_decodable_packet() {
+        let guid = 0x2Au64;
+        let update = values_frame(guid, &[(UNIT_FIELD_HEALTH_INDEX, 80)]);
+        let mut client = client_receiving_frame(SMSG_UPDATE_OBJECT_OPCODE, &update);
+        client.self_guid = guid;
+        client.own_character_health = Some(100);
+
+        client
+            .recv()
+            .expect_err("partial VALUES has no later typed packet");
+        assert_eq!(client.own_character_health(), Some(80));
     }
 
     #[test]

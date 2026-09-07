@@ -53,6 +53,18 @@ Replace `2455` with a creature template that has `UNIT_NPC_FLAG_BANKER`. The scr
 missing password, malformed identity, unsafe database name, missing template, or non-banker
 template before it changes Character state.
 
+The dive flow is another attended Operator check. Supply a location backed by an imported liquid
+terrain cell and a disposable Character name that starts with `Dive`:
+
+```sh
+printf '%s\n' "$PASSWORD" | LYRACORE_DIR=~/src/LyraCore \
+  bash adapters/lyracore/test-dive-flow.sh TEST Diveprobe 0 -9000 -400 20 10
+```
+
+The coordinates above show the argument shape only. The Operator must select and verify the real
+surface and submerged heights. The adapter refuses missing or mismatched terrain before it changes
+the Character.
+
 ## Operator gate
 
 These open real sessions against a real server. In an attended session they can collide with
