@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
 # Character deletion must remove only that Character from the Realm-core party and every Shard
-# mirror. A three-member fixture keeps the party alive, which lets this scenario inspect the two
-# surviving members instead of accepting a blanket disband. The same named lifecycle runs twice.
+# mirror. A three-member fixture keeps the party alive so both surviving members can be checked.
+# The same named lifecycle runs twice.
 set -uo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/adapter-env.sh"
 source "$ADAPTER_DIR/scenario-lib.sh"
 scenario_preflight party-delete
-ensure_playerbots_package party-delete
 
 RC=$(party_authority_db)
 NAME=Wspartydel
-PAD_X=-8930.0; PAD_Y=-250.0; PAD_Z=80.0
+SURVIVOR_A_NAME=Wspartyone
+SURVIVOR_B_NAME=Wspartytwo
+OTHER_A_NAME=Wsotherone
+OTHER_B_NAME=Wsothertwo
 
 read_one() { sql1_required "$2" "$1"; } # $1=database $2=query
 
@@ -25,66 +27,66 @@ wait_value() { # $1=seconds $2=database $3=query $4=want
   return 1
 }
 
-bot_guids() {
-  local output
-  if ! output=$(spacetime sql "$DB" "SELECT character_guid FROM pkg_playerbots_bot" 2>&1); then
-    echo "[party-delete] could not read the bot roster on '$DB'" >&2
-    echo "$output" >&2
-    return 1
-  fi
-  printf '%s\n' "$output" | sed -n '3,$p' | grep -oE '[0-9]+' || true
+wire_delete() { # $1=Character name $2=log label
+  timeout 60 "$WC" TEST "$1" char-delete >"/tmp/ws_party_delete_$2.log" 2>&1 \
+    || { tail -5 "/tmp/ws_party_delete_$2.log" >&2; return 1; }
 }
+
+wire_create() { # $1=Character name $2=log label
+  timeout 60 "$WC" TEST "$1" make-char warrior >"/tmp/ws_party_delete_$2.log" 2>&1 \
+    || { tail -5 "/tmp/ws_party_delete_$2.log" >&2; return 1; }
+}
+
+party_call() { # $1=op $2=actor guid $3=target guid
+  local actor
+  actor=$(operator_actor "$2") || return $?
+  spacetime call "$RC" -- realm_group_op "$1" "$actor" "$3" 0 0 >/dev/null
+}
+
+for FIXTURE_NAME in "$OTHER_A_NAME" "$OTHER_B_NAME"; do
+  [ -z "$(char_guid "$FIXTURE_NAME")" ] \
+    || wire_delete "$FIXTURE_NAME" "clear_$FIXTURE_NAME" || exit 1
+  wire_create "$FIXTURE_NAME" "create_$FIXTURE_NAME" || exit 1
+done
+OTHER_A=$(char_guid "$OTHER_A_NAME")
+OTHER_B=$(char_guid "$OTHER_B_NAME")
+party_call 0 "$OTHER_A" "$OTHER_B" || exit 1
+party_call 1 "$OTHER_B" 0 || exit 1
+OTHER_GROUP=$(read_one "$RC" "SELECT group_id FROM game_group_member WHERE character_guid = $OTHER_A") \
+  || exit 1
+sync_operator_group_mirror "$DB" "$OTHER_GROUP" "$OTHER_A" 0 2 0 \
+  "[$OTHER_A,$OTHER_B]" "$OTHER_A" >/dev/null || exit 1
 
 for PASS in 1 2; do
   echo "[party-delete] lifecycle $PASS"
-  timeout 60 "$WC" TEST "$NAME" char-delete >/dev/null 2>&1 \
-    || { echo "[party-delete] could not clear the prior $NAME fixture" >&2; exit 1; }
-  timeout 60 "$WC" TEST "$NAME" make-char warrior >/dev/null 2>&1 \
-    || { echo "[party-delete] could not create $NAME" >&2; exit 1; }
-  DELETED=$(char_guid "$NAME")
-  [ -n "$DELETED" ] || { echo "[party-delete] no guid for $NAME" >&2; exit 1; }
-
-  BEFORE=$(bot_guids) || exit 1
-  BEFORE=$(printf '%s\n' "$BEFORE" | tr '\n' ' ')
-  scall playerbots_spawn_role 2 $PAD_X $PAD_Y $PAD_Z 2 \
-    || { echo "[party-delete] bot spawn failed" >&2; exit 1; }
-  CREATED=""
-  AFTER=$(bot_guids) || exit 1
-  for BOT in $AFTER; do
-    case " $BEFORE " in *" $BOT "*) ;; *) CREATED="$CREATED $BOT" ;; esac
+  for FIXTURE_NAME in "$NAME" "$SURVIVOR_A_NAME" "$SURVIVOR_B_NAME"; do
+    [ -z "$(char_guid "$FIXTURE_NAME")" ] \
+      || wire_delete "$FIXTURE_NAME" "clear_${FIXTURE_NAME}_$PASS" || exit 1
+    wire_create "$FIXTURE_NAME" "create_${FIXTURE_NAME}_$PASS" || exit 1
   done
-  read -r BOT_A BOT_B EXTRA <<<"${CREATED# }"
-  { [ -z "${BOT_A:-}" ] || [ -z "${BOT_B:-}" ] || [ -n "${EXTRA:-}" ]; } \
-    && { echo "[party-delete] expected exactly two new bot guids, got '$CREATED'" >&2; exit 1; }
-  BOT_A_NAME=$(read_one "$DB" "SELECT name FROM game_character WHERE guid = $BOT_A") || exit 1
-  BOT_B_NAME=$(read_one "$DB" "SELECT name FROM game_character WHERE guid = $BOT_B") || exit 1
+  DELETED=$(char_guid "$NAME")
+  SURVIVOR_A=$(char_guid "$SURVIVOR_A_NAME")
+  SURVIVOR_B=$(char_guid "$SURVIVOR_B_NAME")
+  { [ -n "$DELETED" ] && [ -n "$SURVIVOR_A" ] && [ -n "$SURVIVOR_B" ]; } \
+    || { echo "[party-delete] fixture Character creation did not produce three guids" >&2; exit 1; }
 
-  HOLD=/tmp/ws_party_delete_$$_$PASS
-  rm -f "$HOLD" "$HOLD.ingroup"
-  timeout 240 "$WC" TEST "$NAME" party-bots "$HOLD" "$BOT_A_NAME" "$BOT_B_NAME" \
-    >"/tmp/ws_party_delete_$PASS.log" 2>&1 &
-  LEADER=$!
-  wait_for_file 60 "$HOLD.ingroup"
-  [ -f "$HOLD.ingroup" ] \
-    || { echo "[party-delete] fixture party did not form" >&2; tail -5 "/tmp/ws_party_delete_$PASS.log"; exit 1; }
-
-  wait_value 30 "$DB" "SELECT COUNT(*) AS n FROM game_group_member WHERE character_guid = $DELETED" 1 \
-    || exit 1
-  GROUP_ID=$(read_one "$DB" "SELECT group_id FROM game_group_member WHERE character_guid = $DELETED") \
+  party_call 0 "$DELETED" "$SURVIVOR_A" || exit 1
+  party_call 1 "$SURVIVOR_A" 0 || exit 1
+  party_call 0 "$DELETED" "$SURVIVOR_B" || exit 1
+  party_call 1 "$SURVIVOR_B" 0 || exit 1
+  GROUP_ID=$(read_one "$RC" "SELECT group_id FROM game_group_member WHERE character_guid = $DELETED") \
     || exit 1
   wait_value 30 "$RC" "SELECT COUNT(*) AS n FROM game_group_member WHERE group_id = $GROUP_ID" 3 \
     || exit 1
-  assert_eq "lifecycle $PASS: Shard fixture has three members" \
-    "$(read_one "$DB" "SELECT COUNT(*) AS n FROM game_group_member WHERE group_id = $GROUP_ID")" "3"
 
-  # End the World Session without sending CMSG_GROUP_DISBAND, then delete at Character Select.
-  kill "$LEADER" 2>/dev/null || true
-  wait "$LEADER" 2>/dev/null || true
-  wait_value 30 "$DB" "SELECT COUNT(*) AS n FROM game_character WHERE guid = $DELETED AND online = false" 1 \
+  # The Operator calls above stage Realm-core directly. Seed the matching Shard mirror, then let
+  # the Gateway's Character-deletion Relay own every later party and mirror change.
+  sync_operator_group_mirror "$DB" "$GROUP_ID" "$DELETED" 0 2 0 \
+    "[$DELETED,$SURVIVOR_A,$SURVIVOR_B]" "$DELETED" >/dev/null || exit 1
+  wait_value 30 "$DB" "SELECT COUNT(*) AS n FROM game_group_member WHERE group_id = $GROUP_ID" 3 \
     || exit 1
-  timeout 60 "$WC" TEST "$NAME" char-delete >"/tmp/ws_party_delete_char_$PASS.log" 2>&1 \
-    || { tail -5 "/tmp/ws_party_delete_char_$PASS.log" >&2; exit 1; }
 
+  wire_delete "$NAME" "delete_$PASS" || exit 1
   wait_value 30 "$RC" "SELECT COUNT(*) AS n FROM game_group_member WHERE character_guid = $DELETED" 0 \
     || exit 1
   wait_value 30 "$DB" "SELECT COUNT(*) AS n FROM game_group_member WHERE character_guid = $DELETED" 0 \
@@ -94,23 +96,29 @@ for PASS in 1 2; do
   wait_value 30 "$DB" "SELECT COUNT(*) AS n FROM game_group_member WHERE group_id = $GROUP_ID" 2 \
     || exit 1
   assert_eq "lifecycle $PASS: Realm-core keeps both survivors" \
-    "$(read_one "$RC" "SELECT COUNT(*) AS n FROM game_group_member WHERE group_id = $GROUP_ID AND (character_guid = $BOT_A OR character_guid = $BOT_B)")" "2"
+    "$(read_one "$RC" "SELECT COUNT(*) AS n FROM game_group_member WHERE group_id = $GROUP_ID AND (character_guid = $SURVIVOR_A OR character_guid = $SURVIVOR_B)")" "2"
   assert_eq "lifecycle $PASS: Shard mirror keeps both survivors" \
-    "$(read_one "$DB" "SELECT COUNT(*) AS n FROM game_group_member WHERE group_id = $GROUP_ID AND (character_guid = $BOT_A OR character_guid = $BOT_B)")" "2"
+    "$(read_one "$DB" "SELECT COUNT(*) AS n FROM game_group_member WHERE group_id = $GROUP_ID AND (character_guid = $SURVIVOR_A OR character_guid = $SURVIVOR_B)")" "2"
   assert_eq "lifecycle $PASS: deleted Character row is gone" \
     "$(read_one "$DB" "SELECT COUNT(*) AS n FROM game_character WHERE guid = $DELETED")" "0"
 
-  scall debug_delete_character "$BOT_A" \
-    || { echo "[party-delete] bot $BOT_A teardown failed" >&2; exit 1; }
-  scall debug_delete_character "$BOT_B" \
-    || { echo "[party-delete] bot $BOT_B teardown failed" >&2; exit 1; }
+  wire_delete "$SURVIVOR_A_NAME" "delete_a_$PASS" || exit 1
+  wire_delete "$SURVIVOR_B_NAME" "delete_b_$PASS" || exit 1
   wait_value 30 "$RC" "SELECT COUNT(*) AS n FROM game_group WHERE group_id = $GROUP_ID" 0 || exit 1
   wait_value 30 "$DB" "SELECT COUNT(*) AS n FROM game_group WHERE group_id = $GROUP_ID" 0 || exit 1
   assert_eq "lifecycle $PASS: no Realm-core fixture members remain" \
-    "$(read_one "$RC" "SELECT COUNT(*) AS n FROM game_group_member WHERE character_guid = $DELETED OR character_guid = $BOT_A OR character_guid = $BOT_B")" "0"
+    "$(read_one "$RC" "SELECT COUNT(*) AS n FROM game_group_member WHERE character_guid = $DELETED OR character_guid = $SURVIVOR_A OR character_guid = $SURVIVOR_B")" "0"
   assert_eq "lifecycle $PASS: no Shard fixture members remain" \
-    "$(read_one "$DB" "SELECT COUNT(*) AS n FROM game_group_member WHERE character_guid = $DELETED OR character_guid = $BOT_A OR character_guid = $BOT_B")" "0"
-  rm -f "$HOLD" "$HOLD.ingroup"
+    "$(read_one "$DB" "SELECT COUNT(*) AS n FROM game_group_member WHERE character_guid = $DELETED OR character_guid = $SURVIVOR_A OR character_guid = $SURVIVOR_B")" "0"
+  assert_eq "lifecycle $PASS: unrelated Realm-core party remains" \
+    "$(read_one "$RC" "SELECT COUNT(*) AS n FROM game_group_member WHERE group_id = $OTHER_GROUP AND (character_guid = $OTHER_A OR character_guid = $OTHER_B)")" "2"
+  assert_eq "lifecycle $PASS: unrelated Shard mirror remains" \
+    "$(read_one "$DB" "SELECT COUNT(*) AS n FROM game_group_member WHERE group_id = $OTHER_GROUP AND (character_guid = $OTHER_A OR character_guid = $OTHER_B)")" "2"
 done
+
+wire_delete "$OTHER_A_NAME" delete_other_a || exit 1
+wire_delete "$OTHER_B_NAME" delete_other_b || exit 1
+wait_value 30 "$RC" "SELECT COUNT(*) AS n FROM game_group WHERE group_id = $OTHER_GROUP" 0 || exit 1
+wait_value 30 "$DB" "SELECT COUNT(*) AS n FROM game_group WHERE group_id = $OTHER_GROUP" 0 || exit 1
 
 if [ "$FAILED" -eq 0 ]; then echo "[party-delete] PASS"; exit 0; else echo "[party-delete] FAIL"; exit 1; fi

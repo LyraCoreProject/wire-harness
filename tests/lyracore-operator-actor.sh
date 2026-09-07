@@ -39,11 +39,24 @@ check_transfer_release() {
   [ "$(wc -l < "$test_dir/calls")" -eq "$expected_count" ]
 }
 
+check_mirror_sync() {
+  local expected=$1 expected_count=$2
+  : > "$test_dir/calls"
+  sync_operator_group_mirror world 7 "$guid" 0 2 0 "[$guid,2,3]" "$guid"
+  [ "$(sed -n '2p' "$test_dir/calls")" = world ]
+  [ "$(sed -n '4p' "$test_dir/calls")" = sync_group_mirror ]
+  [ "$(sed -n '10p' "$test_dir/calls")" = "[$guid,2,3]" ]
+  [ "$(sed -n '11p' "$test_dir/calls")" = "$expected" ]
+  [ "$(wc -l < "$test_dir/calls")" -eq "$expected_count" ]
+}
+
 check_cleanup "$guid"
 check_transfer_release '' 5
+check_mirror_sync '' 10
 touch "$LYRACORE_DIR/module/src/account_ownership.rs"
 check_cleanup '{"guid":9007199254740993,"ownership":null}'
 check_transfer_release '{"guid":9007199254740993,"ownership":null}' 6
+check_mirror_sync '{"guid":9007199254740993,"ownership":null}' 11
 
 MEMBERS=0
 : > "$test_dir/calls"

@@ -54,6 +54,17 @@ release_operator_transfer() { # $1=Shard $2=Transfer id $3=Character guid
   fi
 }
 
+# Replace one Shard party mirror through the legacy or Account-owned Operator ABI.
+sync_operator_group_mirror() { # $1=Shard $2=group $3=leader $4=method $5=threshold $6=master $7=members $8=Character guid
+  local actor
+  actor=$(operator_actor "$8") || return $?
+  if [ "$actor" = "$8" ]; then
+    spacetime call "$1" -- sync_group_mirror "$2" "$3" "$4" "$5" "$6" "$7"
+  else
+    spacetime call "$1" -- sync_group_mirror "$2" "$3" "$4" "$5" "$6" "$7" "$actor"
+  fi
+}
+
 # `${2:-}` not `$2`: callers that omit the database are the common case, and this library is sourced
 # by scripts running under `set -u` (test-transfer-crash-matrix.sh does) where a bare `$2` on a
 # one-argument call is a fatal unbound-variable error. Empty then falls through sqlq's own `${2:-$DB}`
