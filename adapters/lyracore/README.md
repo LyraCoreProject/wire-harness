@@ -26,7 +26,7 @@ check this table first.
 | `adapter-env.sh` | Resolves `HARNESS_DIR` (this repo) and `LYRACORE_DIR` (the server checkout), cds into the latter, and provides `wire_build`. Every orchestrator sources it first. |
 | `wire.sh` | **The seam.** The only path from these scripts into the generic client: fixture credentials + endpoints → `vanilla-wire`'s CLI. |
 | `scenario-lib.sh` | Shared helpers: `spacetime sql`/`call` wrappers, disposable characters, stay sessions, assertions. Source, don't run. |
-| `wire-suite.sh` | The full regression suite. |
+| `wire-suite.sh` | The full regression suite. Pass test names as arguments, or set `WS_ONLY`, for a subset. |
 | `test-*.sh` | One scenario each. |
 
 ## Running one
@@ -46,3 +46,10 @@ LYRACORE_DIR=~/src/LyraCore WIRE_BIN=/path/to/vanilla-wire bash adapters/lyracor
 These open real sessions against a real server. In an attended session they can collide with
 someone's play session — LyraCore's convention is that live wire tests are operator-gated. Ask
 before running one against a stack you do not own.
+
+The suite resolves scenario files from the adapter directory. Exit codes 126 and 127 count as
+startup failures, separately from failed assertions. An unknown test name exits before fixture
+setup. Subsets retain suite order, so the Transfer crash matrix still runs last.
+
+Run `bash tests/lyracore-suite.sh` for the offline dispatch check. It uses temporary scripts and
+starts no Realm.
