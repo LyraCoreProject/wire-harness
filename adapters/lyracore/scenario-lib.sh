@@ -29,6 +29,30 @@ scall() { spacetime call "$DB" -- "$@" >/dev/null 2>&1; }
 # shard) is not on $DB any more, and a debug reducer fired at $DB then fails with "no live entity"
 # — silently, since scall swallows output. $1=database, rest = reducer + args.
 scall_on() { local _db=$1; shift; spacetime call "$_db" -- "$@" >/dev/null 2>&1; }
+
+# The adapter's checkout must match the published Module. Durable Account ownership changes these
+# Operator arguments to SessionActor. Null ownership permits only a Character without a live claim;
+# cleanup must wait for its World Session to release or expire, never adopt a replacement's token.
+operator_actor() {
+  [[ "$1" =~ ^[0-9]+$ ]] || { echo "[adapter] invalid Character guid" >&2; return 2; }
+  if [ -f "${LYRACORE_DIR:-$PWD}/module/src/account_ownership.rs" ]; then
+    printf '{"guid":"%s","ownership":null}' "$1"
+  else
+    printf '%s' "$1"
+  fi
+}
+
+# Transfer keeps its id argument and appends the Actor in the ownership-aware Module.
+release_operator_transfer() { # $1=Shard $2=Transfer id $3=Character guid
+  local actor
+  actor=$(operator_actor "$3") || return $?
+  if [ "$actor" = "$3" ]; then
+    spacetime call "$1" -- release_transfer "$2"
+  else
+    spacetime call "$1" -- release_transfer "$2" "$actor"
+  fi
+}
+
 # `${2:-}` not `$2`: callers that omit the database are the common case, and this library is sourced
 # by scripts running under `set -u` (test-transfer-crash-matrix.sh does) where a bare `$2` on a
 # one-argument call is a fatal unbound-variable error. Empty then falls through sqlq's own `${2:-$DB}`
@@ -99,9 +123,14 @@ purge_creatures_near() { # $1=x $2=y $3=radius [$4... = guids to KEEP (fixtures:
 # membership standing. The next invite then fails with `GroupFull` while $DB looks empty, and every
 # party-dependent assertion after it fails for a reason that has nothing to do with what it tests.
 # Uses the product's own LEAVE op (realm_op::LEAVE = 3) so the disband/mirror-sync rules run; the
-# local delete is the single-database fallback. Both are best-effort — "not in a group" is success.
+# local delete is the legacy single-database fallback. With Account ownership, a refused LEAVE
+# must stop cleanup before any local mirror changes.
 leave_any_group() { # $1=character guid
-  spacetime call "${REALM_CORE_DB:-lyracore-realm}" -- realm_group_op 3 "$1" 0 0 0 >/dev/null 2>&1
+  local actor
+  actor=$(operator_actor "$1") || return $?
+  if ! spacetime call "${REALM_CORE_DB:-lyracore-realm}" -- realm_group_op 3 "$actor" 0 0 0 >/dev/null 2>&1; then
+    [ "$actor" = "$1" ] || return 1
+  fi
   sqlq "DELETE FROM game_group_member WHERE character_guid = $1" >/dev/null 2>&1
   return 0
 }
@@ -192,9 +221,12 @@ restart_gateway() {
 # Drives the product's own ops: LEAVE each member on realm-core (disband happens on the last one),
 # then push an EMPTY roster to each world shard's mirror, which is the documented disband case.
 reset_party_state() {
-  local rc="${REALM_CORE_DB:-lyracore-realm}" g
+  local rc="${REALM_CORE_DB:-lyracore-realm}" g actor
   for g in $(spacetime sql "$rc" "SELECT character_guid FROM game_group_member" 2>/dev/null | sed -n '3,$p' | grep -oE '[0-9]+'); do
-    spacetime call "$rc" -- realm_group_op 3 "$g" 0 0 0 >/dev/null 2>&1
+    actor=$(operator_actor "$g") || return $?
+    if ! spacetime call "$rc" -- realm_group_op 3 "$actor" 0 0 0 >/dev/null 2>&1; then
+      [ "$actor" = "$g" ] || return 1
+    fi
   done
   # `group_id`, not `id` (module/src/group.rs) — a wrong column name makes `spacetime sql` return an
   # ERROR that reads as "no rows" once stderr is swallowed, so the loop silently cleared nothing
