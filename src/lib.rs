@@ -81,11 +81,28 @@ const SMSG_UPDATE_OBJECT_OPCODE: u16 = 0x00A9;
 const UNIT_FIELD_HEALTH_INDEX: u16 = 22;
 const PLAYER_FLAGS_INDEX: u16 = 190;
 const PLAYER_FLAGS_GHOST: u32 = 0x0010;
+const PLAYER_FIELD_INV_SLOT_HEAD_INDEX: u16 = 486;
+const PLAYER_ITEM_SLOT_COUNT: usize = 113;
 const MAX_DECOMPRESSED_FRAME_BYTES: usize = 4 * 1024 * 1024;
 /// Also doubles as the #209 crash-dump body preview length (deliverable 1 asks for 64 bytes of the
 /// failing frame's body) — bumped from the original 16 so ONE constant drives both the inline
 /// error-message preview and the on-disk diagnostic, instead of two windows that could drift.
 const FRAME_DIAGNOSTIC_BYTES: usize = 64;
+
+fn note_inventory_word(items: &mut [u64], field: u16, value: u32) {
+    let Some(offset) = field.checked_sub(PLAYER_FIELD_INV_SLOT_HEAD_INDEX) else {
+        return;
+    };
+    let slot = usize::from(offset / 2);
+    let Some(item) = items.get_mut(slot) else {
+        return;
+    };
+    if offset % 2 == 0 {
+        *item = (*item & 0xFFFF_FFFF_0000_0000) | u64::from(value);
+    } else {
+        *item = (*item & 0x0000_0000_FFFF_FFFF) | (u64::from(value) << 32);
+    }
+}
 /// How many trailing successfully-decoded frames [`FrameLog`] keeps for the #209 crash dump — enough
 /// to see the sequence leading into a failure without an unbounded dump file over a long session.
 const CRASH_RING_CAPACITY: usize = 32;
@@ -599,6 +616,8 @@ pub struct WireClient {
     /// Latest health and ghost flag observed for the logged-in Character.
     own_character_health: Option<u32>,
     own_character_ghost: Option<bool>,
+    /// Latest item guid observed in each own Character inventory slot (0..=112).
+    own_character_items: Vec<u64>,
     /// Spell ids from SMSG_INITIAL_SPELLS, captured during the `player_login` burst drain.
     pub initial_spells: Vec<u32>,
     /// Per-slot (standing, flag-empty) from SMSG_INITIALIZE_FACTIONS, captured during the
@@ -712,6 +731,7 @@ impl WireClient {
             seen_guids: Vec::new(),
             own_character_health: None,
             own_character_ghost: None,
+            own_character_items: vec![0; PLAYER_ITEM_SLOT_COUNT],
             initial_spells: Vec::new(),
             init_factions: Vec::new(),
             init_faction_flags: Vec::new(),
@@ -831,6 +851,7 @@ impl WireClient {
             let self_guid = self.self_guid;
             let own_character_health = &mut self.own_character_health;
             let own_character_ghost = &mut self.own_character_ghost;
+            let own_character_items = &mut self.own_character_items;
             match read_guarded_world_message(
                 &mut self.stream,
                 &mut self.dec,
@@ -847,7 +868,7 @@ impl WireClient {
                                     PLAYER_FLAGS_INDEX => {
                                         *own_character_ghost = Some(value & PLAYER_FLAGS_GHOST != 0)
                                     }
-                                    _ => {}
+                                    _ => note_inventory_word(own_character_items, field, value),
                                 }
                             }
                         }
@@ -1021,6 +1042,7 @@ impl WireClient {
                 // prior Character before applying its fields. A VALUES mask remains a partial update.
                 self.own_character_health = None;
                 self.own_character_ghost = None;
+                self.own_character_items.fill(0);
             }
             let (health, ghost) = match mask {
                 UpdateMask::Unit(mask) => (mask.unit_health(), None),
@@ -1038,6 +1060,17 @@ impl WireClient {
             if let Some(ghost) = ghost {
                 self.own_character_ghost = Some(ghost);
             }
+            if let UpdateMask::Player(player) = mask {
+                for slot in 0..self.own_character_items.len() {
+                    let Ok(item_slot) = wow_world_messages::vanilla::ItemSlot::try_from(slot as u8)
+                    else {
+                        continue;
+                    };
+                    if let Some(item) = player.player_field_inv(item_slot) {
+                        self.own_character_items[slot] = item.guid();
+                    }
+                }
+            }
         }
     }
 
@@ -1050,6 +1083,11 @@ impl WireClient {
             (Some(_), Some(false)) => Some(false),
             _ => None,
         }
+    }
+
+    /// Return the latest item guid observed in one own Character inventory slot.
+    pub fn own_item_in_slot(&self, slot: u8) -> Option<u64> {
+        self.own_character_items.get(slot as usize).copied()
     }
 
     /// Request the character list. Returns `(guid, name, class)` per character.
@@ -1152,6 +1190,7 @@ impl WireClient {
         self.self_guid = guid;
         self.own_character_health = None;
         self.own_character_ghost = None;
+        self.own_character_items.fill(0);
         self.send(&CMSG_PLAYER_LOGIN {
             guid: Guid::new(guid),
         })?;
@@ -1478,6 +1517,7 @@ mod tests {
             seen_guids: Vec::new(),
             own_character_health: None,
             own_character_ghost: None,
+            own_character_items: vec![0; PLAYER_ITEM_SLOT_COUNT],
             initial_spells: Vec::new(),
             init_factions: Vec::new(),
             init_faction_flags: Vec::new(),
@@ -1533,7 +1573,12 @@ mod tests {
         body
     }
 
-    fn create_object_frame(guid: u64, health: Option<i32>, player_flags: Option<i32>) -> Vec<u8> {
+    fn create_object_frame(
+        guid: u64,
+        health: Option<i32>,
+        player_flags: Option<i32>,
+        item: Option<(u8, u64)>,
+    ) -> Vec<u8> {
         use wow_world_messages::vanilla::{
             MovementBlock, Object, ObjectType, ServerMessage, UpdateMask, UpdatePlayer,
             SMSG_UPDATE_OBJECT,
@@ -1545,6 +1590,12 @@ mod tests {
         }
         if let Some(player_flags) = player_flags {
             player = player.set_player_flags(player_flags);
+        }
+        if let Some((slot, item)) = item {
+            player = player.set_player_field_inv(
+                wow_world_messages::vanilla::ItemSlot::try_from(slot).unwrap(),
+                Guid::new(item),
+            );
         }
         let message = SMSG_UPDATE_OBJECT {
             has_transport: 0,
@@ -1582,7 +1633,7 @@ mod tests {
     fn login_snapshot_observes_the_own_character_as_alive() {
         let guid = 0x2Au64;
         // Create masks omit zero fields, so the absent PLAYER_FLAGS means its initial value is zero.
-        let snapshot = create_object_frame(guid, Some(100), None);
+        let snapshot = create_object_frame(guid, Some(100), None, None);
         let mut client = client_receiving_frame(SMSG_UPDATE_OBJECT_OPCODE, &snapshot);
         client.self_guid = guid;
 
@@ -1595,7 +1646,7 @@ mod tests {
     #[test]
     fn login_snapshot_with_absent_health_observes_a_dead_character() {
         let guid = 0x2Au64;
-        let snapshot = create_object_frame(guid, None, None);
+        let snapshot = create_object_frame(guid, None, None, None);
         let mut client = client_receiving_frame(SMSG_UPDATE_OBJECT_OPCODE, &snapshot);
         client.self_guid = guid;
 
@@ -1643,7 +1694,7 @@ mod tests {
     #[test]
     fn login_snapshot_with_positive_health_and_the_ghost_flag_is_dead() {
         let guid = 0x2Au64;
-        let ghost = create_object_frame(guid, Some(1), Some(PLAYER_FLAGS_GHOST as i32));
+        let ghost = create_object_frame(guid, Some(1), Some(PLAYER_FLAGS_GHOST as i32), None);
         let mut client = client_receiving_frame(SMSG_UPDATE_OBJECT_OPCODE, &ghost);
         client.self_guid = guid;
 
@@ -1657,8 +1708,8 @@ mod tests {
     #[test]
     fn a_later_create_snapshot_replaces_stale_ghost_state() {
         let guid = 0x2Au64;
-        let ghost = create_object_frame(guid, Some(1), Some(PLAYER_FLAGS_GHOST as i32));
-        let alive = create_object_frame(guid, Some(100), None);
+        let ghost = create_object_frame(guid, Some(1), Some(PLAYER_FLAGS_GHOST as i32), None);
+        let alive = create_object_frame(guid, Some(100), None, None);
         let mut client = client_receiving_frames(&[
             (SMSG_UPDATE_OBJECT_OPCODE, &ghost),
             (SMSG_UPDATE_OBJECT_OPCODE, &alive),
@@ -1678,11 +1729,106 @@ mod tests {
     }
 
     #[test]
+    fn own_inventory_create_is_a_sparse_snapshot() {
+        let guid = 0x2Au64;
+        let item = 0x4000_0000_ABCD_1234u64;
+        let occupied = create_object_frame(guid, Some(100), None, Some((39, item)));
+        let empty = create_object_frame(guid, Some(100), None, None);
+        let mut client = client_receiving_frames(&[
+            (SMSG_UPDATE_OBJECT_OPCODE, &occupied),
+            (SMSG_UPDATE_OBJECT_OPCODE, &empty),
+        ]);
+        client.self_guid = guid;
+
+        client.recv().unwrap();
+        assert_eq!(client.own_item_in_slot(39), Some(item));
+        client.recv().unwrap();
+        assert_eq!(client.own_item_in_slot(39), Some(0));
+    }
+
+    #[test]
+    fn split_inventory_guid_words_compose_and_unrelated_updates_are_ignored() {
+        let guid = 0x2Au64;
+        let item = 0x4000_0000_ABCD_1234u64;
+        let field = PLAYER_FIELD_INV_SLOT_HEAD_INDEX + 39 * 2;
+        let low = values_frame(guid, &[(field, item as u32)]);
+        let unrelated = values_frame(guid + 1, &[(field + 1, (item >> 32) as u32)]);
+        let high = values_frame(guid, &[(field + 1, (item >> 32) as u32)]);
+        let mut client = client_receiving_frames(&[
+            (SMSG_UPDATE_OBJECT_OPCODE, &low),
+            (0x004D, &[]),
+            (SMSG_UPDATE_OBJECT_OPCODE, &unrelated),
+            (0x004D, &[]),
+            (SMSG_UPDATE_OBJECT_OPCODE, &high),
+            (0x004D, &[]),
+        ]);
+        client.self_guid = guid;
+
+        client.recv().unwrap();
+        assert_eq!(client.own_item_in_slot(39), Some(item & 0xFFFF_FFFF));
+        client.recv().unwrap();
+        assert_eq!(client.own_item_in_slot(39), Some(item & 0xFFFF_FFFF));
+        client.recv().unwrap();
+        assert_eq!(client.own_item_in_slot(39), Some(item));
+    }
+
+    #[test]
+    fn inventory_guid_words_also_compose_high_first() {
+        let guid = 0x2Au64;
+        let item = 0x4000_0000_ABCD_1234u64;
+        let field = PLAYER_FIELD_INV_SLOT_HEAD_INDEX + 40 * 2;
+        let high = values_frame(guid, &[(field + 1, (item >> 32) as u32)]);
+        let low = values_frame(guid, &[(field, item as u32)]);
+        let mut client = client_receiving_frames(&[
+            (SMSG_UPDATE_OBJECT_OPCODE, &high),
+            (0x004D, &[]),
+            (SMSG_UPDATE_OBJECT_OPCODE, &low),
+            (0x004D, &[]),
+        ]);
+        client.self_guid = guid;
+
+        client.recv().unwrap();
+        assert_eq!(
+            client.own_item_in_slot(40),
+            Some(item & 0xFFFF_FFFF_0000_0000)
+        );
+        client.recv().unwrap();
+        assert_eq!(client.own_item_in_slot(40), Some(item));
+    }
+
+    #[test]
+    fn inventory_move_is_observed_without_a_followup_decodable_packet() {
+        let guid = 0x2Au64;
+        let item = 0x4000_0000_ABCD_1234u64;
+        let source = PLAYER_FIELD_INV_SLOT_HEAD_INDEX + 23 * 2;
+        let destination = PLAYER_FIELD_INV_SLOT_HEAD_INDEX + 39 * 2;
+        let moved = values_frame(
+            guid,
+            &[
+                (source, 0),
+                (source + 1, 0),
+                (destination, item as u32),
+                (destination + 1, (item >> 32) as u32),
+            ],
+        );
+        let mut client = client_receiving_frame(SMSG_UPDATE_OBJECT_OPCODE, &moved);
+        client.self_guid = guid;
+        client.own_character_items[23] = item;
+
+        client
+            .recv()
+            .expect_err("partial VALUES has no later typed packet");
+        assert_eq!(client.own_item_in_slot(23), Some(0));
+        assert_eq!(client.own_item_in_slot(39), Some(item));
+    }
+
+    #[test]
     fn starting_player_login_clears_the_previous_character_observation() {
         let mut client = client_receiving_frames(&[]);
         client.self_guid = 1;
         client.own_character_health = Some(1);
         client.own_character_ghost = Some(true);
+        client.own_character_items[39] = 0x4000_0000_ABCD_1234;
 
         client
             .player_login(2)
@@ -1690,6 +1836,7 @@ mod tests {
 
         assert_eq!(client.self_guid, 2);
         assert_eq!(client.own_character_is_dead(), None);
+        assert_eq!(client.own_item_in_slot(39), Some(0));
     }
 
     #[test]

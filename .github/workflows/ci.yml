@@ -67,7 +67,9 @@ jobs:
 
       - name: Test suite dispatch without a Realm
         shell: bash
-        run: bash tests/lyracore-suite.sh
+        run: |
+          bash tests/lyracore-suite.sh
+          bash tests/lyracore-bank-flow.sh
 
       - name: Syntax-check the adapter scripts
         shell: bash

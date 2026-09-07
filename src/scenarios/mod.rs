@@ -4,6 +4,7 @@
 //! "not mine, try the next family". Unrecognized modes fall through every family back to
 //! main.rs's numeric M2 cast-assertion fallback.
 
+mod bank;
 mod group;
 mod probes;
 mod relay;
@@ -46,7 +47,8 @@ pub(crate) fn dispatch(
     args: &mut dyn Iterator<Item = String>,
     mcx: &ModeCtx<'_>,
 ) -> Result<bool> {
-    Ok(probes::try_dispatch(mode, c, args, mcx)?
+    Ok(bank::try_dispatch(mode, c, args, mcx)?
+        || probes::try_dispatch(mode, c, args, mcx)?
         || social::try_dispatch(mode, c, args, mcx)?
         || relay::try_dispatch(mode, c, args, mcx)?
         || scenario::try_dispatch(mode, c, args, mcx)?
