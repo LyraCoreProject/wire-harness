@@ -62,6 +62,38 @@ char_guid() { sqlq "SELECT guid FROM game_character WHERE name = '$1'" "${2:-}" 
 # first numeric column of the first data row
 sql1() { sqlq "$1" "${2:-}" | sed -n 3p | awk -F'|' '{gsub(/ /,"",$1); print $1}'; } # $1=query $2=database (optional)
 
+# Read one required value without turning a failed query into an empty result. Use this when an
+# empty result has different meaning from an unavailable database or invalid query.
+sql1_required() { # $1=query $2=database (optional)
+  local query=$1 database=${2:-$DB} output value status error_file
+  error_file=${TMPDIR:-/tmp}/lyracore_sql_$$_${RANDOM}.err
+  output=$(spacetime sql "$database" "$query" 2>"$error_file")
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    echo "[adapter] SQL failed on '$database': $query" >&2
+    cat "$error_file" >&2
+    rm -f "$error_file"
+    return "$status"
+  fi
+  rm -f "$error_file"
+  value=$(printf '%s\n' "$output" | sed -n 3p | awk -F'|' '{gsub(/ /,"",$1); print $1}')
+  if [ -z "$value" ]; then
+    echo "[adapter] SQL returned no data row on '$database': $query" >&2
+    return 1
+  fi
+  printf '%s\n' "$value"
+}
+
+party_authority_db() {
+  if [ -n "${REALM_CORE_DB:-}" ]; then printf '%s\n' "$REALM_CORE_DB"; return; fi
+  if [ -n "${REALM_DB:-}" ]; then printf '%s\n' "$REALM_DB"; return; fi
+  if spacetime sql lyracore-realm "SELECT COUNT(*) AS n FROM game_group" >/dev/null 2>&1; then
+    printf '%s\n' lyracore-realm
+  else
+    printf '%s\n' "$DB"
+  fi
+}
+
 # Wait for the char row's money to go QUIET (two consecutive 1s-apart equal reads). The gateway's
 # logout persist is ASYNC (~1-3s; danger-zones §2): an offline write (debug_set_money) or a delta
 # BASELINE taken while a prior session's persist is still in flight gets silently clobbered/skewed —
@@ -127,10 +159,18 @@ purge_creatures_near() { # $1=x $2=y $3=radius [$4... = guids to KEEP (fixtures:
 # local delete is the legacy single-database fallback. With Account ownership, a refused LEAVE
 # must stop cleanup before any local mirror changes.
 leave_any_group() { # $1=character guid
-  local actor
+  local actor rc members
   actor=$(operator_actor "$1") || return $?
-  if ! spacetime call "${REALM_CORE_DB:-lyracore-realm}" -- realm_group_op 3 "$actor" 0 0 0 >/dev/null 2>&1; then
-    [ "$actor" = "$1" ] || return 1
+  rc=$(party_authority_db)
+  members=$(sql1_required "SELECT COUNT(*) AS n FROM game_group_member WHERE character_guid = $1" "$rc") \
+    || return $?
+  if [ "$members" != 0 ] \
+      && ! spacetime call "$rc" -- realm_group_op 3 "$actor" 0 0 0 >/dev/null 2>&1; then
+    # A concurrent cleanup can win after the read. Confirm absence before treating failure as a
+    # refusal. A failed confirmation leaves the local mirror untouched.
+    members=$(sql1_required "SELECT COUNT(*) AS n FROM game_group_member WHERE character_guid = $1" "$rc") \
+      || return $?
+    [ "$members" = 0 ] || return 1
   fi
   sqlq "DELETE FROM game_group_member WHERE character_guid = $1" >/dev/null 2>&1
   return 0
@@ -206,36 +246,6 @@ restart_gateway() {
   done
   echo "[lib] restart_gateway: no 'world listening' within 30s (log: $log)" >&2
   return 1
-}
-
-# Dissolve EVERY party in the realm. The suite's isolation step (267): party assertions count
-# `game_group`/`game_group_member` GLOBALLY, so one surviving party from an earlier test makes the
-# next one read "2 groups / 6 members" and fail for a reason that has nothing to do with it.
-#
-# They survive for a structural reason worth knowing: party state is authoritative on REALM-CORE
-# (#22/#54), and a bot character is deleted on the WORLD SHARD — where the `character_owned!` sweep
-# runs. A module cannot reach another database, so nothing sweeps the departed member's realm-core
-# row, and the gateway's next mirror push writes the ghost party back onto the shard. Every bot
-# party test therefore leaks one party, permanently. (In production that is a deleted character
-# still listed in someone's party — worth an issue; here it is the suite's dominant flake source.)
-#
-# Drives the product's own ops: LEAVE each member on realm-core (disband happens on the last one),
-# then push an EMPTY roster to each world shard's mirror, which is the documented disband case.
-reset_party_state() {
-  local rc="${REALM_CORE_DB:-lyracore-realm}" g actor
-  for g in $(spacetime sql "$rc" "SELECT character_guid FROM game_group_member" 2>/dev/null | sed -n '3,$p' | grep -oE '[0-9]+'); do
-    actor=$(operator_actor "$g") || return $?
-    if ! spacetime call "$rc" -- realm_group_op 3 "$actor" 0 0 0 >/dev/null 2>&1; then
-      [ "$actor" = "$g" ] || return 1
-    fi
-  done
-  # `group_id`, not `id` (module/src/group.rs) — a wrong column name makes `spacetime sql` return an
-  # ERROR that reads as "no rows" once stderr is swallowed, so the loop silently cleared nothing
-  # (danger-zones §2, and it bit again here).
-  for g in $(sqlq "SELECT group_id FROM game_group" | sed -n '3,$p' | grep -oE '[0-9]+'); do
-    spacetime call "$DB" -- sync_group_mirror "$g" 0 0 2 0 '[]' >/dev/null 2>&1
-  done
-  return 0
 }
 
 FAILED=0

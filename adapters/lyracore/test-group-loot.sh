@@ -18,13 +18,11 @@ DFS=$(char_guid dfsdfsd)
 WOLF_ENTRY=51000; GREEN=1116; GREY=52  # 1116 Ring of Pure Silver: a REAL imported q2 green (the seeded 50 imports at q1 on a dump-loaded node)
 PAD_X=-8905.0; PAD_Y=-440.0; PAD_Z=82.0
 
-# repeatability: clean group state, co-locate on the pad, seed the drops (green 100% + grey 100%)
-sqlq "DELETE FROM game_group" >/dev/null
-sqlq "DELETE FROM game_group_member WHERE character_guid = $GINGER" >/dev/null
-sqlq "DELETE FROM game_group_member WHERE character_guid = $DFS" >/dev/null
+# repeatability: leave only these fixtures' stale parties, co-locate on the pad and seed the drops
+leave_any_group "$GINGER" || { echo "[orch] could not leave Ginger's prior party" >&2; exit 1; }
+leave_any_group "$DFS" || { echo "[orch] could not leave dfsdfsd's prior party" >&2; exit 1; }
 sqlq "DELETE FROM game_group_invite WHERE target_guid = $GINGER" >/dev/null
 sqlq "DELETE FROM game_group_invite WHERE target_guid = $DFS" >/dev/null
-sqlq "DELETE FROM game_loot_roll" >/dev/null
 sqlq "UPDATE game_character SET x = $PAD_X, y = $PAD_Y, z = $PAD_Z WHERE guid = $GINGER" >/dev/null
 sqlq "UPDATE game_character SET x = -8902.0, y = -440.0, z = $PAD_Z WHERE guid = $DFS" >/dev/null
 sqlq "DELETE FROM game_creature_loot WHERE creature_entry = $WOLF_ENTRY" >/dev/null
@@ -48,7 +46,9 @@ LEADER=$!
 for _ in $(seq 1 40); do [ -f "$HOLD_L.method" ] && break; sleep 1; done
 [ -f "$HOLD_L.method" ] && step_ok "wire: loot method set + GROUP_LIST echo (GroupLoot/Uncommon)" \
   || { step_fail "wire: loot-method echo never arrived"; tail -3 /tmp/ws_loot_leader.log; }
-assert_eq "sql: group loot_method stored" "$(sql1 "SELECT loot_method FROM game_group")" "3"  # 3 = GROUP (module group::loot_method)
+GROUP_ID=$(sql1 "SELECT group_id FROM game_group_member WHERE character_guid = $GINGER")
+[ -n "$GROUP_ID" ] || { echo "[orch] Ginger has no group id after the loot party formed" >&2; exit 1; }
+assert_eq "sql: fixture group loot_method stored" "$(sql1 "SELECT loot_method FROM game_group WHERE group_id = $GROUP_ID")" "3"  # 3 = GROUP (module group::loot_method)
 
 # ---- green kill -> roll window -> NEED beats GREED (clause 2) ----
 BAG0=$(sql1 "SELECT COUNT(*) AS n FROM game_item_instance WHERE owner_guid = $GINGER AND entry = $GREEN")
@@ -100,8 +100,11 @@ for W in "${WOLF:-}" "${WOLF2:-}" "${WOLF3:-}"; do
 done
 sqlq "DELETE FROM game_creature_loot WHERE creature_entry = $WOLF_ENTRY" >/dev/null
 sqlq "DELETE FROM game_item_instance WHERE owner_guid = $GINGER AND entry = $GREEN" >/dev/null
-sqlq "DELETE FROM game_loot_roll" >/dev/null
 rm -f "$HOLD_L" "$HOLD_V" "$HOLD_L".* "$HOLD_V".* 2>/dev/null
-assert_eq "teardown: zero group rows" "$(sql1 "SELECT COUNT(*) AS n FROM game_group")" "0"
+assert_eq "teardown: fixture group removed" "$(sql1 "SELECT COUNT(*) AS n FROM game_group WHERE group_id = $GROUP_ID")" "0"
+for W in "${WOLF:-}" "${WOLF2:-}" "${WOLF3:-}"; do
+  [ -n "$W" ] || continue
+  assert_eq "teardown: no roll remains for fixture corpse $W" "$(sql1 "SELECT COUNT(*) AS n FROM game_loot_roll WHERE corpse_guid = $W")" "0"
+done
 
 if [ "$FAILED" -eq 0 ]; then echo "[group-loot] PASS"; exit 0; else echo "[group-loot] FAIL"; exit 1; fi

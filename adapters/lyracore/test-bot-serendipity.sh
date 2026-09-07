@@ -43,11 +43,11 @@ scall debug_spawn_at_feet "$A" $GIVER 8
 scall debug_spawn_at_feet "$A" $WOLF 100
 
 # ---- 1. both bots pick the quest up autonomously ----
-wait_for_sql_ge 120 "SELECT COUNT(*) AS n FROM game_character_quest WHERE quest_entry = $QUEST" 2 \
+wait_for_sql_ge 120 "SELECT COUNT(*) AS n FROM game_character_quest WHERE quest_entry = $QUEST AND (character_guid = $A OR character_guid = $B)" 2 \
   && step_ok "quest: both bots accepted $QUEST autonomously" || step_fail "quest: both never accepted within 120s"
 
 # ---- 2. the serendipity moment: invite + auto-accept, one group with both ----
-wait_for_sql_ge 90 "SELECT COUNT(*) AS n FROM game_group_member" 2 \
+wait_for_sql_ge 90 "SELECT COUNT(*) AS n FROM game_group_member WHERE character_guid = $A OR character_guid = $B" 2 \
   && step_ok "serendipity: a group formed (same-quest invite + auto-accept)" || step_fail "serendipity: no group within 90s"
 GID_A=$(sql1 "SELECT group_id FROM game_group_member WHERE character_guid = $A")
 GID_B=$(sql1 "SELECT group_id FROM game_group_member WHERE character_guid = $B")
@@ -59,7 +59,7 @@ scall debug_spawn_at_feet "$A" $WOLF 12
 scall debug_spawn_at_feet "$A" $WOLF 16
 DONE=0
 for _ in $(seq 1 120); do
-  R=$(sqlq "SELECT rewarded FROM game_character_quest WHERE quest_entry = $QUEST" | grep -c true)
+  R=$(sqlq "SELECT rewarded FROM game_character_quest WHERE quest_entry = $QUEST AND (character_guid = $A OR character_guid = $B)" | grep -c true)
   [ "${R:-0}" -ge 2 ] && DONE=1 && break
   sleep 1
 done
@@ -67,15 +67,15 @@ done
   || step_fail "group play: both quests never completed within 120s"
 
 # ---- 4. parting ways: the party ends with the shared work ----
-wait_for_sql_eq 60 "SELECT COUNT(*) AS n FROM game_group_member" 0 \
+wait_for_sql_eq 60 "SELECT COUNT(*) AS n FROM game_group_member WHERE group_id = $GID_A" 0 \
   && step_ok "parting: the party dissolved once neither bot held shared quest work" \
-  || step_fail "parting: $(sql1 "SELECT COUNT(*) AS n FROM game_group_member") member row(s) still stand 60s after both turn-ins"
+  || step_fail "parting: $(sql1 "SELECT COUNT(*) AS n FROM game_group_member WHERE group_id = $GID_A") fixture member row(s) still stand 60s after both turn-ins"
 
 # ---- teardown ----
 scall playerbots_despawn_all || true
 purge_entry_rows $WOLF; purge_entry_rows $GIVER
 sqlq "DELETE FROM game_melee_attack" >/dev/null
-assert_eq "teardown: zero member rows" "$(sql1 "SELECT COUNT(*) AS n FROM game_group_member")" "0"
+assert_eq "teardown: fixture group removed" "$(sql1 "SELECT COUNT(*) AS n FROM game_group WHERE group_id = $GID_A")" "0"
 assert_eq "teardown: zero bot rows" "$(sql1 "SELECT COUNT(*) AS n FROM pkg_playerbots_bot")" "0"
 
 if [ "$FAILED" -eq 0 ]; then echo "[bot-serendipity] PASS"; exit 0; else echo "[bot-serendipity] FAIL"; exit 1; fi

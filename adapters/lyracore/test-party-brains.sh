@@ -26,7 +26,7 @@ scall debug_seed_scenario_fixtures || true
 scall playerbots_despawn_all || true
 purge_entry_rows $WOLF_ENTRY
 sqlq "DELETE FROM game_melee_attack" >/dev/null
-sqlq "DELETE FROM game_group_member WHERE character_guid = $GINGER" >/dev/null
+leave_any_group "$GINGER" || { echo "[orch] could not leave Ginger's prior party" >&2; exit 1; }
 sqlq "DELETE FROM game_group_invite WHERE target_guid = $GINGER" >/dev/null
 # Hostility on mock-seed needs staged faction rows (canonical helper; cleared in teardown).
 FACTION_ROWS_BEFORE=$(sql1 "SELECT COUNT(*) AS n FROM game_faction_template")
@@ -65,7 +65,9 @@ if [ -f "$HOLD.ingroup" ]; then
 else
   step_fail "wire: party never formed"; tail -3 /tmp/ws_party_bots.log
 fi
-assert_eq "sql: four member rows" "$(sql1 "SELECT COUNT(*) AS n FROM game_group_member")" "4"
+GROUP_ID=$(sql1 "SELECT group_id FROM game_group_member WHERE character_guid = $GINGER")
+[ -n "$GROUP_ID" ] || { echo "[orch] Ginger has no group id after the bot party formed" >&2; exit 1; }
+assert_eq "sql: fixture group has four members" "$(sql1 "SELECT COUNT(*) AS n FROM game_group_member WHERE group_id = $GROUP_ID")" "4"
 
 # ---- 3. the fight ----
 # Wolves spawn at the HEALER (nearest player wins proximity aggro), the tank stands ~6yd off —
@@ -199,13 +201,13 @@ wait "$LEADER"; RC_L=$?
 # it, and these three hold no quests at all — so each inherited leader leaves in turn and the
 # party is gone within a few brain ticks. Reading the roster once would race that, so this asserts
 # the dissolution the transfer leads to rather than a member count at one instant.
-wait_for_sql_eq 30 "SELECT COUNT(*) AS n FROM game_group_member" 0 \
+wait_for_sql_eq 30 "SELECT COUNT(*) AS n FROM game_group_member WHERE group_id = $GROUP_ID" 0 \
   && step_ok "sql: the party the leader left dissolved itself (bot leader, no shared quest work)" \
-  || step_fail "sql: $(sql1 "SELECT COUNT(*) AS n FROM game_group_member") member row(s) still stand 30s after the leader left"
+  || step_fail "sql: $(sql1 "SELECT COUNT(*) AS n FROM game_group_member WHERE group_id = $GROUP_ID") fixture member row(s) still stand 30s after the leader left"
 
 # ---- teardown (asserted) ----
 scall playerbots_despawn_all || true
-assert_eq "teardown: bot party dissolved by the despawn sweep" "$(sql1 "SELECT COUNT(*) AS n FROM game_group")" "0"
+assert_eq "teardown: fixture party dissolved" "$(sql1 "SELECT COUNT(*) AS n FROM game_group WHERE group_id = $GROUP_ID")" "0"
 purge_entry_rows $WOLF_ENTRY
 sqlq "DELETE FROM game_melee_attack" >/dev/null
 clear_hostility

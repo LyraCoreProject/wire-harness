@@ -40,12 +40,8 @@ rsql1() { spacetime sql "$REALM_DB" "$1" 2>/dev/null | sed -n 3p | awk -F'|' '{g
 
 # ---- staging: one dps bot + Ginger on the pad, no stale party anywhere ----
 scall playerbots_despawn_all || true
-sqlq "DELETE FROM game_group_member WHERE character_guid = $GINGER" >/dev/null
+leave_any_group "$GINGER" || { echo "[orch] could not leave Ginger's prior party" >&2; exit 1; }
 sqlq "DELETE FROM game_group_invite WHERE target_guid = $GINGER" >/dev/null
-if [ -n "$REALM_DB" ] && [ "$REALM_DB" != "$DB" ]; then
-  spacetime sql "$REALM_DB" "DELETE FROM game_group_member WHERE character_guid = $GINGER" >/dev/null 2>&1
-  spacetime sql "$REALM_DB" "DELETE FROM game_group_invite WHERE target_guid = $GINGER" >/dev/null 2>&1
-fi
 sqlq "UPDATE game_character SET x = $PAD_X, y = $PAD_Y, z = $PAD_Z WHERE guid = $GINGER" >/dev/null
 scall playerbots_spawn_role 1 $PAD_X $PAD_Y $PAD_Z 2 || { echo "[orch] bot spawn failed" >&2; exit 1; }
 BOT=$(char_guid Dpsbot1)
@@ -73,15 +69,17 @@ else
 fi
 
 # ---- membership, on the shard the bot stands on (its own in-world reads use these rows) ----
-assert_eq "sql: one group row on the shard" "$(sql1 "SELECT COUNT(*) AS n FROM game_group")" "1"
-assert_eq "sql: two member rows on the shard" "$(sql1 "SELECT COUNT(*) AS n FROM game_group_member")" "2"
-assert_eq "sql: the PLAYER leads (a bot must not assume a bot leader)" "$(sql1 "SELECT leader_guid FROM game_group")" "$GINGER"
+GROUP_ID=$(sql1 "SELECT group_id FROM game_group_member WHERE character_guid = $GINGER")
+[ -n "$GROUP_ID" ] || { echo "[orch] Ginger has no group id after the bot joined" >&2; exit 1; }
+assert_eq "sql: fixture group exists on the shard" "$(sql1 "SELECT COUNT(*) AS n FROM game_group WHERE group_id = $GROUP_ID")" "1"
+assert_eq "sql: fixture group has two members on the shard" "$(sql1 "SELECT COUNT(*) AS n FROM game_group_member WHERE group_id = $GROUP_ID")" "2"
+assert_eq "sql: the PLAYER leads the fixture group" "$(sql1 "SELECT leader_guid FROM game_group WHERE group_id = $GROUP_ID")" "$GINGER"
 assert_eq "sql: the bot is a member" "$(sql1 "SELECT COUNT(*) AS n FROM game_group_member WHERE character_guid = $BOT")" "1"
 assert_eq "sql: the invite was CONSUMED (a leftover row is the hung dialog)" "$(sql1 "SELECT COUNT(*) AS n FROM game_group_invite WHERE target_guid = $BOT")" "0"
 
 # ---- and on the AUTHORITY, when there is a separate one (#22) — the arm that pins #51 ----
 if [ -n "$REALM_DB" ] && [ "$REALM_DB" != "$DB" ]; then
-  assert_eq "realm-core: two member rows on the authority" "$(rsql1 "SELECT COUNT(*) AS n FROM game_group_member")" "2"
+  assert_eq "realm-core: fixture group has two members" "$(rsql1 "SELECT COUNT(*) AS n FROM game_group_member WHERE group_id = $GROUP_ID")" "2"
   assert_eq "realm-core: the bot is a member of the authority's party" "$(rsql1 "SELECT COUNT(*) AS n FROM game_group_member WHERE character_guid = $BOT")" "1"
   assert_eq "realm-core: the pending invite was consumed" "$(rsql1 "SELECT COUNT(*) AS n FROM game_group_invite WHERE target_guid = $BOT")" "0"
 else
@@ -94,7 +92,10 @@ fi
 touch "$HOLD"
 wait "$LEADER" 2>/dev/null
 scall playerbots_despawn_all || true
-sqlq "DELETE FROM game_group_member WHERE character_guid = $GINGER" >/dev/null
+assert_eq "teardown: fixture group removed from the shard" "$(sql1 "SELECT COUNT(*) AS n FROM game_group WHERE group_id = $GROUP_ID")" "0"
+if [ -n "$REALM_DB" ] && [ "$REALM_DB" != "$DB" ]; then
+  assert_eq "teardown: fixture group removed from realm-core" "$(rsql1 "SELECT COUNT(*) AS n FROM game_group WHERE group_id = $GROUP_ID")" "0"
+fi
 assert_eq "teardown: zero bot rows" "$(sql1 "SELECT COUNT(*) AS n FROM pkg_playerbots_bot")" "0"
 
 if [ "$FAILED" -eq 0 ]; then echo "[bot-invite] PASS"; exit 0; else echo "[bot-invite] FAIL"; exit 1; fi

@@ -22,7 +22,7 @@ dist_bot_ginger() { # prints integer yd between bot and Ginger
 # ---- staging: one dps bot + Ginger at the pad, grouped ----
 scall debug_seed_scenario_fixtures || true
 scall playerbots_despawn_all || true
-sqlq "DELETE FROM game_group_member WHERE character_guid = $GINGER" >/dev/null
+leave_any_group "$GINGER" || { echo "[orch] could not leave Ginger's prior party" >&2; exit 1; }
 sqlq "DELETE FROM game_group_invite WHERE target_guid = $GINGER" >/dev/null
 sqlq "UPDATE game_character SET x = $PAD_X, y = $PAD_Y, z = $PAD_Z WHERE guid = $GINGER" >/dev/null
 scall playerbots_spawn_role 1 $PAD_X $PAD_Y $PAD_Z 2 || { echo "[orch] bot spawn failed" >&2; exit 1; }
@@ -37,6 +37,9 @@ timeout 400 "$WC" TEST Ginger party-bots "$HOLD" Dpsbot1 >/tmp/ws_bot_follow.log
 LEADER=$!
 wait_for_file 40 "$HOLD.ingroup"
 [ -f "$HOLD.ingroup" ] && step_ok "wire: bot grouped under Ginger" || { step_fail "wire: party never formed"; tail -3 /tmp/ws_bot_follow.log; }
+GROUP_ID=$(sql1 "SELECT group_id FROM game_group_member WHERE character_guid = $GINGER")
+[ -n "$GROUP_ID" ] || { echo "[orch] Ginger has no group id after the bot joined" >&2; exit 1; }
+assert_eq "sql: fixture group has two members" "$(sql1 "SELECT COUNT(*) AS n FROM game_group_member WHERE group_id = $GROUP_ID")" "2"
 
 # ---- 1. leader teleports away; the bot runs to it ----
 scall debug_teleport "$GINGER" 0 $HOP1_X $HOP1_Y $PAD_Z 0
@@ -65,6 +68,7 @@ scall debug_teleport "$GINGER" 0 $HOP1_X $HOP1_Y $PAD_Z 0
 sleep 12
 D=$(dist_bot_ginger)
 [ "${D:-0}" -ge 30 ] 2>/dev/null && step_ok "disband: ungrouped bot stayed put (${D}yd away)" || step_fail "disband: bot still shadowing Ginger (${D:-?}yd)"
+assert_eq "disband: fixture group removed" "$(sql1 "SELECT COUNT(*) AS n FROM game_group WHERE group_id = $GROUP_ID")" "0"
 
 # ---- teardown ----
 scall playerbots_despawn_all || true
