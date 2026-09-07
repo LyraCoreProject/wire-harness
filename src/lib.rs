@@ -1007,21 +1007,28 @@ impl WireClient {
         };
         use wow_world_messages::vanilla::{Object, UpdateMask};
         for object in &update.objects {
-            let (guid, mask) = match object {
-                Object::Values { guid1, mask1 } => (guid1.guid(), mask1),
+            let (guid, mask, is_create) = match object {
+                Object::Values { guid1, mask1 } => (guid1.guid(), mask1, false),
                 Object::CreateObject { guid3, mask2, .. }
-                | Object::CreateObject2 { guid3, mask2, .. } => (guid3.guid(), mask2),
+                | Object::CreateObject2 { guid3, mask2, .. } => (guid3.guid(), mask2, true),
                 _ => continue,
             };
             if guid != self.self_guid {
                 continue;
             }
+            if is_create {
+                // A create mask is a sparse snapshot. Visible zero fields are omitted, so clear any
+                // prior Character before applying its fields. A VALUES mask remains a partial update.
+                self.own_character_health = None;
+                self.own_character_ghost = None;
+            }
             let (health, ghost) = match mask {
                 UpdateMask::Unit(mask) => (mask.unit_health(), None),
                 UpdateMask::Player(mask) => (
-                    mask.unit_health(),
+                    mask.unit_health().or(is_create.then_some(0)),
                     mask.player_flags()
-                        .map(|flags| flags as u32 & PLAYER_FLAGS_GHOST != 0),
+                        .map(|flags| flags as u32 & PLAYER_FLAGS_GHOST != 0)
+                        .or(is_create.then_some(false)),
                 ),
                 _ => (None, None),
             };
@@ -1142,12 +1149,14 @@ impl WireClient {
     /// Enter the world as `guid`, draining the post-login burst up to (and including) the
     /// self CREATE_OBJECT. Sets `self_guid`.
     pub fn player_login(&mut self, guid: u64) -> Result<()> {
+        self.self_guid = guid;
+        self.own_character_health = None;
+        self.own_character_ghost = None;
         self.send(&CMSG_PLAYER_LOGIN {
             guid: Guid::new(guid),
         })?;
         // The burst starts with SMSG_LOGIN_VERIFY_WORLD and ends with the self CREATE_OBJECT.
         self.recv_until(|m| matches!(m, WorldSmsg::SMSG_LOGIN_VERIFY_WORLD(_)))?;
-        self.self_guid = guid;
         // Drain through the self-spawn CREATE_OBJECT so subsequent reads are gameplay traffic, capturing
         // SMSG_INITIAL_SPELLS (the client spellbook) en route.
         loop {
@@ -1524,23 +1533,24 @@ mod tests {
         body
     }
 
-    fn create_object_frame(guid: u64, health: i32, player_flags: i32) -> Vec<u8> {
+    fn create_object_frame(guid: u64, health: Option<i32>, player_flags: Option<i32>) -> Vec<u8> {
         use wow_world_messages::vanilla::{
             MovementBlock, Object, ObjectType, ServerMessage, UpdateMask, UpdatePlayer,
             SMSG_UPDATE_OBJECT,
         };
 
+        let mut player = UpdatePlayer::builder().set_object_guid(Guid::new(guid));
+        if let Some(health) = health {
+            player = player.set_unit_health(health);
+        }
+        if let Some(player_flags) = player_flags {
+            player = player.set_player_flags(player_flags);
+        }
         let message = SMSG_UPDATE_OBJECT {
             has_transport: 0,
             objects: vec![Object::CreateObject2 {
                 guid3: Guid::new(guid),
-                mask2: UpdateMask::Player(
-                    UpdatePlayer::builder()
-                        .set_object_guid(Guid::new(guid))
-                        .set_unit_health(health)
-                        .set_player_flags(player_flags)
-                        .finalize(),
-                ),
+                mask2: UpdateMask::Player(player.finalize()),
                 movement2: MovementBlock::default(),
                 object_type: ObjectType::Player,
             }],
@@ -1552,18 +1562,47 @@ mod tests {
         frame[4..].to_vec()
     }
 
+    fn player_create_mask(message: &WorldSmsg) -> &wow_world_messages::vanilla::UpdatePlayer {
+        use wow_world_messages::vanilla::{Object, UpdateMask};
+        let WorldSmsg::SMSG_UPDATE_OBJECT(update) = message else {
+            panic!("expected SMSG_UPDATE_OBJECT")
+        };
+        let Some(Object::CreateObject { mask2, .. } | Object::CreateObject2 { mask2, .. }) =
+            update.objects.first()
+        else {
+            panic!("expected CREATE_OBJECT")
+        };
+        let UpdateMask::Player(mask) = mask2 else {
+            panic!("expected Player mask")
+        };
+        mask
+    }
+
     #[test]
     fn login_snapshot_observes_the_own_character_as_alive() {
         let guid = 0x2Au64;
-        let snapshot = create_object_frame(guid, 100, 0);
+        // Create masks omit zero fields, so the absent PLAYER_FLAGS means its initial value is zero.
+        let snapshot = create_object_frame(guid, Some(100), None);
         let mut client = client_receiving_frame(SMSG_UPDATE_OBJECT_OPCODE, &snapshot);
         client.self_guid = guid;
 
-        assert!(matches!(
-            client.recv().unwrap(),
-            WorldSmsg::SMSG_UPDATE_OBJECT(_)
-        ));
+        let message = client.recv().unwrap();
+        assert_eq!(player_create_mask(&message).player_flags(), None);
+        assert_eq!(player_create_mask(&message).unit_health(), Some(100));
         assert_eq!(client.own_character_is_dead(), Some(false));
+    }
+
+    #[test]
+    fn login_snapshot_with_absent_health_observes_a_dead_character() {
+        let guid = 0x2Au64;
+        let snapshot = create_object_frame(guid, None, None);
+        let mut client = client_receiving_frame(SMSG_UPDATE_OBJECT_OPCODE, &snapshot);
+        client.self_guid = guid;
+
+        let message = client.recv().unwrap();
+        assert_eq!(player_create_mask(&message).unit_health(), None);
+        assert_eq!(player_create_mask(&message).player_flags(), None);
+        assert_eq!(client.own_character_is_dead(), Some(true));
     }
 
     #[test]
@@ -1604,7 +1643,7 @@ mod tests {
     #[test]
     fn login_snapshot_with_positive_health_and_the_ghost_flag_is_dead() {
         let guid = 0x2Au64;
-        let ghost = create_object_frame(guid, 1, PLAYER_FLAGS_GHOST as i32);
+        let ghost = create_object_frame(guid, Some(1), Some(PLAYER_FLAGS_GHOST as i32));
         let mut client = client_receiving_frame(SMSG_UPDATE_OBJECT_OPCODE, &ghost);
         client.self_guid = guid;
 
@@ -1613,6 +1652,44 @@ mod tests {
             WorldSmsg::SMSG_UPDATE_OBJECT(_)
         ));
         assert_eq!(client.own_character_is_dead(), Some(true));
+    }
+
+    #[test]
+    fn a_later_create_snapshot_replaces_stale_ghost_state() {
+        let guid = 0x2Au64;
+        let ghost = create_object_frame(guid, Some(1), Some(PLAYER_FLAGS_GHOST as i32));
+        let alive = create_object_frame(guid, Some(100), None);
+        let mut client = client_receiving_frames(&[
+            (SMSG_UPDATE_OBJECT_OPCODE, &ghost),
+            (SMSG_UPDATE_OBJECT_OPCODE, &alive),
+        ]);
+        client.self_guid = guid;
+
+        assert!(matches!(
+            client.recv().unwrap(),
+            WorldSmsg::SMSG_UPDATE_OBJECT(_)
+        ));
+        assert_eq!(client.own_character_is_dead(), Some(true));
+        assert!(matches!(
+            client.recv().unwrap(),
+            WorldSmsg::SMSG_UPDATE_OBJECT(_)
+        ));
+        assert_eq!(client.own_character_is_dead(), Some(false));
+    }
+
+    #[test]
+    fn starting_player_login_clears_the_previous_character_observation() {
+        let mut client = client_receiving_frames(&[]);
+        client.self_guid = 1;
+        client.own_character_health = Some(1);
+        client.own_character_ghost = Some(true);
+
+        client
+            .player_login(2)
+            .expect_err("the test peer closed before the login reply");
+
+        assert_eq!(client.self_guid, 2);
+        assert_eq!(client.own_character_is_dead(), None);
     }
 
     #[test]
