@@ -10,13 +10,21 @@ pub struct Measurement {
     counts: BTreeMap<u64, u64>,
     previous: BTreeMap<u64, Value>,
     progress: BTreeSet<u64>,
-    movement_starts: BTreeMap<u64, (u64, i64, f64, f64)>,
+    movement_starts: BTreeMap<u64, MovementLeg>,
     lag: Vec<(u64, u64)>,
     routes: Vec<(u64, u64)>,
     movements: Vec<(u64, u64)>,
     deferred_observations: u64,
     accelerated_observations: u64,
     slowest_due: Option<Value>,
+}
+
+struct MovementLeg {
+    identity: Value,
+    generation: u64,
+    started: i64,
+    x: f64,
+    y: f64,
 }
 
 fn signed(row: &Value, key: &str) -> Result<i64> {
@@ -37,7 +45,7 @@ fn optional<'a>(row: &'a Value, key: &str) -> Result<Option<&'a Value>> {
     if let Some(value) = value.get("some") {
         return Ok(Some(value));
     }
-    if value.get("none") == Some(&json!([])) {
+    if value.get("none") == Some(&json!({})) {
         return Ok(None);
     }
     bail!("unknown SATS option {key}")
@@ -71,7 +79,7 @@ fn movement_advanced(current: &Value, previous: &Value) -> Result<bool> {
     let prior = if let Some(progress) = optional(previous, "movement_progress")? {
         Some((coordinate(progress, "x")?, coordinate(progress, "y")?))
     } else if let Some(movement) =
-        optional(previous, "foreground")?.and_then(|fg| fg["running"].get("Movement"))
+        optional(previous, "foreground")?.and_then(|fg| fg["running"].get("movement"))
     {
         Some((
             coordinate(movement, "from_x")?,
@@ -90,15 +98,12 @@ fn movement_advanced(current: &Value, previous: &Value) -> Result<bool> {
 }
 
 fn has_progress(current: &Value, previous: &Value) -> Result<bool> {
-    // These fields are populated by observed movement, lost target health, resolved casts or credit.
-    // Accepted, Waiting and objective selection never count as progress here.
+    // A resolved cast can have no effect. Progress needs movement, lost target health or credit.
     if movement_advanced(current, previous)? {
         return Ok(true);
     }
-    for key in ["combat_progress", "cast_progress"] {
-        if newer(current, previous, key)? {
-            return Ok(true);
-        }
+    if newer(current, previous, "combat_progress")? {
+        return Ok(true);
     }
     let before = previous["quest_progress"]
         .as_array()
@@ -122,6 +127,26 @@ fn has_progress(current: &Value, previous: &Value) -> Result<bool> {
         }
     }
     Ok(false)
+}
+
+fn movement_identity(runner: &Value) -> Result<Option<Value>> {
+    let Some(fg) = optional(runner, "foreground")? else {
+        return Ok(None);
+    };
+    let Some(movement) = fg["running"].get("movement") else {
+        return Ok(None);
+    };
+    if !fg["candidate"].is_object() || !movement["destination"].is_object() {
+        bail!("movement has no candidate or destination identity");
+    }
+    Ok(Some(json!([
+        unsigned(fg, "generation")?,
+        unsigned(fg, "map_id")?,
+        unsigned(fg, "instance_id")?,
+        signed(fg, "started_micros")?,
+        fg["candidate"],
+        movement["destination"]
+    ])))
 }
 
 fn distribution(samples: &[(u64, u64)]) -> Value {
@@ -154,14 +179,19 @@ impl Measurement {
                     .context("unstaged measured bot")? += 1;
                 self.lag
                     .push((unsigned(&pass.bots[index], "scheduler_lag_micros")?, guid));
-                if let Some(previous) = self.previous.get(&guid) {
-                    if has_progress(runner, previous)? {
-                        self.progress.insert(guid);
-                    }
-                }
-                self.movement(runner, guid, pass.observed_micros)?;
+                let new_movement = optional(runner, "foreground")?.is_some_and(|fg| {
+                    fg["running"].get("movement").is_some()
+                        && fg["started_micros"].as_i64() == Some(pass.observed_micros)
+                });
+                self.routes.push((
+                    if new_movement {
+                        unsigned(runner, "route_expansions")?
+                    } else {
+                        0
+                    },
+                    guid,
+                ));
             }
-            self.previous.insert(guid, runner.clone());
         }
         if measured {
             self.deferred_observations += pass.deferred_guids.len() as u64;
@@ -181,42 +211,81 @@ impl Measurement {
         Ok(())
     }
 
-    fn movement(&mut self, runner: &Value, guid: u64, now: i64) -> Result<()> {
+    /// Observe every committed runner update, including updates between scheduled passes.
+    pub fn observe_transaction(&mut self, update: &Value, measured: bool) -> Result<()> {
+        let Some(changes) = update.get("pkg_playerbots_runner") else {
+            return Ok(());
+        };
+        for runner in changes["inserts"]
+            .as_array()
+            .context("invalid runner insert list")?
+        {
+            let guid = unsigned(runner, "character_guid")?;
+            if !self.counts.contains_key(&guid) {
+                bail!("unstaged runner observation");
+            }
+            let previous = self.previous.remove(&guid);
+            if measured {
+                if let Some(previous) = &previous {
+                    if has_progress(runner, previous)? {
+                        self.progress.insert(guid);
+                    }
+                }
+                self.movement(runner, previous.as_ref(), guid)?;
+            } else {
+                self.movement_starts.remove(&guid);
+            }
+            self.previous.insert(guid, runner.clone());
+        }
+        Ok(())
+    }
+
+    fn movement(&mut self, runner: &Value, previous: Option<&Value>, guid: u64) -> Result<()> {
+        let now = signed(runner, "observed_micros")?;
         let generation = unsigned(runner, "generation")?;
-        if let Some(progress) = optional(runner, "movement_progress")? {
-            if signed(progress, "observed_micros")? == now && progress["arrived"] == true {
-                if let Some((started_generation, started, x, y)) =
-                    self.movement_starts.remove(&guid)
-                {
-                    let advanced = (coordinate(progress, "x")? - x).powi(2)
-                        + (coordinate(progress, "y")? - y).powi(2)
+        let previous_identity = previous.map(movement_identity).transpose()?.flatten();
+        if let Some(leg) = self.movement_starts.get(&guid) {
+            if previous_identity.as_ref() == Some(&leg.identity) && generation == leg.generation {
+                if let Some(progress) = optional(runner, "movement_progress")? {
+                    let advanced = (coordinate(progress, "x")? - leg.x).powi(2)
+                        + (coordinate(progress, "y")? - leg.y).powi(2)
                         > 0.05 * 0.05;
-                    if generation == started_generation && now > started && advanced {
-                        self.movements.push(((now - started) as u64, guid));
+                    if signed(progress, "observed_micros")? == now
+                        && progress["arrived"] == true
+                        && now > leg.started
+                        && advanced
+                    {
+                        self.movements.push(((now - leg.started) as u64, guid));
                     }
                 }
             }
         }
-        if let Some(foreground) = optional(runner, "foreground")? {
-            if let Some(movement) = foreground["running"].get("Movement") {
-                let started = signed(foreground, "started_micros")?;
-                if started == now {
-                    self.movement_starts.insert(
-                        guid,
-                        (
-                            generation,
-                            started,
-                            coordinate(movement, "from_x")?,
-                            coordinate(movement, "from_y")?,
-                        ),
-                    );
-                    self.routes
-                        .push((unsigned(runner, "route_expansions")?, guid));
-                }
-                return Ok(());
+        let current_identity = movement_identity(runner)?;
+        if let Some(identity) = current_identity {
+            let fg = optional(runner, "foreground")?.context("movement foreground missing")?;
+            let started = signed(fg, "started_micros")?;
+            if started == now && previous_identity.as_ref() != Some(&identity) {
+                let movement = &fg["running"]["movement"];
+                self.movement_starts.insert(
+                    guid,
+                    MovementLeg {
+                        identity,
+                        generation,
+                        started,
+                        x: coordinate(movement, "from_x")?,
+                        y: coordinate(movement, "from_y")?,
+                    },
+                );
+            } else if self
+                .movement_starts
+                .get(&guid)
+                .is_some_and(|leg| leg.identity != identity)
+            {
+                self.movement_starts.remove(&guid);
             }
+        } else {
+            self.movement_starts.remove(&guid);
         }
-        self.movement_starts.remove(&guid);
         Ok(())
     }
 
@@ -237,11 +306,12 @@ impl Measurement {
         json!({"per_bot_passes":self.counts,"pass_count_spread":max-min,"never_processed_guids":never_processed,
             "no_observed_progress_guids":missing,"scheduler_lag_micros":distribution(&self.lag),
             "scheduler_lag_bound_micros":lag_bound,"lag_within_bound":self.lag.iter().all(|sample| sample.0 <= lag_bound),
-            "route_expansions_per_movement_attempt":distribution(&self.routes),
+            "route_expansions_per_processed_bot":distribution(&self.routes),
             "completed_movement_micros":distribution(&self.movements),
             "deferred_bot_observations":self.deferred_observations,"accelerated_due_observations":self.accelerated_observations,
             "slowest_due_bot":self.slowest_due,
-            "progress_scope":"new authoritative movement, lost target health, resolved cast or Quest progress fields",
+            "progress_scope":"new authoritative movement, lost target health or Quest progress in measured transactions",
+            "route_scope":"one sample per processed bot; retained work is zero unless this pass starts a new movement attempt",
             "movement_scope":"foregrounds started and observed arrived with a changed position inside the measured window",
             "fairness_scope":"each pass verifies earliest due order; count spread also reflects damage-triggered scheduling"})
     }
@@ -252,18 +322,43 @@ mod tests {
     use super::*;
 
     fn runner() -> Value {
-        json!({"generation":1,"movement_progress":{"none":[]},"combat_progress":{"none":[]},
-            "cast_progress":{"none":[]},"quest_progress":[],"foreground":{"none":[]},"route_expansions":0})
+        json!({"character_guid":11,"observed_micros":0,"generation":1,"movement_progress":{"none":{}},"combat_progress":{"none":{}},
+            "cast_progress":{"none":{}},"quest_progress":[],"foreground":{"none":{}},"route_expansions":0})
+    }
+
+    fn transaction(runner: &Value) -> Value {
+        json!({"pkg_playerbots_runner":{"deletes":[],"inserts":[runner]}})
+    }
+
+    fn pass(runner: &Value) -> Pass {
+        Pass {
+            observed_micros: runner["observed_micros"].as_i64().unwrap(),
+            processed_guids: vec![11],
+            bots: vec![json!({"scheduler_lag_micros":0})],
+            runners: vec![runner.clone()],
+            excess_due: false,
+            oldest_deferred_lag_micros: 0,
+            deferred_guids: vec![],
+            accelerated_guids: vec![],
+        }
+    }
+
+    fn moving(started: i64) -> Value {
+        json!({"some":{"generation":1,"map_id":0,"instance_id":0,"started_micros":started,
+            "candidate":{"id":{"action":{"move":{"home":{}}},"objective":1}},
+            "running":{"movement":{"from_x":10.0,"from_y":10.0,"destination":{"map_id":0,"instance_id":0,"x":20.0,"y":10.0,"z":0.0}}}}})
     }
 
     #[test]
     fn accepted_work_is_not_observed_progress() {
         let before = runner();
         let mut after = before.clone();
-        after["last_outcome"] = json!({"Accepted":[]});
+        after["last_outcome"] = json!({"accepted":{}});
         assert!(!has_progress(&after, &before).unwrap());
         after["cast_progress"] =
             json!({"some":{"observed_micros":900,"scheduled_id":7,"spell":585,"target":44}});
+        assert!(!has_progress(&after, &before).unwrap());
+        after["combat_progress"] = json!({"some":{"observed_micros":900,"target":44,"health":20}});
         assert!(has_progress(&after, &before).unwrap());
         assert!(!has_progress(&after, &after).unwrap());
     }
@@ -282,17 +377,40 @@ mod tests {
     fn a_stale_route_count_is_not_added_again_while_movement_runs() {
         let mut measurement = Measurement::new(&BTreeSet::from([11]));
         let mut state = runner();
-        state["foreground"] = json!({"some":{"started_micros":100,"running":{"Movement":{"from_x":10.0,"from_y":10.0}}}});
+        measurement
+            .observe_transaction(&transaction(&state), false)
+            .unwrap();
+        state["observed_micros"] = json!(100);
+        state["foreground"] = moving(100);
         state["route_expansions"] = json!(27);
-        measurement.movement(&state, 11, 100).unwrap();
-        measurement.movement(&state, 11, 200).unwrap();
-        state["foreground"] = json!({"none":[]});
+        measurement
+            .observe_transaction(&transaction(&state), true)
+            .unwrap();
+        measurement.observe(&pass(&state), true).unwrap();
+        state["observed_micros"] = json!(200);
+        measurement
+            .observe_transaction(&transaction(&state), true)
+            .unwrap();
+        measurement.observe(&pass(&state), true).unwrap();
+        state["observed_micros"] = json!(900);
+        state["foreground"] = json!({"none":{}});
         state["movement_progress"] =
             json!({"some":{"observed_micros":900,"arrived":true,"x":20.0,"y":10.0}});
-        measurement.movement(&state, 11, 900).unwrap();
+        measurement
+            .observe_transaction(&transaction(&state), true)
+            .unwrap();
+        measurement.observe(&pass(&state), true).unwrap();
         assert_eq!(
-            measurement.report()["route_expansions_per_movement_attempt"]["total"],
+            measurement.report()["route_expansions_per_processed_bot"]["total"],
             27
+        );
+        assert_eq!(
+            measurement.report()["route_expansions_per_processed_bot"]["count"],
+            3
+        );
+        assert_eq!(
+            measurement.report()["route_expansions_per_processed_bot"]["p50"],
+            0
         );
         assert_eq!(
             measurement.report()["completed_movement_micros"]["max"],
@@ -311,5 +429,72 @@ mod tests {
         assert!(!has_progress(&after, &before).unwrap());
         after["movement_progress"]["some"]["x"] = json!(11.0);
         assert!(has_progress(&after, &before).unwrap());
+    }
+
+    #[test]
+    fn a_runner_update_before_the_window_cannot_be_counted_in_the_next_pass() {
+        let mut measurement = Measurement::new(&BTreeSet::from([11]));
+        let mut state = runner();
+        measurement
+            .observe_transaction(&transaction(&state), false)
+            .unwrap();
+        state["combat_progress"] = json!({"some":{"observed_micros":100,"target":44,"health":20}});
+        state["observed_micros"] = json!(100);
+        measurement
+            .observe_transaction(&transaction(&state), false)
+            .unwrap();
+        state["observed_micros"] = json!(200);
+        measurement
+            .observe_transaction(&transaction(&state), true)
+            .unwrap();
+        measurement.observe(&pass(&state), true).unwrap();
+        assert_eq!(
+            measurement.report()["no_observed_progress_guids"],
+            json!([11])
+        );
+    }
+
+    #[test]
+    fn an_actual_confirmed_cli_snapshot_preserves_named_sum_values() {
+        let update: Value =
+            serde_json::from_str(include_str!("../fixtures/initial-transaction.json")).unwrap();
+        let expected = BTreeSet::from([1_000_001]);
+        let mut stream = crate::stream::Stream::default();
+        assert!(stream.apply(&update, &expected).unwrap().is_none());
+        let mut measurement = Measurement::new(&expected);
+        measurement.observe_transaction(&update, false).unwrap();
+        let state = &measurement.previous[&1_000_001];
+        assert!(optional(state, "foreground").unwrap().is_none());
+        assert_eq!(
+            measurement.report()["no_observed_progress_guids"],
+            json!([1_000_001])
+        );
+    }
+
+    #[test]
+    fn a_different_leg_in_the_same_generation_cannot_consume_an_old_start() {
+        let mut measurement = Measurement::new(&BTreeSet::from([11]));
+        let mut state = runner();
+        state["observed_micros"] = json!(100);
+        state["foreground"] = moving(100);
+        measurement
+            .observe_transaction(&transaction(&state), true)
+            .unwrap();
+        state["observed_micros"] = json!(200);
+        state["foreground"] = moving(150);
+        measurement
+            .observe_transaction(&transaction(&state), true)
+            .unwrap();
+        state["observed_micros"] = json!(900);
+        state["foreground"] = json!({"none":{}});
+        state["movement_progress"] =
+            json!({"some":{"observed_micros":900,"arrived":true,"x":20.0,"y":10.0}});
+        measurement
+            .observe_transaction(&transaction(&state), true)
+            .unwrap();
+        assert_eq!(
+            measurement.report()["completed_movement_micros"]["count"],
+            0
+        );
     }
 }

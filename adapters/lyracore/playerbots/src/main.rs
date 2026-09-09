@@ -241,9 +241,10 @@ fn collect(inputs: &Inputs, directory: &Path, expected: &BTreeSet<u64>) -> Resul
         let update: Value = serde_json::from_str(&received.line)?;
         let after_window =
             start_micros.is_some_and(|start| received.micros >= start + inputs.seconds * 1_000_000);
-        if let Some(pass) = stream.apply(&update, expected)? {
-            let measured =
-                !after_window && start_micros.is_some_and(|start| received.micros >= start);
+        let measured = !after_window && start_micros.is_some_and(|start| received.micros >= start);
+        let pass = stream.apply(&update, expected)?;
+        measurement.observe_transaction(&update, measured)?;
+        if let Some(pass) = pass {
             serde_json::to_writer(
                 &mut passes,
                 &serde_json::json!({"received_micros":received.micros,"measured":measured,"pass":pass}),
