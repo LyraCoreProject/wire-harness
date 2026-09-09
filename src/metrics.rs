@@ -1,26 +1,4 @@
-//! Server-side measurement, taken from OUTSIDE the server: SpacetimeDB's own Prometheus
-//! endpoint (`GET /v1/metrics` on the node's HTTP port).
-//!
-//! This is what lets the benchmark report writer occupancy, per-reducer tx/s and event-table
-//! insert/reap rates without a single line of instrumentation inside `module/` or `gateway/`
-//! (work-item #18: "prefer reading it from outside"). The four numbers the ticket asks for map
-//! onto these node metrics:
-//!
-//! | benchmark metric        | node metric                                            |
-//! |-------------------------|--------------------------------------------------------|
-//! | writer occupancy %      | `spacetime_txn_cpu_time_sec_sum` Δ / wall-clock Δ      |
-//! | tx/s by reducer         | `spacetime_num_txns_total{txn_type="Reducer"}` Δ / Δt  |
-//! | event insert/reap rates | `spacetime_num_rows_{inserted,deleted}_total` Δ / Δt   |
-//! | queueing (saturation)   | `spacetime_reducer_wait_time_sec_{sum,count}` Δ        |
-//!
-//! `spacetime_txn_cpu_time_sec` is "time spent executing a transaction, EXCLUDING time spent
-//! waiting to acquire database locks" — i.e. exactly the serialized writer's busy time, which is
-//! the quantity `docs/capacity-analysis.md` §3.3 models as "writer occupancy".
-//!
-//! ponytail: the scrape is a 20-line HTTP/1.1 GET and the parser is `rsplit_once(' ')`, because a
-//! Prometheus text exposition line is `name{labels} value` and nothing here needs more. Ceiling:
-//! label values containing a space or `}` would mis-split, and exemplars (`# {trace_id=...}`)
-//! aren't handled — SpacetimeDB emits neither. Upgrade path if that ever changes: `prometheus-parse`.
+//! Prometheus scrapes and counter windows used by the benchmark and acceptance reports.
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -29,10 +7,10 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 
-/// One scrape, keyed on the VERBATIM `name{labels}` text of each sample line.
+/// One scrape, keyed by metric name and canonical labels.
 ///
-/// Keeping the raw key (rather than a parsed label map) makes [`Snapshot::delta`] a trivial
-/// key-wise subtraction and keeps filtering to substring matches on the label blob.
+/// Labels are sorted during parsing. The benchmark keeps its legacy substring selectors;
+/// acceptance uses complete label values through [`Snapshot::counter_delta`].
 #[derive(Clone, Debug, Default)]
 pub struct Snapshot(pub BTreeMap<String, f64>);
 
@@ -69,38 +47,160 @@ pub fn http_get(url: &str) -> Result<String> {
     Ok(body.to_string())
 }
 
-/// Parse the Prometheus text exposition format into a [`Snapshot`].
-pub fn parse(text: &str) -> Snapshot {
-    let mut m = BTreeMap::new();
-    for line in text.lines() {
+/// Parse text exposition samples. Malformed or duplicate samples fail the scrape.
+/// Keys use sorted labels so a label-order change cannot look like a counter reset.
+pub fn parse(text: &str) -> Result<Snapshot> {
+    let mut samples = BTreeMap::new();
+    for (line_number, line) in text.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let Some((key, val)) = line.rsplit_once(' ') else {
-            continue;
-        };
-        let Ok(v) = val.trim().parse::<f64>() else {
-            continue;
-        };
-        m.insert(key.to_string(), v);
+        let (key, value) =
+            parse_sample(line).with_context(|| format!("metrics line {}", line_number + 1))?;
+        if samples.insert(key.clone(), value).is_some() {
+            bail!("duplicate metric sample {key}");
+        }
     }
-    Snapshot(m)
+    Ok(Snapshot(samples))
 }
 
-/// Scrape + parse in one go.
+fn parse_sample(line: &str) -> Result<(String, f64)> {
+    let mut quoted = false;
+    let mut escaped = false;
+    let mut end = None;
+    for (index, character) in line.char_indices() {
+        if escaped {
+            escaped = false;
+        } else if quoted && character == '\\' {
+            escaped = true;
+        } else if character == '"' {
+            quoted = !quoted;
+        } else if !quoted && character.is_whitespace() {
+            end = Some(index);
+            break;
+        }
+    }
+    let end = end.context("metric sample has no value")?;
+    let key = &line[..end];
+    let (name, labels) = split_key(key);
+    if name.is_empty()
+        || !name.bytes().enumerate().all(|(i, byte)| {
+            byte.is_ascii_alphabetic()
+                || byte == b'_'
+                || byte == b':'
+                || (i > 0 && byte.is_ascii_digit())
+        })
+    {
+        bail!("invalid metric name {name:?}");
+    }
+    let labels = parse_labels(labels)?;
+    let mut values = line[end..].split_whitespace();
+    let value = values
+        .next()
+        .context("metric sample has no value")?
+        .parse::<f64>()?;
+    if let Some(timestamp) = values.next() {
+        timestamp
+            .parse::<i64>()
+            .context("invalid metric timestamp")?;
+    }
+    if values.next().is_some() {
+        bail!("unsupported metric suffix");
+    }
+    let labels = labels
+        .into_iter()
+        .map(|(key, value)| {
+            let escaped = value
+                .replace('\\', "\\\\")
+                .replace('\n', "\\n")
+                .replace('"', "\\\"");
+            format!("{key}=\"{escaped}\"")
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let key = if labels.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{name}{{{labels}}}")
+    };
+    Ok((key, value))
+}
+
+fn parse_labels(text: &str) -> Result<BTreeMap<String, String>> {
+    if text.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let body = text
+        .strip_prefix('{')
+        .and_then(|s| s.strip_suffix('}'))
+        .context("invalid metric label braces")?;
+    let mut rest = body;
+    let mut labels = BTreeMap::new();
+    while !rest.is_empty() {
+        let (key, value) = rest
+            .split_once('=')
+            .context("metric label has no equals sign")?;
+        if key.is_empty()
+            || !key
+                .bytes()
+                .enumerate()
+                .all(|(i, b)| b.is_ascii_alphabetic() || b == b'_' || (i > 0 && b.is_ascii_digit()))
+        {
+            bail!("invalid metric label name {key:?}");
+        }
+        let value = value
+            .strip_prefix('"')
+            .context("metric label is not quoted")?;
+        let mut decoded = String::new();
+        let mut escaped = false;
+        let mut consumed = None;
+        for (index, character) in value.char_indices() {
+            if escaped {
+                decoded.push(match character {
+                    'n' => '\n',
+                    '\\' => '\\',
+                    '"' => '"',
+                    _ => bail!("invalid metric label escape"),
+                });
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                consumed = Some(index + 1);
+                break;
+            } else {
+                decoded.push(character);
+            }
+        }
+        let consumed = consumed.context("unterminated metric label")?;
+        if labels.insert(key.to_owned(), decoded).is_some() {
+            bail!("duplicate metric label {key}");
+        }
+        rest = &value[consumed..];
+        if !rest.is_empty() {
+            rest = rest
+                .strip_prefix(',')
+                .context("metric labels need a comma")?;
+            if rest.is_empty() {
+                break;
+            }
+        }
+    }
+    Ok(labels)
+}
+
+/// Fetch and parse a scrape. The caller retains the raw body when it needs an audit artifact.
 pub fn scrape(url: &str) -> Result<Snapshot> {
-    Ok(parse(&http_get(url)?))
+    parse(&http_get(url)?)
 }
 
-/// Split a sample key into `(metric_name, "{labels}" or "")`.
-/// The counter families this benchmark deltas, and therefore the only ones where a negative delta
-/// means anything. Every figure in the report comes from one of these; anything else in the scrape
-/// is either a gauge or unread. Keep this in step with `report.rs`/`main.rs` — a family added there
-/// and not here loses its reset protection, which is a quieter failure than the false alarms this
-/// list exists to stop, so it is worth checking when a new metric is read.
+/// Counter families consumed by the benchmark. Keep this list in step with its report fields.
+/// Gauges may decrease during normal work and must not trigger counter reset checks.
 pub const MONOTONIC_FAMILIES: &[&str] = &[
     "spacetime_txn_cpu_time_sec_sum",
+    "spacetime_txn_cpu_time_sec_count",
+    "spacetime_txn_cpu_time_sec_bucket",
     "spacetime_num_txns_total",
     "spacetime_num_rows_inserted_total",
     "spacetime_num_rows_deleted_total",
@@ -108,6 +208,7 @@ pub const MONOTONIC_FAMILIES: &[&str] = &[
     "spacetime_num_bytes_sent_to_clients_total",
     "spacetime_reducer_wait_time_sec_sum",
     "spacetime_reducer_wait_time_sec_count",
+    "spacetime_reducer_wait_time_sec_bucket",
 ];
 
 fn split_key(key: &str) -> (&str, &str) {
@@ -119,11 +220,7 @@ fn split_key(key: &str) -> (&str, &str) {
 
 /// Extract a label value out of a `{a="1",b="2"}` blob.
 pub fn label_value(labels: &str, key: &str) -> Option<String> {
-    let pat = format!("{key}=\"");
-    let start = labels.find(&pat)? + pat.len();
-    let rest = &labels[start..];
-    let end = rest.find('"')?;
-    Some(rest[..end].to_string())
+    parse_labels(labels).ok()?.remove(key)
 }
 
 impl Snapshot {
@@ -137,6 +234,80 @@ impl Snapshot {
                 .map(|(k, v)| (k.clone(), v - self.0.get(k).copied().unwrap_or(0.0)))
                 .collect(),
         )
+    }
+
+    /// Refuse missing or non-finite counter series before a benchmark reports its window.
+    /// New series may start at zero; an existing counter may not disappear.
+    pub fn require_counter_series(&self, later: &Snapshot, filters: &[&str]) -> Result<()> {
+        for (key, before) in &self.0 {
+            let (name, labels) = split_key(key);
+            if !MONOTONIC_FAMILIES.contains(&name) || !filters.iter().all(|f| labels.contains(f)) {
+                continue;
+            }
+            let after = later
+                .0
+                .get(key)
+                .with_context(|| format!("counter disappeared: {key}"))?;
+            if !before.is_finite() || !after.is_finite() {
+                bail!("counter is not finite: {key}");
+            }
+        }
+        for (key, value) in &later.0 {
+            let (name, labels) = split_key(key);
+            if MONOTONIC_FAMILIES.contains(&name)
+                && filters.iter().all(|f| labels.contains(f))
+                && !value.is_finite()
+            {
+                bail!("counter is not finite: {key}");
+            }
+        }
+        Ok(())
+    }
+
+    /// Sum one counter's change using complete label values. Both endpoints must have samples.
+    /// A disappeared, reset or non-finite series makes the measurement unavailable.
+    pub fn counter_delta(
+        &self,
+        later: &Snapshot,
+        name: &str,
+        labels: &[(&str, &str)],
+    ) -> Result<f64> {
+        let selected = |snapshot: &Snapshot| {
+            snapshot
+                .0
+                .iter()
+                .filter(|(key, _)| {
+                    let (metric, encoded) = split_key(key);
+                    metric == name
+                        && labels.iter().all(|(key, value)| {
+                            label_value(encoded, key).as_deref() == Some(*value)
+                        })
+                })
+                .map(|(key, value)| (key.clone(), *value))
+                .collect::<BTreeMap<_, _>>()
+        };
+        let before = selected(self);
+        let after = selected(later);
+        if before.is_empty() || after.is_empty() {
+            bail!("counter {name} is missing for selected labels");
+        }
+        for key in before.keys() {
+            if !after.contains_key(key) {
+                bail!("counter disappeared: {key}");
+            }
+        }
+        let mut total = 0.0;
+        for (key, value) in after {
+            let initial = before.get(&key).copied().unwrap_or(0.0);
+            if !initial.is_finite() || !value.is_finite() || initial < 0.0 || value < initial {
+                bail!("counter reset or invalid value: {key}");
+            }
+            total += value - initial;
+        }
+        if !total.is_finite() {
+            bail!("counter {name} delta is not finite");
+        }
+        Ok(total)
     }
 
     /// Sum every sample of `name` whose label blob contains all of `filters`
@@ -275,6 +446,10 @@ pub const OCCUPANCY_FAMILY: &str = "spacetime_txn_cpu_time_sec_sum";
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parse(text: &str) -> Snapshot {
+        super::parse(text).expect("valid fixture metrics")
+    }
 
     const SAMPLE: &str = r#"
 # HELP spacetime_txn_cpu_time_sec The time spent executing a transaction
@@ -461,5 +636,100 @@ spacetime_num_table_rows{db="000abcd",table_name="x"} 135
         let s = parse(SAMPLE);
         let f = db_filter("");
         assert_eq!(s.sum("spacetime_txn_cpu_time_sec_sum", &[&f]), 111.0);
+    }
+    #[test]
+    fn escaped_labels_and_timestamps_keep_the_sample_value() {
+        let snapshot =
+            super::parse(r#"work_total{path="a b\n\"c\\d",db="abc"} 12.5 1234"#).unwrap();
+        let (key, value) = snapshot.0.iter().next().unwrap();
+        assert_eq!(*value, 12.5);
+        assert_eq!(
+            label_value(split_key(key).1, "path").as_deref(),
+            Some("a b\n\"c\\d")
+        );
+        assert_eq!(
+            label_value(r#"{otherdb="wrong",db="right"}"#, "db").as_deref(),
+            Some("right")
+        );
+    }
+
+    #[test]
+    fn malformed_and_duplicate_samples_fail_the_scrape() {
+        for text in [
+            "work_total",
+            "work_total nope",
+            "work_total 1 invalid",
+            "work_total 1 2 extra",
+            "1work 2",
+            r#"work_total{db=abc} 1"#,
+            r#"work_total{db="a",db="b"} 1"#,
+            r#"work_total{db="a\q"} 1"#,
+            r#"work_total{db="a" 1"#,
+            "work_total 1\nwork_total 2",
+        ] {
+            assert!(super::parse(text).is_err(), "accepted {text:?}");
+        }
+    }
+
+    #[test]
+    fn label_order_does_not_change_counter_identity() {
+        let before = parse(r#"work_total{db="abc",kind="move"} 7"#);
+        let after = parse(r#"work_total{kind="move",db="abc"} 12"#);
+        assert_eq!(
+            before
+                .counter_delta(&after, "work_total", &[("db", "abc")])
+                .unwrap(),
+            5.0
+        );
+    }
+
+    #[test]
+    fn exact_counter_selection_excludes_similar_identities_and_label_names() {
+        let before = parse("work_total{db=\"abc\"} 5\nwork_total{db=\"abcdef\"} 50\nwork_total{otherdb=\"abc\"} 500");
+        let after = parse("work_total{db=\"abc\"} 8\nwork_total{db=\"abcdef\"} 100\nwork_total{otherdb=\"abc\"} 1000");
+        assert_eq!(
+            before
+                .counter_delta(&after, "work_total", &[("db", "abc")])
+                .unwrap(),
+            3.0
+        );
+        assert!(before
+            .counter_delta(&after, "work_total", &[("db", "absent")])
+            .is_err());
+    }
+
+    #[test]
+    fn counter_windows_refuse_loss_reset_and_non_finite_values() {
+        let before =
+            parse("work_total{db=\"abc\",table=\"a\"} 10\nwork_total{db=\"abc\",table=\"b\"} 20");
+        for after in [
+            "work_total{db=\"abc\",table=\"a\"} 11",
+            "work_total{db=\"abc\",table=\"a\"} 11\nwork_total{db=\"abc\",table=\"b\"} 1",
+            "work_total{db=\"abc\",table=\"a\"} 11\nwork_total{db=\"abc\",table=\"b\"} NaN",
+        ] {
+            assert!(before
+                .counter_delta(&parse(after), "work_total", &[("db", "abc")])
+                .is_err());
+        }
+        let after = parse("work_total{db=\"abc\",table=\"a\"} 11\nwork_total{db=\"abc\",table=\"b\"} 22\nwork_total{db=\"abc\",table=\"new\"} 3");
+        assert_eq!(
+            before
+                .counter_delta(&after, "work_total", &[("db", "abc")])
+                .unwrap(),
+            6.0
+        );
+    }
+
+    #[test]
+    fn a_missing_benchmark_counter_cannot_be_reported_as_zero() {
+        let before = parse(r#"spacetime_num_txns_total{db="abc"} 10"#);
+        assert!(before
+            .require_counter_series(&Snapshot::default(), &[r#"db="abc""#])
+            .is_err());
+        let invalid = parse(r#"spacetime_num_txns_total{db="abc"} NaN"#);
+        assert!(before.require_counter_series(&invalid, &[]).is_err());
+        assert!(Snapshot::default()
+            .require_counter_series(&invalid, &[])
+            .is_err());
     }
 }

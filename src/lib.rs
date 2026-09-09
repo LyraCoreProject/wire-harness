@@ -24,6 +24,7 @@
 #![allow(clippy::type_complexity)]
 
 pub mod cli;
+pub mod metrics;
 pub mod spatial;
 pub mod values_mask;
 
