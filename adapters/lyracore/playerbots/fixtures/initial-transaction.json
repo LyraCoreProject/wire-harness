@@ -1,0 +1,103 @@
+{
+  "pkg_playerbots_bot": {
+    "deletes": [],
+    "inserts": [
+      {
+        "id": 1,
+        "character_guid": 1000001,
+        "account_id": 2,
+        "class": 5,
+        "role": 1,
+        "home_map": 0,
+        "home_x": 1202.9418,
+        "home_y": 1200.0,
+        "home_z": 50.0,
+        "next_think_micros": 9223372036854775807,
+        "controller": {
+          "cohort": {}
+        },
+        "scheduler_lag_micros": 0
+      }
+    ]
+  },
+  "pkg_playerbots_runner": {
+    "deletes": [],
+    "inserts": [
+      {
+        "character_guid": 1000001,
+        "generation": 1,
+        "objective_sequence": 0,
+        "objective": {
+          "none": {}
+        },
+        "foreground": {
+          "none": {}
+        },
+        "chosen": {
+          "none": {}
+        },
+        "candidate_order": [],
+        "last_outcome": {
+          "cancelled": {}
+        },
+        "observed_micros": 1788966781113768,
+        "progress_age_micros": {
+          "none": {}
+        },
+        "retry_count": 0,
+        "next_eligible_micros": 1788966782113768,
+        "retry_candidate": {
+          "none": {}
+        },
+        "failures": [],
+        "deferred_destinations": [],
+        "movement_progress": {
+          "none": {}
+        },
+        "combat_progress": {
+          "none": {}
+        },
+        "cast_progress": {
+          "none": {}
+        },
+        "quest_progress": [],
+        "history": [
+          {
+            "at_micros": 1788966781113768,
+            "chosen": {
+              "none": {}
+            },
+            "outcome": {
+              "cancelled": {}
+            }
+          }
+        ],
+        "last_stall_check_micros": 1788966781113768,
+        "last_target_health": {
+          "none": {}
+        },
+        "defense_target": {
+          "none": {}
+        },
+        "transitions": 0,
+        "route_expansions": 0,
+        "route_budget": 0,
+        "companion_leader_guid": {
+          "none": {}
+        },
+        "companion_heal_target_guid": {
+          "none": {}
+        },
+        "companion_fight_target_guid": {
+          "none": {}
+        },
+        "companion_buff_target_guid": {
+          "none": {}
+        },
+        "recovery": {
+          "none": {}
+        }
+      }
+    ]
+  }
+}
