@@ -1,5 +1,7 @@
 mod analysis;
+mod counters;
 mod stream;
+mod timing;
 
 use std::collections::BTreeSet;
 use std::fs::{self, File};
@@ -193,6 +195,48 @@ fn retain_scrape(
     ))
 }
 
+fn decision_timings(
+    inputs: &Inputs,
+    directory: &Path,
+    expected: &BTreeSet<timing::Decision>,
+) -> Result<Value> {
+    let path = directory.join("decision-logs.jsonl");
+    let mut child = Subscription(
+        Command::new(&inputs.spacetime)
+            .arg("--config-path")
+            .arg(&inputs.config_path)
+            .args([
+                "logs",
+                "--no-config",
+                "--format",
+                "json",
+                "-s",
+                &inputs.server,
+                &inputs.database_identity,
+            ])
+            .stdout(File::create(&path)?)
+            .stderr(File::create(directory.join("decision-logs.stderr"))?)
+            .spawn()?,
+    );
+    let started = Instant::now();
+    loop {
+        if fs::metadata(&path)?.len() > MAX_STREAM_BYTES {
+            bail!("decision log evidence exceeds the stream limit");
+        }
+        if let Some(status) = child.0.try_wait()? {
+            if !status.success() {
+                bail!("decision log collection failed: {status}");
+            }
+            break;
+        }
+        if started.elapsed() > Duration::from_secs(20) {
+            bail!("decision log collection exceeded twenty seconds");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    timing::report(&fs::read_to_string(path)?, expected)
+}
+
 fn collect(inputs: &Inputs, directory: &Path, expected: &BTreeSet<u64>) -> Result<Value> {
     let origin = Instant::now();
     let (mut subscription, receiver) = subscribe(inputs, directory, origin)?;
@@ -206,6 +250,7 @@ fn collect(inputs: &Inputs, directory: &Path, expected: &BTreeSet<u64>) -> Resul
     let mut before_window = Value::Null;
     let mut start_micros = None;
     let mut measured_passes = 0_u64;
+    let mut measured_decisions = BTreeSet::new();
     loop {
         let now = origin.elapsed();
         if start_micros
@@ -253,6 +298,11 @@ fn collect(inputs: &Inputs, directory: &Path, expected: &BTreeSet<u64>) -> Resul
             measurement.observe(&pass, measured)?;
             if measured {
                 measured_passes += 1;
+                for runner in &pass.runners {
+                    if !measured_decisions.insert(timing::decision(runner)?) {
+                        bail!("a decision appears in more than one measured pass");
+                    }
+                }
             }
             warmed.extend(pass.processed_guids);
         }
@@ -280,22 +330,40 @@ fn collect(inputs: &Inputs, directory: &Path, expected: &BTreeSet<u64>) -> Resul
         ("db", inputs.database_identity.as_str()),
         ("txn_type", "Reducer"),
     ];
-    let cpu_seconds = before.counter_delta(&after, "spacetime_txn_cpu_time_sec_sum", &labels)?;
     let scanned_rows = before.counter_delta(&after, "spacetime_num_rows_scanned_total", &labels)?;
     let inserted_rows =
         before.counter_delta(&after, "spacetime_num_rows_inserted_total", &labels)?;
     let deleted_rows = before.counter_delta(&after, "spacetime_num_rows_deleted_total", &labels)?;
+    // Keep both scrape latencies in the denominator of the writer-time estimate.
+    let metric_window_micros = after_window["end_micros"]
+        .as_u64()
+        .context("missing final scrape end")?
+        .checked_sub(
+            before_window["start_micros"]
+                .as_u64()
+                .context("missing initial scrape start")?,
+        )
+        .context("scrape clock moved backwards")?;
+    let counter_report = counters::report(
+        &before,
+        &after,
+        &inputs.database_identity,
+        metric_window_micros as f64 / 1_000_000.0,
+    )?;
     raw.sync_all()?;
     passes.sync_all()?;
+    drop(subscription);
+    let timing_report = decision_timings(inputs, directory, &measured_decisions)?;
     Ok(
         serde_json::json!({"status":"captured", "measured_passes":measured_passes,
         "stream_bytes":stream_bytes,"warmup_micros":start_micros,
         "before_scrape":before_window,"after_scrape":after_window,
-        "reducer_cpu_seconds":cpu_seconds,"rows_scanned":scanned_rows,
+        "transaction_measurements":counter_report,"rows_scanned":scanned_rows,
+        "decision_timings":timing_report,
         "physical_rows_inserted":inserted_rows,"physical_rows_deleted":deleted_rows,
         "behavior_measurements":measurement.report(),
         "row_accounting":"an update contributes one deletion and one insertion",
-        "acceptance":"pending decision timing, queue and transaction outcome analysis"}),
+        "acceptance":"pending an observed load fixture and capacity assessment"}),
     )
 }
 
