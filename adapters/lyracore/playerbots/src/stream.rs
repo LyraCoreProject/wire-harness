@@ -83,6 +83,7 @@ impl Stream {
             match table.as_str() {
                 BOT => replace_rows(&mut self.bots, changes)?,
                 RUNNER => replace_rows(&mut self.runners, changes)?,
+                table if crate::movement::TABLES.contains(&table) => {}
                 SCHEDULER => {
                     for row in changes["deletes"]
                         .as_array()

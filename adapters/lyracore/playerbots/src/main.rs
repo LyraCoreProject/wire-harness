@@ -1,5 +1,6 @@
 mod analysis;
 mod counters;
+mod movement;
 mod stream;
 mod timing;
 
@@ -124,6 +125,11 @@ fn subscribe(
         .arg(&inputs.database_identity);
     for table in stream::TABLES {
         command.arg(format!("SELECT * FROM {table}"));
+    }
+    for table in movement::TABLES {
+        for guid in &inputs.bot_guids {
+            command.arg(format!("SELECT * FROM {table} WHERE guid = {guid}"));
+        }
     }
     let mut child = Subscription(
         command
@@ -288,7 +294,9 @@ fn collect(inputs: &Inputs, directory: &Path, expected: &BTreeSet<u64>) -> Resul
             start_micros.is_some_and(|start| received.micros >= start + inputs.seconds * 1_000_000);
         let measured = !after_window && start_micros.is_some_and(|start| received.micros >= start);
         let pass = stream.apply(&update, expected)?;
-        measurement.observe_transaction(&update, measured)?;
+        if !after_window {
+            measurement.observe_transaction(&update, measured)?;
+        }
         if let Some(pass) = pass {
             serde_json::to_writer(
                 &mut passes,
@@ -307,6 +315,7 @@ fn collect(inputs: &Inputs, directory: &Path, expected: &BTreeSet<u64>) -> Resul
             warmed.extend(pass.processed_guids);
         }
         if before.is_none() && warmed == *expected {
+            measurement.ready()?;
             let (snapshot, window) = retain_scrape(inputs, directory, "before", origin)?;
             snapshot.counter_delta(
                 &snapshot,

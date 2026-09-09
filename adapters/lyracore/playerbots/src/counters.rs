@@ -176,6 +176,31 @@ mod tests {
     }
 
     #[test]
+    fn the_first_rollback_series_charges_every_reported_failure() {
+        let before =
+            parse("spacetime_num_txns_total{db=\"a\",txn_type=\"Reducer\",committed=\"true\"} 2\n")
+                .unwrap();
+        let after = parse("spacetime_num_txns_total{db=\"a\",txn_type=\"Reducer\",committed=\"true\"} 7\nspacetime_num_txns_total{db=\"a\",txn_type=\"Reducer\",committed=\"false\"} 3\n").unwrap();
+        let groups = grouped_delta(
+            &before,
+            &after,
+            "spacetime_num_txns_total",
+            &[("db", "a")],
+            "committed",
+        )
+        .unwrap();
+        assert_eq!(groups.get("false"), Some(&3.0));
+        assert!(grouped_delta(
+            &after,
+            &before,
+            "spacetime_num_txns_total",
+            &[("db", "a")],
+            "committed"
+        )
+        .is_err());
+    }
+
+    #[test]
     fn a_queue_histogram_reports_bounds_instead_of_inventing_an_exact_maximum() {
         let before = parse("q_count{db=\"a\"} 0\nq_sum{db=\"a\"} 0\nq_bucket{db=\"a\",le=\"0.001\"} 0\nq_bucket{db=\"a\",le=\"0.01\"} 0\nq_bucket{db=\"a\",le=\"+Inf\"} 0\n").unwrap();
         let after = parse("q_count{db=\"a\"} 4\nq_sum{db=\"a\"} 0.024\nq_bucket{db=\"a\",le=\"0.001\"} 2\nq_bucket{db=\"a\",le=\"0.01\"} 3\nq_bucket{db=\"a\",le=\"+Inf\"} 4\n").unwrap();

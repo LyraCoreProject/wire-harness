@@ -10,28 +10,19 @@ pub struct Measurement {
     counts: BTreeMap<u64, u64>,
     previous: BTreeMap<u64, Value>,
     progress: BTreeSet<u64>,
-    movement_starts: BTreeMap<u64, MovementLeg>,
+    movement: crate::movement::Movement,
     lag: Vec<(u64, u64)>,
     routes: Vec<(u64, u64)>,
-    movements: Vec<(u64, u64)>,
     deferred_observations: u64,
     accelerated_observations: u64,
     slowest_due: Option<Value>,
-}
-
-struct MovementLeg {
-    identity: Value,
-    generation: u64,
-    started: i64,
-    x: f64,
-    y: f64,
 }
 
 fn signed(row: &Value, key: &str) -> Result<i64> {
     row[key].as_i64().with_context(|| format!("invalid {key}"))
 }
 
-fn unsigned(row: &Value, key: &str) -> Result<u64> {
+pub(super) fn unsigned(row: &Value, key: &str) -> Result<u64> {
     row[key].as_u64().with_context(|| format!("invalid {key}"))
 }
 
@@ -62,7 +53,7 @@ fn newer(current: &Value, previous: &Value, key: &str) -> Result<bool> {
     Ok(signed(current, "observed_micros")? > before)
 }
 
-fn coordinate(row: &Value, key: &str) -> Result<f64> {
+pub(super) fn coordinate(row: &Value, key: &str) -> Result<f64> {
     row[key]
         .as_f64()
         .filter(|value| value.is_finite())
@@ -129,7 +120,7 @@ fn has_progress(current: &Value, previous: &Value) -> Result<bool> {
     Ok(false)
 }
 
-fn movement_identity(runner: &Value) -> Result<Option<Value>> {
+pub(super) fn movement_identity(runner: &Value) -> Result<Option<Value>> {
     let Some(fg) = optional(runner, "foreground")? else {
         return Ok(None);
     };
@@ -149,7 +140,7 @@ fn movement_identity(runner: &Value) -> Result<Option<Value>> {
     ])))
 }
 
-fn distribution(samples: &[(u64, u64)]) -> Value {
+pub(super) fn distribution(samples: &[(u64, u64)]) -> Value {
     if samples.is_empty() {
         return json!({"count":0,"p50":null,"p95":null,"max":null,"max_guid":null,"total":0});
     }
@@ -165,6 +156,7 @@ impl Measurement {
     pub fn new(expected: &BTreeSet<u64>) -> Self {
         Self {
             counts: expected.iter().map(|&guid| (guid, 0)).collect(),
+            movement: crate::movement::Movement::new(expected),
             ..Self::default()
         }
     }
@@ -213,6 +205,7 @@ impl Measurement {
 
     /// Observe every committed runner update, including updates between scheduled passes.
     pub fn observe_transaction(&mut self, update: &Value, measured: bool) -> Result<()> {
+        self.movement.observe(update, measured)?;
         let Some(changes) = update.get("pkg_playerbots_runner") else {
             return Ok(());
         };
@@ -231,62 +224,28 @@ impl Measurement {
                         self.progress.insert(guid);
                     }
                 }
-                self.movement(runner, previous.as_ref(), guid)?;
-            } else {
-                self.movement_starts.remove(&guid);
             }
             self.previous.insert(guid, runner.clone());
+        }
+        for deleted in changes["deletes"]
+            .as_array()
+            .context("invalid runner delete list")?
+        {
+            let guid = unsigned(deleted, "character_guid")?;
+            let replaced = changes["inserts"]
+                .as_array()
+                .context("invalid runner insert list")?
+                .iter()
+                .any(|row| row["character_guid"].as_u64() == Some(guid));
+            if !replaced {
+                self.previous.remove(&guid);
+            }
         }
         Ok(())
     }
 
-    fn movement(&mut self, runner: &Value, previous: Option<&Value>, guid: u64) -> Result<()> {
-        let now = signed(runner, "observed_micros")?;
-        let generation = unsigned(runner, "generation")?;
-        let previous_identity = previous.map(movement_identity).transpose()?.flatten();
-        if let Some(leg) = self.movement_starts.get(&guid) {
-            if previous_identity.as_ref() == Some(&leg.identity) && generation == leg.generation {
-                if let Some(progress) = optional(runner, "movement_progress")? {
-                    let advanced = (coordinate(progress, "x")? - leg.x).powi(2)
-                        + (coordinate(progress, "y")? - leg.y).powi(2)
-                        > 0.05 * 0.05;
-                    if signed(progress, "observed_micros")? == now
-                        && progress["arrived"] == true
-                        && now > leg.started
-                        && advanced
-                    {
-                        self.movements.push(((now - leg.started) as u64, guid));
-                    }
-                }
-            }
-        }
-        let current_identity = movement_identity(runner)?;
-        if let Some(identity) = current_identity {
-            let fg = optional(runner, "foreground")?.context("movement foreground missing")?;
-            let started = signed(fg, "started_micros")?;
-            if started == now && previous_identity.as_ref() != Some(&identity) {
-                let movement = &fg["running"]["movement"];
-                self.movement_starts.insert(
-                    guid,
-                    MovementLeg {
-                        identity,
-                        generation,
-                        started,
-                        x: coordinate(movement, "from_x")?,
-                        y: coordinate(movement, "from_y")?,
-                    },
-                );
-            } else if self
-                .movement_starts
-                .get(&guid)
-                .is_some_and(|leg| leg.identity != identity)
-            {
-                self.movement_starts.remove(&guid);
-            }
-        } else {
-            self.movement_starts.remove(&guid);
-        }
-        Ok(())
+    pub fn ready(&self) -> Result<()> {
+        self.movement.ready()
     }
 
     pub fn report(&self) -> Value {
@@ -307,12 +266,11 @@ impl Measurement {
             "no_observed_progress_guids":missing,"scheduler_lag_micros":distribution(&self.lag),
             "scheduler_lag_bound_micros":lag_bound,"lag_within_bound":self.lag.iter().all(|sample| sample.0 <= lag_bound),
             "route_expansions_per_processed_bot":distribution(&self.routes),
-            "completed_movement_micros":distribution(&self.movements),
+            "movement_legs":self.movement.report(),
             "deferred_bot_observations":self.deferred_observations,"accelerated_due_observations":self.accelerated_observations,
             "slowest_due_bot":self.slowest_due,
             "progress_scope":"new authoritative movement, lost target health or Quest progress in measured transactions",
             "route_scope":"one sample per processed bot; retained work is zero unless this pass starts a new movement attempt",
-            "movement_scope":"foregrounds started and observed arrived with a changed position inside the measured window",
             "fairness_scope":"each pass verifies earliest due order; count spread also reflects damage-triggered scheduling"})
     }
 }
@@ -326,8 +284,38 @@ mod tests {
             "cast_progress":{"none":{}},"quest_progress":[],"foreground":{"none":{}},"route_expansions":0})
     }
 
-    fn transaction(runner: &Value) -> Value {
-        json!({"pkg_playerbots_runner":{"deletes":[],"inserts":[runner]}})
+    fn transaction(measurement: &Measurement, runner: &Value) -> Value {
+        let deletes: Vec<_> = measurement
+            .previous
+            .get(&runner["character_guid"].as_u64().unwrap())
+            .into_iter()
+            .collect();
+        json!({"pkg_playerbots_runner":{"deletes":deletes,"inserts":[runner]}})
+    }
+
+    #[test]
+    fn a_deleted_runner_cannot_supply_a_later_progress_baseline() {
+        let mut measurement = Measurement::new(&BTreeSet::from([11]));
+        let state = runner();
+        measurement
+            .observe_transaction(&transaction(&measurement, &state), false)
+            .unwrap();
+        measurement
+            .observe_transaction(
+                &json!({"pkg_playerbots_runner":{"deletes":[state],"inserts":[]}}),
+                true,
+            )
+            .unwrap();
+        let mut resumed = runner();
+        resumed["combat_progress"] =
+            json!({"some":{"observed_micros":200,"target":44,"health":10}});
+        measurement
+            .observe_transaction(&transaction(&measurement, &resumed), true)
+            .unwrap();
+        assert_eq!(
+            measurement.report()["no_observed_progress_guids"],
+            json!([11])
+        );
     }
 
     fn pass(runner: &Value) -> Pass {
@@ -378,18 +366,18 @@ mod tests {
         let mut measurement = Measurement::new(&BTreeSet::from([11]));
         let mut state = runner();
         measurement
-            .observe_transaction(&transaction(&state), false)
+            .observe_transaction(&transaction(&measurement, &state), false)
             .unwrap();
         state["observed_micros"] = json!(100);
         state["foreground"] = moving(100);
         state["route_expansions"] = json!(27);
         measurement
-            .observe_transaction(&transaction(&state), true)
+            .observe_transaction(&transaction(&measurement, &state), true)
             .unwrap();
         measurement.observe(&pass(&state), true).unwrap();
         state["observed_micros"] = json!(200);
         measurement
-            .observe_transaction(&transaction(&state), true)
+            .observe_transaction(&transaction(&measurement, &state), true)
             .unwrap();
         measurement.observe(&pass(&state), true).unwrap();
         state["observed_micros"] = json!(900);
@@ -397,7 +385,7 @@ mod tests {
         state["movement_progress"] =
             json!({"some":{"observed_micros":900,"arrived":true,"x":20.0,"y":10.0}});
         measurement
-            .observe_transaction(&transaction(&state), true)
+            .observe_transaction(&transaction(&measurement, &state), true)
             .unwrap();
         measurement.observe(&pass(&state), true).unwrap();
         assert_eq!(
@@ -411,10 +399,6 @@ mod tests {
         assert_eq!(
             measurement.report()["route_expansions_per_processed_bot"]["p50"],
             0
-        );
-        assert_eq!(
-            measurement.report()["completed_movement_micros"]["max"],
-            800
         );
     }
 
@@ -436,16 +420,16 @@ mod tests {
         let mut measurement = Measurement::new(&BTreeSet::from([11]));
         let mut state = runner();
         measurement
-            .observe_transaction(&transaction(&state), false)
+            .observe_transaction(&transaction(&measurement, &state), false)
             .unwrap();
         state["combat_progress"] = json!({"some":{"observed_micros":100,"target":44,"health":20}});
         state["observed_micros"] = json!(100);
         measurement
-            .observe_transaction(&transaction(&state), false)
+            .observe_transaction(&transaction(&measurement, &state), false)
             .unwrap();
         state["observed_micros"] = json!(200);
         measurement
-            .observe_transaction(&transaction(&state), true)
+            .observe_transaction(&transaction(&measurement, &state), true)
             .unwrap();
         measurement.observe(&pass(&state), true).unwrap();
         assert_eq!(
@@ -468,33 +452,6 @@ mod tests {
         assert_eq!(
             measurement.report()["no_observed_progress_guids"],
             json!([1_000_001])
-        );
-    }
-
-    #[test]
-    fn a_different_leg_in_the_same_generation_cannot_consume_an_old_start() {
-        let mut measurement = Measurement::new(&BTreeSet::from([11]));
-        let mut state = runner();
-        state["observed_micros"] = json!(100);
-        state["foreground"] = moving(100);
-        measurement
-            .observe_transaction(&transaction(&state), true)
-            .unwrap();
-        state["observed_micros"] = json!(200);
-        state["foreground"] = moving(150);
-        measurement
-            .observe_transaction(&transaction(&state), true)
-            .unwrap();
-        state["observed_micros"] = json!(900);
-        state["foreground"] = json!({"none":{}});
-        state["movement_progress"] =
-            json!({"some":{"observed_micros":900,"arrived":true,"x":20.0,"y":10.0}});
-        measurement
-            .observe_transaction(&transaction(&state), true)
-            .unwrap();
-        assert_eq!(
-            measurement.report()["completed_movement_micros"]["count"],
-            0
         );
     }
 }
