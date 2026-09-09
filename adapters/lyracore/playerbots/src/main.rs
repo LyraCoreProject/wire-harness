@@ -1,12 +1,13 @@
 mod analysis;
 mod counters;
+mod evidence;
 mod movement;
 mod stream;
 mod timing;
 
 use std::collections::BTreeSet;
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Read};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -20,7 +21,8 @@ use sha2::{Digest, Sha256};
 use wire_client::metrics;
 
 const MAX_LINE_BYTES: u64 = 8 * 1024 * 1024;
-const MAX_STREAM_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_STREAM_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+const MAX_LOG_BYTES: u64 = 256 * 1024 * 1024;
 const WARMUP_SECONDS: u64 = 30;
 
 #[derive(Deserialize, Serialize)]
@@ -226,7 +228,7 @@ fn decision_timings(
     );
     let started = Instant::now();
     loop {
-        if fs::metadata(&path)?.len() > MAX_STREAM_BYTES {
+        if fs::metadata(&path)?.len() > MAX_LOG_BYTES {
             bail!("decision log evidence exceeds the stream limit");
         }
         if let Some(status) = child.0.try_wait()? {
@@ -243,11 +245,14 @@ fn decision_timings(
     timing::report(&fs::read_to_string(path)?, expected)
 }
 
-fn collect(inputs: &Inputs, directory: &Path, expected: &BTreeSet<u64>) -> Result<Value> {
+fn collect(
+    inputs: &Inputs,
+    directory: &Path,
+    expected: &BTreeSet<u64>,
+    archives: &mut evidence::Archives,
+) -> Result<Value> {
     let origin = Instant::now();
     let (mut subscription, receiver) = subscribe(inputs, directory, origin)?;
-    let mut raw = File::create(directory.join("transactions.jsonl"))?;
-    let mut passes = File::create(directory.join("passes.jsonl"))?;
     let mut stream = stream::Stream::default();
     let mut measurement = analysis::Measurement::new(expected);
     let mut warmed = BTreeSet::new();
@@ -284,11 +289,9 @@ fn collect(inputs: &Inputs, directory: &Path, expected: &BTreeSet<u64>) -> Resul
         if stream_bytes > MAX_STREAM_BYTES {
             bail!("subscription evidence exceeds the stream limit");
         }
-        serde_json::to_writer(
-            &mut raw,
-            &serde_json::json!({"received_micros":received.micros,"line":received.line}),
-        )?;
-        writeln!(raw)?;
+        archives
+            .transactions
+            .append(&serde_json::json!({"received_micros":received.micros,"line":received.line}))?;
         let update: Value = serde_json::from_str(&received.line)?;
         let after_window =
             start_micros.is_some_and(|start| received.micros >= start + inputs.seconds * 1_000_000);
@@ -298,11 +301,9 @@ fn collect(inputs: &Inputs, directory: &Path, expected: &BTreeSet<u64>) -> Resul
             measurement.observe_transaction(&update, measured)?;
         }
         if let Some(pass) = pass {
-            serde_json::to_writer(
-                &mut passes,
+            archives.passes.append(
                 &serde_json::json!({"received_micros":received.micros,"measured":measured,"pass":pass}),
             )?;
-            writeln!(passes)?;
             measurement.observe(&pass, measured)?;
             if measured {
                 measured_passes += 1;
@@ -359,8 +360,6 @@ fn collect(inputs: &Inputs, directory: &Path, expected: &BTreeSet<u64>) -> Resul
         &inputs.database_identity,
         metric_window_micros as f64 / 1_000_000.0,
     )?;
-    raw.sync_all()?;
-    passes.sync_all()?;
     drop(subscription);
     let timing_report = decision_timings(inputs, directory, &measured_decisions)?;
     Ok(
@@ -389,7 +388,9 @@ fn main() -> Result<()> {
         directory.join("inputs.json"),
         serde_json::to_vec_pretty(&inputs)?,
     )?;
-    let result = collect(&inputs, directory, &expected);
+    let result = evidence::retain(directory, |archives| {
+        collect(&inputs, directory, &expected, archives)
+    });
     let report = match &result {
         Ok(report) => report.clone(),
         Err(error) => serde_json::json!({"status":"failed","error":format!("{error:#}")}),
