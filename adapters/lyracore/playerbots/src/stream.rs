@@ -25,6 +25,27 @@ pub struct Pass {
     pub runners: Vec<Value>,
     pub excess_due: bool,
     pub oldest_deferred_lag_micros: i64,
+    pub deferred_guids: Vec<u64>,
+    pub accelerated_guids: Vec<u64>,
+}
+
+fn due_order(bots: &BTreeMap<u64, Value>, now: i64) -> Result<Vec<(i64, u64, u64)>> {
+    let mut due = Vec::new();
+    let mut ids = BTreeSet::new();
+    for (&guid, bot) in bots {
+        let id = bot["id"].as_u64().context("bot has no numeric row id")?;
+        if !ids.insert(id) {
+            bail!("bots share row id {id}");
+        }
+        let at = bot["next_think_micros"]
+            .as_i64()
+            .context("invalid bot due time")?;
+        if at <= now {
+            due.push((at, id, guid));
+        }
+    }
+    due.sort_unstable();
+    Ok(due)
 }
 
 fn guid(row: &Value) -> Result<u64> {
@@ -53,6 +74,8 @@ fn replace_rows(rows: &mut BTreeMap<u64, Value>, update: &Value) -> Result<()> {
 impl Stream {
     /// Apply a complete CLI transaction before correlating its scheduler and Character rows.
     pub fn apply(&mut self, update: &Value, expected: &BTreeSet<u64>) -> Result<Option<Pass>> {
+        let mut previous_bots = self.bots.clone();
+        let initial = self.last_observed_micros.is_none();
         let tables = update
             .as_object()
             .context("subscription update is not an object")?;
@@ -115,6 +138,69 @@ impl Stream {
         {
             bail!("scheduler processed list is inconsistent with the staged roster or batch limit");
         }
+        if initial {
+            // The subscription snapshot describes earlier work; it is not a new scheduled pass.
+            return Ok(None);
+        }
+        let mut accelerated_guids = Vec::new();
+        for (&guid, old) in &mut previous_bots {
+            let prior = old["next_think_micros"]
+                .as_i64()
+                .context("invalid prior due time")?;
+            let current = &self.bots[&guid];
+            let due = if unique.contains(&guid) {
+                let lag = current["scheduler_lag_micros"]
+                    .as_i64()
+                    .filter(|&lag| lag >= 0)
+                    .context("invalid processed lag")?;
+                observed_micros
+                    .checked_sub(lag)
+                    .context("processed due time overflow")?
+            } else {
+                current["next_think_micros"]
+                    .as_i64()
+                    .context("invalid current due time")?
+            };
+            if due != prior {
+                // Damage can advance a bot's due time earlier in this same Core transaction.
+                if prior <= observed_micros || due != observed_micros {
+                    bail!("Character {guid} changed due time outside the scheduled pass contract");
+                }
+                accelerated_guids.push(guid);
+                old["next_think_micros"] = due.into();
+            }
+        }
+        let previous_due = due_order(&previous_bots, observed_micros)?;
+        let expected_processed: Vec<_> = previous_due.iter().take(16).map(|row| row.2).collect();
+        if processed_guids != expected_processed {
+            bail!("scheduler did not process the earliest due bots in indexed order");
+        }
+        for &(due, _, guid) in previous_due.iter().take(16) {
+            let bot = &self.bots[&guid];
+            if bot["next_think_micros"].as_i64() != observed_micros.checked_add(1_000_000)
+                || bot["scheduler_lag_micros"].as_i64() != Some(observed_micros.saturating_sub(due))
+                || self
+                    .runners
+                    .get(&guid)
+                    .and_then(|row| row["observed_micros"].as_i64())
+                    != Some(observed_micros)
+            {
+                bail!("processed Character {guid} has inconsistent due, lag or runner time");
+            }
+        }
+        let deferred = due_order(&self.bots, observed_micros)?;
+        let excess_due = row["excess_due"].as_bool().context("invalid excess_due")?;
+        let oldest_deferred_lag_micros = row["oldest_deferred_lag_micros"]
+            .as_i64()
+            .context("invalid deferred lag")?;
+        if excess_due == deferred.is_empty()
+            || oldest_deferred_lag_micros
+                != deferred
+                    .first()
+                    .map_or(0, |due| observed_micros.saturating_sub(due.0))
+        {
+            bail!("scheduler deferred summary disagrees with the complete bot roster");
+        }
         let bots = processed_guids
             .iter()
             .map(|guid| self.bots[guid].clone())
@@ -133,10 +219,10 @@ impl Stream {
             processed_guids,
             bots,
             runners,
-            excess_due: row["excess_due"].as_bool().context("invalid excess_due")?,
-            oldest_deferred_lag_micros: row["oldest_deferred_lag_micros"]
-                .as_i64()
-                .context("invalid deferred lag")?,
+            excess_due,
+            oldest_deferred_lag_micros,
+            deferred_guids: deferred.into_iter().map(|row| row.2).collect(),
+            accelerated_guids,
         }))
     }
 }
@@ -148,7 +234,7 @@ mod tests {
 
     fn initial() -> Value {
         json!({
-            BOT: {"deletes":[],"inserts":[{"character_guid":11,"next_think_micros":2000},{"character_guid":12,"next_think_micros":1000}]},
+            BOT: {"deletes":[],"inserts":[{"id":1,"character_guid":11,"next_think_micros":1_001_000,"scheduler_lag_micros":0},{"id":2,"character_guid":12,"next_think_micros":1000,"scheduler_lag_micros":0}]},
             RUNNER: {"deletes":[],"inserts":[{"character_guid":11,"observed_micros":1000}]},
             SCHEDULER: {"deletes":[],"inserts":[{"id":0,"observed_micros":1000,"processed":1,"processed_guids":[11],"excess_due":true,"oldest_deferred_lag_micros":0}]}
         })
@@ -157,13 +243,12 @@ mod tests {
     #[test]
     fn a_committed_pass_joins_the_same_transactions_bot_and_runner_rows() {
         let mut stream = Stream::default();
-        let first = stream
+        assert!(stream
             .apply(&initial(), &BTreeSet::from([11, 12]))
             .unwrap()
-            .unwrap();
-        assert_eq!(first.processed_guids, [11]);
+            .is_none());
         let update = json!({
-            BOT: {"deletes":[{"character_guid":12,"next_think_micros":1000}],"inserts":[{"character_guid":12,"next_think_micros":2100}]},
+            BOT: {"deletes":[initial()[BOT]["inserts"][1]],"inserts":[{"id":2,"character_guid":12,"next_think_micros":1_001_100,"scheduler_lag_micros":100}]},
             RUNNER: {"deletes":[],"inserts":[{"character_guid":12,"observed_micros":1100}]},
             SCHEDULER: {"deletes":initial()[SCHEDULER]["inserts"],"inserts":[{"id":0,"observed_micros":1100,"processed":1,"processed_guids":[12],"excess_due":false,"oldest_deferred_lag_micros":0}]}
         });
@@ -172,7 +257,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(pass.processed_guids, [12]);
-        assert_eq!(pass.bots[0]["next_think_micros"], 2100);
+        assert_eq!(pass.bots[0]["next_think_micros"], 1_001_100);
         assert_eq!(pass.runners[0]["observed_micros"], 1100);
         assert!(!pass.excess_due);
     }
@@ -218,5 +303,105 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("timestamp"));
+    }
+
+    fn seventeen_due_bots() -> (Value, Value, BTreeSet<u64>) {
+        let bots: Vec<_> = (1..=17).map(|guid| json!({
+            "id":guid,"character_guid":guid,"next_think_micros":1000,"scheduler_lag_micros":0
+        })).collect();
+        let first = json!({
+            BOT:{"deletes":[],"inserts":bots},
+            RUNNER:{"deletes":[],"inserts":[]},
+            SCHEDULER:{"deletes":[],"inserts":[{"id":0,"observed_micros":500,"processed":0,"processed_guids":[],"excess_due":false,"oldest_deferred_lag_micros":0}]}
+        });
+        let updates: Vec<_> = (1..=16).map(|guid| json!({
+            "id":guid,"character_guid":guid,"next_think_micros":1_001_100,"scheduler_lag_micros":100
+        })).collect();
+        let runners: Vec<_> = (1..=16)
+            .map(|guid| json!({"character_guid":guid,"observed_micros":1100}))
+            .collect();
+        let second = json!({
+            BOT:{"deletes":bots[..16],"inserts":updates},
+            RUNNER:{"deletes":[],"inserts":runners},
+            SCHEDULER:{"deletes":first[SCHEDULER]["inserts"],"inserts":[{"id":0,"observed_micros":1100,"processed":16,"processed_guids":(1..=16).collect::<Vec<_>>(),"excess_due":true,"oldest_deferred_lag_micros":100}]}
+        });
+        (first, second, (1..=17).collect())
+    }
+
+    #[test]
+    fn a_full_batch_accounts_for_the_bot_left_due() {
+        let (first, second, expected) = seventeen_due_bots();
+        let mut stream = Stream::default();
+        stream.apply(&first, &expected).unwrap();
+        let pass = stream.apply(&second, &expected).unwrap().unwrap();
+        assert_eq!(pass.deferred_guids, [17]);
+        assert_eq!(pass.oldest_deferred_lag_micros, 100);
+    }
+
+    #[test]
+    fn a_false_deferred_summary_cannot_hide_the_oldest_due_bot() {
+        let (first, mut second, expected) = seventeen_due_bots();
+        let mut stream = Stream::default();
+        stream.apply(&first, &expected).unwrap();
+        second[SCHEDULER]["inserts"][0]["oldest_deferred_lag_micros"] = json!(0);
+        assert!(stream
+            .apply(&second, &expected)
+            .unwrap_err()
+            .to_string()
+            .contains("deferred summary"));
+    }
+
+    #[test]
+    fn equal_due_times_still_require_the_row_id_order() {
+        let (first, mut second, expected) = seventeen_due_bots();
+        let mut stream = Stream::default();
+        stream.apply(&first, &expected).unwrap();
+        second[SCHEDULER]["inserts"][0]["processed_guids"]
+            .as_array_mut()
+            .unwrap()
+            .swap(0, 1);
+        assert!(stream
+            .apply(&second, &expected)
+            .unwrap_err()
+            .to_string()
+            .contains("indexed order"));
+    }
+
+    #[test]
+    fn a_stale_runner_cannot_be_counted_as_processed() {
+        let (first, mut second, expected) = seventeen_due_bots();
+        let mut stream = Stream::default();
+        stream.apply(&first, &expected).unwrap();
+        second[RUNNER]["inserts"][0]["observed_micros"] = json!(1000);
+        assert!(stream
+            .apply(&second, &expected)
+            .unwrap_err()
+            .to_string()
+            .contains("runner time"));
+    }
+
+    #[test]
+    fn damage_can_advance_a_future_due_bot_in_the_same_transaction() {
+        let (mut first, second, expected) = seventeen_due_bots();
+        first[BOT]["inserts"][15]["next_think_micros"] = json!(9000);
+        let mut second = second;
+        // The older due bot 17 must be served before the newly due bot 16.
+        second[SCHEDULER]["inserts"][0]["processed_guids"][15] = json!(17);
+        second[BOT]["deletes"][15] = first[BOT]["inserts"][16].clone();
+        second[BOT]["inserts"][15] = json!({"id":17,"character_guid":17,"next_think_micros":1_001_100,"scheduler_lag_micros":100});
+        second[BOT]["deletes"]
+            .as_array_mut()
+            .unwrap()
+            .push(first[BOT]["inserts"][15].clone());
+        second[BOT]["inserts"].as_array_mut().unwrap().push(
+            json!({"id":16,"character_guid":16,"next_think_micros":1100,"scheduler_lag_micros":0}),
+        );
+        second[RUNNER]["inserts"][15]["character_guid"] = json!(17);
+        second[SCHEDULER]["inserts"][0]["oldest_deferred_lag_micros"] = json!(0);
+        let mut stream = Stream::default();
+        stream.apply(&first, &expected).unwrap();
+        let pass = stream.apply(&second, &expected).unwrap().unwrap();
+        assert_eq!(pass.accelerated_guids, [16]);
+        assert_eq!(pass.deferred_guids, [16]);
     }
 }

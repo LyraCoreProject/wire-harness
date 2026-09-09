@@ -1,3 +1,4 @@
+mod analysis;
 mod stream;
 
 use std::collections::BTreeSet;
@@ -198,6 +199,7 @@ fn collect(inputs: &Inputs, directory: &Path, expected: &BTreeSet<u64>) -> Resul
     let mut raw = File::create(directory.join("transactions.jsonl"))?;
     let mut passes = File::create(directory.join("passes.jsonl"))?;
     let mut stream = stream::Stream::default();
+    let mut measurement = analysis::Measurement::new(expected);
     let mut warmed = BTreeSet::new();
     let mut stream_bytes = 0;
     let mut before = None;
@@ -247,6 +249,7 @@ fn collect(inputs: &Inputs, directory: &Path, expected: &BTreeSet<u64>) -> Resul
                 &serde_json::json!({"received_micros":received.micros,"measured":measured,"pass":pass}),
             )?;
             writeln!(passes)?;
+            measurement.observe(&pass, measured)?;
             if measured {
                 measured_passes += 1;
             }
@@ -289,8 +292,9 @@ fn collect(inputs: &Inputs, directory: &Path, expected: &BTreeSet<u64>) -> Resul
         "before_scrape":before_window,"after_scrape":after_window,
         "reducer_cpu_seconds":cpu_seconds,"rows_scanned":scanned_rows,
         "physical_rows_inserted":inserted_rows,"physical_rows_deleted":deleted_rows,
+        "behavior_measurements":measurement.report(),
         "row_accounting":"an update contributes one deletion and one insertion",
-        "acceptance":"pending complete fairness, progress and timing analysis"}),
+        "acceptance":"pending decision timing, queue and transaction outcome analysis"}),
     )
 }
 
