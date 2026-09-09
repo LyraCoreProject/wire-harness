@@ -1,9 +1,9 @@
-# CI for the GENERIC half. Everything here is offline and hermetic: no server, no server checkout,
+# CI runs offline: no server, no server checkout,
 # no network beyond crates.io. That is the property worth protecting — the moment CI needs a running
 # LyraCore to go green, the boundary this repository exists to draw has quietly moved.
 #
-# Live scenarios under adapters/ require a running Realm and do not run here. The suite runner
-# has an offline shell test that uses temporary scenario scripts.
+# Live scenarios require a running Realm and do not run here. The playerbots observer tests
+# parse retained input; the suite runner uses temporary scenario scripts.
 name: ci
 
 on:
@@ -45,7 +45,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ci-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+            adapters/lyracore/playerbots/target
+          key: ci-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'adapters/lyracore/playerbots/Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: ci-${{ runner.os }}-
 
       - name: Format
@@ -64,6 +65,14 @@ jobs:
       # that the binaries the adapters and #246 consume actually link.
       - name: Build release binaries
         run: cargo build --release --locked --bins
+
+      - name: Check the playerbots observer offline
+        shell: bash
+        run: |
+          cargo fmt --manifest-path adapters/lyracore/playerbots/Cargo.toml --check
+          cargo clippy --manifest-path adapters/lyracore/playerbots/Cargo.toml --all-targets --locked -- -D warnings
+          cargo test --manifest-path adapters/lyracore/playerbots/Cargo.toml --locked
+          cargo build --manifest-path adapters/lyracore/playerbots/Cargo.toml --release --locked
 
       - name: Test suite dispatch without a Realm
         shell: bash
