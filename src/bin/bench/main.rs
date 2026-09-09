@@ -30,7 +30,7 @@
 //! Run `vanilla-wire-bench --help` for the full argument list; LyraCore's
 //! `scripts/run-capacity-bench.sh` is the runbook wrapper that provisions accounts first.
 
-mod metrics;
+use wire_client::metrics;
 mod report;
 
 use std::collections::HashMap;
@@ -1245,7 +1245,7 @@ fn main() -> Result<()> {
     // numbers is worse than no run at all. (Unless they were switched off deliberately.)
     let scrape = |off: bool| -> Result<metrics::Snapshot> {
         if off {
-            Ok(metrics::parse(""))
+            metrics::parse("")
         } else {
             metrics::scrape(&metrics_url)
                 .with_context(|| format!("metrics preflight against {metrics_url}"))
@@ -1397,8 +1397,11 @@ fn main() -> Result<()> {
         if !witness_db.is_empty() {
             reset_filters.push(&witness_dbf);
         }
-        let counter_reset = d.first_negative(&reset_filters).map(|(k, v)| {
-            eprintln!("[bench] rung {}: COUNTER RESET during the window ({k} went {v:+.3}) — this stage's server-side numbers are void", step.target);
+        for filter in &reset_filters {
+            m0.require_counter_series(&m1, &[*filter])?;
+        }
+        let counter_reset = reset_filters.iter().find_map(|filter| d.first_negative(&[*filter])).map(|(k, v)| {
+            eprintln!("[bench] rung {}: counter reset ({k} changed by {v:+.3}); server metrics are unavailable", step.target);
             k.clone()
         });
         let dc: Vec<u64> = c0
@@ -1546,6 +1549,10 @@ fn write_out(path: &str, body: &str) -> Result<()> {
 mod tests {
     use super::*;
 
+    fn parse_metrics(text: &str) -> metrics::Snapshot {
+        metrics::parse(text).expect("valid fixture metrics")
+    }
+
     #[test]
     fn dead_population_tracks_transitions_and_disconnect() {
         let population = Mutex::new(ClientPopulation::default());
@@ -1583,7 +1590,7 @@ mod tests {
     /// drive it with a synthetic before/after scrape pair over a known 10s window.
     #[test]
     fn stage_metrics_are_derived_from_a_scrape_delta() {
-        let before = metrics::parse(
+        let before = parse_metrics(
             r#"
 spacetime_txn_cpu_time_sec_sum{db="abc",reducer="",txn_type="Reducer"} 100.0
 spacetime_txn_cpu_time_sec_sum{db="abc",reducer="",txn_type="Subscribe"} 10.0
@@ -1598,7 +1605,7 @@ spacetime_num_bytes_sent_to_clients_total{db="abc"} 0
 spacetime_num_rows_scanned_total{db="abc"} 0
 "#,
         );
-        let after = metrics::parse(
+        let after = parse_metrics(
             r#"
 spacetime_txn_cpu_time_sec_sum{db="abc",reducer="",txn_type="Reducer"} 103.0
 spacetime_txn_cpu_time_sec_sum{db="abc",reducer="",txn_type="Subscribe"} 11.0
@@ -1685,7 +1692,7 @@ spacetime_num_bytes_sent_to_clients_total{db="aaa",txn_type="Reducer"} 5
     /// is nowhere near saturating; sharding is not needed". Preflight must refuse instead.
     #[test]
     fn a_db_selection_that_matches_nothing_is_refused_not_reported_as_zero() {
-        let s = metrics::parse(ONE_DB);
+        let s = parse_metrics(ONE_DB);
         let dbf = metrics::db_filter("deadbeef");
         // What the run WOULD have published, had it proceeded:
         let w = writer_stats(&s, 60.0, &dbf);
@@ -1712,7 +1719,7 @@ spacetime_num_bytes_sent_to_clients_total{db="aaa",txn_type="Reducer"} 5
     /// one — a plausible number that is simply not about any single writer.
     #[test]
     fn an_empty_db_is_refused_on_a_multi_database_node() {
-        let two = metrics::parse(TWO_DBS);
+        let two = parse_metrics(TWO_DBS);
         let dbf = metrics::db_filter("");
         // Two writers at 50% each would be published as one writer at 100%.
         assert!((writer_stats(&two, 60.0, &dbf).occupancy_pct - 100.0).abs() < 1e-9);
@@ -1721,9 +1728,9 @@ spacetime_num_bytes_sent_to_clients_total{db="aaa",txn_type="Reducer"} 5
             .to_string();
         assert!(err.contains("2 measurable databases"), "{err}");
         // One database on the node → the aggregate default stays convenient and correct.
-        assert!(validate_db_selection(&metrics::parse(ONE_DB), "", &dbf).is_ok());
+        assert!(validate_db_selection(&parse_metrics(ONE_DB), "", &dbf).is_ok());
         // A node with nothing published is refused too, rather than measuring an empty ramp.
-        assert!(validate_db_selection(&metrics::parse(""), "", &dbf).is_err());
+        assert!(validate_db_selection(&parse_metrics(""), "", &dbf).is_err());
     }
 
     /// #21: the witness column's failure modes, both of which would *confirm the hypothesis*.
@@ -1732,7 +1739,7 @@ spacetime_num_bytes_sent_to_clients_total{db="aaa",txn_type="Reducer"} 5
     /// each other perfectly no matter what the pool does.
     #[test]
     fn a_witness_that_matches_nothing_or_duplicates_the_primary_db_is_refused() {
-        let two = metrics::parse(TWO_DBS);
+        let two = parse_metrics(TWO_DBS);
         // Matches nothing → would publish a beautifully flat 0.0%.
         let ghost = metrics::db_filter("deadbeef");
         assert_eq!(writer_stats(&two, 60.0, &ghost).occupancy_pct, 0.0);
@@ -1812,11 +1819,11 @@ spacetime_num_bytes_sent_to_clients_total{db="aaa",txn_type="Reducer"} 5
         let dbf = metrics::db_filter("aaa");
         // A node exposing every required family parks nothing.
         assert_eq!(
-            park_missing_families(&metrics::parse(ONE_DB), &dbf),
+            park_missing_families(&parse_metrics(ONE_DB), &dbf),
             Vec::<String>::new()
         );
         // Drop one family: the report must say the field is zero BY ABSENCE.
-        let missing = metrics::parse(
+        let missing = parse_metrics(
             &ONE_DB
                 .lines()
                 .filter(|l| !l.contains("reducer_wait_time"))
