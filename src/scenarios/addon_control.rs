@@ -7,15 +7,16 @@ use anyhow::{bail, ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use wire_client::{is_read_timeout, WireClient};
+use wow_world_messages::vanilla::opcodes::ServerOpcodeMessage as WorldSmsg;
 use wow_world_messages::vanilla::{
-    ClientMessage, MSG_MOVE_HEARTBEAT_Client, MSG_MOVE_START_FORWARD_Client, MSG_MOVE_STOP_Client,
-    MovementInfo, MovementInfo_MovementFlags, Vector3d, CMSG_AREATRIGGER,
+    CMSG_MESSAGECHAT_ChatType, ClientMessage, Language, MSG_MOVE_HEARTBEAT_Client,
+    MSG_MOVE_START_FORWARD_Client, MSG_MOVE_STOP_Client, MovementInfo, MovementInfo_MovementFlags,
+    SMSG_MESSAGECHAT_ChatType, Vector3d, CMSG_AREATRIGGER, CMSG_MESSAGECHAT,
 };
 
 const COMMAND_LIMIT: u32 = 256;
 const INPUT_LIMIT: u64 = 8_192;
 const OUTPUT_LIMIT: usize = 1_024 * 1_024;
-const ADDON_LANGUAGE: u32 = u32::MAX;
 
 #[derive(Debug, Deserialize, Serialize)]
 struct Command {
@@ -97,58 +98,47 @@ fn read_command(path: &Path, ordinal: u32) -> Result<Command> {
     Ok(command)
 }
 
-fn addon_packet(message: &str) -> Result<Packet> {
+fn addon_message(message: &str) -> Result<CMSG_MESSAGECHAT> {
     ensure!(
         !message.is_empty() && message.len() <= 511 && !message.contains('\0'),
         "addon message must contain 1 through 511 bytes without NUL"
     );
-    let mut body = Vec::with_capacity(message.len() + 9);
-    body.extend_from_slice(&1u32.to_le_bytes()); // PARTY has no recipient field.
-    body.extend_from_slice(&ADDON_LANGUAGE.to_le_bytes());
-    body.extend_from_slice(message.as_bytes());
-    body.push(0);
-    Ok(Packet {
-        opcode: 0x0095,
-        body,
+    Ok(CMSG_MESSAGECHAT {
+        chat_type: CMSG_MESSAGECHAT_ChatType::Party,
+        language: Language::Addon,
+        message: message.to_owned(),
     })
 }
 
-fn addon_reply(opcode: u16, body: &[u8]) -> Option<AddonReply> {
-    if opcode != 0x0096 || body.len() > 4_096 || body.get(1..5)? != ADDON_LANGUAGE.to_le_bytes() {
+fn addon_reply(message: WorldSmsg) -> Option<AddonReply> {
+    let WorldSmsg::SMSG_MESSAGECHAT(message) = message else {
+        return None;
+    };
+    if message.language != Language::Addon || message.message.len() > 4_096 {
         return None;
     }
-    let chat_type = *body.first()?;
-    let length_offset = match chat_type {
-        1 => 21,         // PARTY carries speech-bubble and chat-credit GUIDs.
-        2..=4 | 6 => 13, // RAID, GUILD, OFFICER, and WHISPER carry one GUID.
+    let (chat_type, sender) = match message.chat_type {
+        SMSG_MESSAGECHAT_ChatType::Party {
+            speech_bubble_credit,
+            ..
+        } => (1, speech_bubble_credit),
+        SMSG_MESSAGECHAT_ChatType::Raid { sender2 } => (2, sender2),
+        SMSG_MESSAGECHAT_ChatType::Guild { sender2 } => (3, sender2),
+        SMSG_MESSAGECHAT_ChatType::Officer { sender2 } => (4, sender2),
+        SMSG_MESSAGECHAT_ChatType::Whisper { sender2 } => (6, sender2),
         _ => return None,
     };
-    let sender_guid = u64::from_le_bytes(body.get(5..13)?.try_into().ok()?);
-    let length = u32::from_le_bytes(
-        body.get(length_offset..length_offset + 4)?
-            .try_into()
-            .ok()?,
-    ) as usize;
-    let start = length_offset + 4;
-    let end = start.checked_add(length)?;
-    if length == 0 || end.checked_add(1)? != body.len() || *body.get(end - 1)? != 0 {
-        return None;
-    }
-    let text = std::str::from_utf8(body.get(start..end - 1)?).ok()?;
-    if text.contains('\0') {
-        return None;
-    }
     Some(AddonReply {
         chat_type,
-        sender_guid,
-        text: text.to_owned(),
+        sender_guid: sender.guid(),
+        text: message.message,
     })
 }
 
-fn receive(client: &mut WireClient, mut observe: impl FnMut(u16, &[u8])) -> Result<()> {
-    match client.recv_observed(|opcode, body| observe(opcode, body)) {
-        Ok(_) => Ok(()),
-        Err(error) if is_read_timeout(&error) => Ok(()),
+fn receive(client: &mut WireClient) -> Result<Option<WorldSmsg>> {
+    match client.recv() {
+        Ok(message) => Ok(Some(message)),
+        Err(error) if is_read_timeout(&error) => Ok(None),
         Err(error) => Err(error),
     }
 }
@@ -260,7 +250,7 @@ fn walk(
             )?);
             next_send = now + Duration::from_millis(200);
         }
-        receive(client, |_, _| {})?;
+        let _ = receive(client)?;
     }
 }
 
@@ -304,7 +294,7 @@ pub(crate) fn try_dispatch(
                 Instant::now() < deadline,
                 "scenario deadline waiting for command {ordinal}"
             );
-            receive(client, |_, _| {})?;
+            let _ = receive(client)?;
         }
         ensure!(
             Instant::now() < deadline,
@@ -323,9 +313,7 @@ pub(crate) fn try_dispatch(
                         && !reply_prefix.contains('\0'),
                     "invalid addon reply prefix"
                 );
-                let packet = addon_packet(message)?;
-                client.send_raw(packet.opcode, &packet.body)?;
-                vec![packet]
+                vec![send_typed(client, &addon_message(message)?)?]
             }
             Operation::Move { from, to, speed } => {
                 walk(client, Walk::new(*from, *to, *speed)?, clock, deadline)?
@@ -357,13 +345,11 @@ pub(crate) fn try_dispatch(
                 let reply_deadline = deadline.min(Instant::now() + Duration::from_secs(60));
                 let mut reply = None;
                 while reply.is_none() && Instant::now() < reply_deadline {
-                    receive(client, |opcode, body| {
-                        if let Some(candidate) = addon_reply(opcode, body) {
-                            if candidate.text.starts_with(reply_prefix) {
-                                reply = Some(candidate);
-                            }
+                    if let Some(candidate) = receive(client)?.and_then(addon_reply) {
+                        if candidate.text.starts_with(reply_prefix) {
+                            reply = Some(candidate);
                         }
-                    })?;
+                    }
                 }
                 let reply = reply.context("addon reply deadline reached")?;
                 publish(
@@ -407,16 +393,25 @@ mod tests {
         body
     }
 
+    fn decode_reply(body: Vec<u8>) -> WorldSmsg {
+        let mut bytes = ((body.len() + 2) as u16).to_be_bytes().to_vec();
+        bytes.extend_from_slice(&0x0096u16.to_le_bytes());
+        bytes.extend_from_slice(&body);
+        WorldSmsg::read_unencrypted(&mut std::io::Cursor::new(bytes)).unwrap()
+    }
+
     #[test]
     fn addon_party_bytes_have_no_whisper_recipient() {
-        let packet = addon_packet("EXAMPLE\trequest").unwrap();
-        assert_eq!(packet.opcode, 0x0095);
+        let message = addon_message("EXAMPLE\trequest").unwrap();
+        let mut packet = Vec::new();
+        message.write_unencrypted_client(&mut packet).unwrap();
+        assert_eq!(&packet[2..6], &0x0095u32.to_le_bytes());
         assert_eq!(
-            packet.body,
+            &packet[6..],
             b"\x01\x00\x00\x00\xff\xff\xff\xffEXAMPLE\trequest\0"
         );
         for invalid in [String::new(), "a\0b".to_owned(), "a".repeat(512)] {
-            assert!(addon_packet(&invalid).is_err());
+            assert!(addon_message(&invalid).is_err());
         }
     }
 
@@ -425,38 +420,23 @@ mod tests {
         for chat_type in [1, 2, 3, 4, 6] {
             let body = reply_body(chat_type, b"EXAMPLE\treply|one|two");
             assert_eq!(
-                addon_reply(0x0096, &body),
+                addon_reply(decode_reply(body)),
                 Some(AddonReply {
                     chat_type,
                     sender_guid: 123,
-                    text: "EXAMPLE\treply|one|two".to_owned(),
+                    text: "EXAMPLE\treply|one|two".to_owned()
                 })
             );
-            for length in 0..body.len() {
-                assert!(addon_reply(0x0096, &body[..length]).is_none());
-            }
         }
     }
 
     #[test]
-    fn addon_reply_refuses_wrong_language_length_and_terminators() {
-        let valid = reply_body(6, b"reply");
-        let mut invalid = valid.clone();
-        invalid[1..5].copy_from_slice(&0u32.to_le_bytes());
-        assert!(addon_reply(0x0096, &invalid).is_none());
-        invalid = valid.clone();
-        invalid[13..17].copy_from_slice(&u32::MAX.to_le_bytes());
-        assert!(addon_reply(0x0096, &invalid).is_none());
-        invalid = valid.clone();
-        let nul = invalid.len() - 2;
-        invalid[nul] = 1;
-        assert!(addon_reply(0x0096, &invalid).is_none());
-        assert!(addon_reply(0x0096, &reply_body(6, b"a\0b")).is_none());
-        assert!(addon_reply(0x0096, &reply_body(6, &[0xff])).is_none());
-        assert!(addon_reply(0x004D, &valid).is_none());
-        invalid = valid;
-        invalid.push(0);
-        assert!(addon_reply(0x0096, &invalid).is_none());
+    fn addon_reply_excludes_ordinary_chat_and_oversized_results() {
+        let mut ordinary = reply_body(6, b"reply");
+        ordinary[1..5].copy_from_slice(&0u32.to_le_bytes());
+        assert!(addon_reply(decode_reply(ordinary)).is_none());
+        assert!(addon_reply(decode_reply(reply_body(6, &vec![b'x'; 4_097]))).is_none());
+        assert!(addon_reply(WorldSmsg::SMSG_LOGOUT_COMPLETE).is_none());
     }
 
     #[test]
