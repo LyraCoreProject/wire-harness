@@ -847,6 +847,12 @@ impl WireClient {
     /// still consumed off the cipher stream so the keystream stays in lockstep.
     /// Records any CREATE_OBJECT guids it passes for later targeting.
     pub fn recv(&mut self) -> Result<WorldSmsg> {
+        self.recv_observed(|_, _| {})
+    }
+
+    /// Observe each complete frame before decoding, including unsupported language values.
+    /// Keeps the same frame limits, resumable reads, and worldport acknowledgement as `recv`.
+    pub fn recv_observed(&mut self, mut observe: impl FnMut(u16, &[u8])) -> Result<WorldSmsg> {
         let mut skipped = 0u32;
         loop {
             let self_guid = self.self_guid;
@@ -858,6 +864,7 @@ impl WireClient {
                 &mut self.dec,
                 &mut self.frame_log,
                 |opcode, body| {
+                    observe(opcode, body);
                     if opcode != SMSG_UPDATE_OBJECT_OPCODE || self_guid == 0 {
                         return;
                     }
@@ -2023,6 +2030,52 @@ mod tests {
             diagnostic.contains("decoder panicked"),
             "missing panic diagnosis: {diagnostic}"
         );
+    }
+
+    #[test]
+    fn observed_receive_still_acknowledges_worldport() {
+        let mut client = client_receiving_frames(&[]);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        client.stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut peer, _) = listener.accept().unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        let (_, mut crypto) =
+            ProofSeed::new().into_client_header_crypto(&ns("TEST").unwrap(), [7; 40], 0x1234_5678);
+        peer.write_all(&crypto.encrypt_server_header(22, 0x003E))
+            .unwrap();
+        peer.write_all(&[0; 20]).unwrap();
+        let mut observed = Vec::new();
+        assert!(matches!(
+            client
+                .recv_observed(|opcode, _| observed.push(opcode))
+                .unwrap(),
+            WorldSmsg::SMSG_NEW_WORLD(_)
+        ));
+        assert_eq!(observed, vec![0x003E]);
+        let acknowledgement = crypto.read_and_decrypt_client_header(&mut peer).unwrap();
+        assert_eq!(
+            acknowledgement.opcode,
+            <MSG_MOVE_WORLDPORT_ACK as wow_world_messages::Message>::OPCODE
+        );
+        assert_eq!(acknowledgement.size, 4);
+    }
+
+    #[test]
+    fn observed_receive_keeps_unsupported_addon_bytes_and_next_frame() {
+        let mut body = vec![6];
+        body.extend_from_slice(&u32::MAX.to_le_bytes());
+        body.extend_from_slice(&123u64.to_le_bytes());
+        body.extend_from_slice(&2u32.to_le_bytes());
+        body.extend_from_slice(b"x\0\0");
+        let mut client = client_receiving_frames(&[(0x0096, &body), (0x004D, &[])]);
+        let mut observed = Vec::new();
+        assert!(matches!(
+            client
+                .recv_observed(|opcode, bytes| observed.push((opcode, bytes.to_vec())))
+                .unwrap(),
+            WorldSmsg::SMSG_LOGOUT_COMPLETE
+        ));
+        assert_eq!(observed, vec![(0x0096, body), (0x004D, vec![])]);
     }
 
     #[test]
