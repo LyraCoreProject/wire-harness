@@ -116,6 +116,37 @@ the character if absent) → enter the world → report the session guid and the
 that spawned. It asserts nothing project-specific, so a green smoke means "this server speaks
 build 5875 and these credentials work".
 
+### Scripted addon and movement commands
+
+`scenario addon-control <control_dir> <seconds>` enters the named Character and writes
+`ready.json` with its GUID and process ID. The caller owns a fresh directory and atomically
+publishes `command-1.json`, then consecutive ordinals. For example:
+
+```json
+{"ordinal":1,"kind":"addon","message":"EXAMPLE\trequest","reply_prefix":"EXAMPLE\treply","pause_after_send":false}
+```
+
+The command sends PARTY addon chat. `message` and `reply_prefix` are complete caller-supplied
+texts; this scenario knows no server command format. `sent-1.json` records the actual opcode and
+plaintext body bytes after the encrypted send succeeds. `result-1.json` records the full matching
+addon reply, chat type and sender GUID. A send record alone does not prove server application.
+
+Other commands use `kind:"move"` with `from`, `to` arrays and `speed` in yards per second,
+`kind:"areatrigger"` with `trigger_id`, or `kind:"stop"`. Movement sends start, heartbeat and stop
+packets at the declared speed, while receiving world updates and acknowledging worldports. The
+caller supplies the observed starting position and checks authoritative arrival before issuing
+more movement. Movement and AreaTrigger results mean that the packets were sent.
+
+For lost-acknowledgement tests, `pause_after_send:true` publishes the send record and pauses before
+reading another frame. The caller must terminate that process. Reconnect with a fresh directory;
+the client never retries commands automatically.
+
+The scenario accepts 1 through 3600 seconds and at most 256 commands. Each command file is limited
+to 8 KiB, each evidence file to 1 MiB, and each addon message to 511 bytes without NUL. Movement
+accepts at most 7 yards per second and 120 seconds per leg. Addon replies have a 60-second deadline
+within the overall deadline. Malformed commands, missing replies, closed connections, and expired
+deadlines fail the scenario. Existing evidence cannot be overwritten.
+
 ### Pointing it at another server
 
 ```
