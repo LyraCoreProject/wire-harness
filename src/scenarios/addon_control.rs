@@ -42,7 +42,7 @@ enum Operation {
     Areatrigger {
         trigger_id: u32,
     },
-    Stop,
+    Stop {},
 }
 
 #[derive(Debug, Serialize)]
@@ -324,7 +324,7 @@ pub(crate) fn try_dispatch(
                     trigger_id: *trigger_id,
                 },
             )?],
-            Operation::Stop => Vec::new(),
+            Operation::Stop {} => Vec::new(),
         };
         publish(
             &directory,
@@ -358,7 +358,7 @@ pub(crate) fn try_dispatch(
                     &json!({ "ordinal": ordinal, "reply": reply }),
                 )?;
             }
-            Operation::Stop => {
+            Operation::Stop {} => {
                 publish(
                     &directory,
                     &format!("result-{ordinal}.json"),
@@ -457,6 +457,7 @@ mod tests {
             r#"{"ordinal":1,"kind":"stop","unexpected":true}"#
         )
         .is_err());
+        assert!(serde_json::from_str::<Command>(r#"{"ordinal":1,"kind":"stop"}"#).is_ok());
         assert!(serde_json::from_str::<Command>(
             r#"{"ordinal":1,"kind":"move","from":[0,0,0],"to":[7,0,0],"speed":7}"#
         )
