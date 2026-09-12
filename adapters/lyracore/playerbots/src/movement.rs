@@ -5,7 +5,8 @@ use serde_json::{json, Value};
 
 use crate::analysis::{coordinate, distribution, movement_identity, unsigned};
 
-pub const TABLES: [&str; 2] = ["game_creature_spline", "game_world_entity"];
+pub const ENTITY: &str = "game_world_entity";
+pub const TABLES: [&str; 2] = ["game_creature_spline", ENTITY];
 const RUNNER: &str = "pkg_playerbots_runner";
 
 #[derive(Default)]
@@ -13,6 +14,8 @@ pub struct Movement {
     expected: BTreeSet<u64>,
     runners: BTreeMap<u64, Value>,
     entities: BTreeMap<u64, Value>,
+    creatures: BTreeMap<u64, Value>,
+    creature_entries: BTreeSet<u32>,
     splines: BTreeMap<u64, Value>,
     active: BTreeMap<u64, Leg>,
     completed: Vec<(u64, u64)>,
@@ -55,6 +58,57 @@ fn replace(
     Ok(())
 }
 
+fn replace_entities(
+    bots: &mut BTreeMap<u64, Value>,
+    creatures: &mut BTreeMap<u64, Value>,
+    update: &Value,
+    expected: &BTreeSet<u64>,
+    creature_entries: &BTreeSet<u32>,
+) -> Result<()> {
+    let Some(changes) = update.get(ENTITY) else {
+        return Ok(());
+    };
+    for row in changes["deletes"]
+        .as_array()
+        .context("missing entity deletes")?
+    {
+        let guid = unsigned(row, "guid")?;
+        let rows = if expected.contains(&guid) {
+            &mut *bots
+        } else {
+            let entry =
+                u32::try_from(unsigned(row, "entry")?).context("entity entry exceeds u32")?;
+            if !creature_entries.contains(&entry) {
+                bail!("unexpected evidence entity {guid} with entry {entry}");
+            }
+            &mut *creatures
+        };
+        if rows.remove(&guid).as_ref() != Some(row) {
+            bail!("deleted entity row differs from the last observation for {guid}");
+        }
+    }
+    for row in changes["inserts"]
+        .as_array()
+        .context("missing entity inserts")?
+    {
+        let guid = unsigned(row, "guid")?;
+        let rows = if expected.contains(&guid) {
+            &mut *bots
+        } else {
+            let entry =
+                u32::try_from(unsigned(row, "entry")?).context("entity entry exceeds u32")?;
+            if !creature_entries.contains(&entry) {
+                bail!("unexpected evidence entity {guid} with entry {entry}");
+            }
+            &mut *creatures
+        };
+        if rows.insert(guid, row.clone()).is_some() {
+            bail!("insert replaced entity {guid} without a matching deletion");
+        }
+    }
+    Ok(())
+}
+
 fn owner(rows: &BTreeMap<u64, Value>, guid: u64) -> Result<Option<Value>> {
     rows.get(&guid)
         .map(movement_identity)
@@ -76,9 +130,10 @@ fn at_endpoint(entity: &Value, spline: &Value) -> Result<bool> {
 }
 
 impl Movement {
-    pub fn new(expected: &BTreeSet<u64>) -> Self {
+    pub fn new(expected: &BTreeSet<u64>, creature_entries: BTreeSet<u32>) -> Self {
         Self {
             expected: expected.clone(),
+            creature_entries,
             ..Self::default()
         }
     }
@@ -103,12 +158,12 @@ impl Movement {
             "character_guid",
             &self.expected,
         )?;
-        replace(
+        replace_entities(
             &mut self.entities,
+            &mut self.creatures,
             update,
-            TABLES[1],
-            "guid",
             &self.expected,
+            &self.creature_entries,
         )?;
         replace(&mut self.splines, update, TABLES[0], "guid", &self.expected)?;
         if !measured {
@@ -199,6 +254,8 @@ impl Movement {
     pub fn report(&self) -> Value {
         json!({"completed_leg_micros":distribution(&self.completed),"interrupted_observed_legs":self.interrupted,
             "unfinished_observed_legs":self.active.len(),
+            "retained_declared_creatures":self.creatures.len(),
+            "declared_creature_entries":self.creature_entries,
             "scope":"Core spline start to tick-observed deletion at its reached endpoint; exact runner generation, partition, candidate and start identity; both boundaries inside the measured window"})
     }
 }
@@ -220,7 +277,7 @@ mod tests {
             "sx":0.0,"sy":10.0,"sz":50.0,"dx":7.0,"dy":10.0,"dz":50.0})
     }
     fn started(measured: bool) -> Movement {
-        let mut movement = Movement::new(&BTreeSet::from([11]));
+        let mut movement = Movement::new(&BTreeSet::from([11]), BTreeSet::new());
         movement
             .observe(
                 &json!({RUNNER:{"deletes":[],"inserts":[runner(100)]},
@@ -268,5 +325,42 @@ mod tests {
             .unwrap();
         movement.observe(&finish(7.0, 1_000_150), true).unwrap();
         assert_eq!(movement.report()["completed_leg_micros"]["count"], 0);
+    }
+
+    #[test]
+    fn declared_creatures_stay_outside_bot_movement_accounting() {
+        let expected = BTreeSet::from([11]);
+        let mut movement = Movement::new(&expected, BTreeSet::from([6]));
+        let bot = json!({"guid":11,"entry":0,"map_id":0,"instance_id":0,"x":0.0,"y":10.0,"z":50.0});
+        let creature =
+            json!({"guid":90,"entry":6,"map_id":0,"instance_id":0,"x":1.0,"y":10.0,"z":50.0});
+        movement
+            .observe(
+                &json!({ENTITY:{"deletes":[],"inserts":[bot,creature.clone()]}}),
+                false,
+            )
+            .unwrap();
+        movement.ready().unwrap();
+        let moved =
+            json!({"guid":90,"entry":6,"map_id":0,"instance_id":0,"x":2.0,"y":10.0,"z":50.0});
+        movement
+            .observe(
+                &json!({ENTITY:{"deletes":[creature],"inserts":[moved]}}),
+                true,
+            )
+            .unwrap();
+        assert_eq!(movement.report()["completed_leg_micros"]["count"], 0);
+    }
+
+    #[test]
+    fn an_undeclared_creature_cannot_enter_the_entity_stream() {
+        let mut movement = Movement::new(&BTreeSet::from([11]), BTreeSet::from([6]));
+        let error = movement
+            .observe(
+                &json!({ENTITY:{"deletes":[],"inserts":[{"guid":90,"entry":7}]}}),
+                false,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("unexpected evidence entity"));
     }
 }
