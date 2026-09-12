@@ -8,6 +8,13 @@ const BOT: &str = "pkg_playerbots_bot";
 const RUNNER: &str = "pkg_playerbots_runner";
 const SCHEDULER: &str = "pkg_playerbots_scheduler";
 pub const TABLES: [&str; 3] = [BOT, RUNNER, SCHEDULER];
+pub const OWNERSHIP_TABLES: [&str; 5] = [
+    "game_creature_quest_tap",
+    "game_creature_quest_tap_member",
+    "game_creature_loot_tag_group",
+    "game_group_member",
+    "game_corpse_loot_eligible",
+];
 
 #[derive(Default)]
 pub struct Stream {
@@ -71,6 +78,18 @@ fn replace_rows(rows: &mut BTreeMap<u64, Value>, update: &Value) -> Result<()> {
     Ok(())
 }
 
+fn validate_evidence_changes(table: &str, changes: &Value) -> Result<()> {
+    let changes = changes
+        .as_object()
+        .with_context(|| format!("{table} update is not an object"))?;
+    for key in ["deletes", "inserts"] {
+        if !changes.get(key).is_some_and(serde_json::Value::is_array) {
+            bail!("{table} has no {key} row list");
+        }
+    }
+    Ok(())
+}
+
 impl Stream {
     /// Apply a complete CLI transaction before correlating its scheduler and Character rows.
     pub fn apply(&mut self, update: &Value, expected: &BTreeSet<u64>) -> Result<Option<Pass>> {
@@ -84,6 +103,9 @@ impl Stream {
                 BOT => replace_rows(&mut self.bots, changes)?,
                 RUNNER => replace_rows(&mut self.runners, changes)?,
                 table if crate::movement::TABLES.contains(&table) => {}
+                table if OWNERSHIP_TABLES.contains(&table) || table == "game_creature_spawn" => {
+                    validate_evidence_changes(table, changes)?;
+                }
                 SCHEDULER => {
                     for row in changes["deletes"]
                         .as_array()
@@ -271,6 +293,37 @@ mod tests {
         assert!(Stream::default()
             .apply(&initial(), &BTreeSet::from([11, 12, 13]))
             .is_err());
+    }
+
+    #[test]
+    fn ownership_evidence_tables_are_accepted_without_entering_scheduler_state() {
+        let mut stream = Stream::default();
+        stream.apply(&initial(), &BTreeSet::from([11, 12])).unwrap();
+        for table in OWNERSHIP_TABLES {
+            let update = json!({(table):{"deletes":[],"inserts":[{"id":1}]}});
+            assert!(stream
+                .apply(&update, &BTreeSet::from([11, 12]))
+                .unwrap()
+                .is_none());
+        }
+        assert!(stream
+            .apply(
+                &json!({"game_creature_spawn":{"deletes":[],"inserts":[{"guid":90,"entry":6}]}}),
+                &BTreeSet::from([11, 12]),
+            )
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn malformed_or_unknown_evidence_tables_are_refused() {
+        let expected = BTreeSet::from([11, 12]);
+        for update in [
+            json!({"game_creature_quest_tap":{"deletes":[]}}),
+            json!({"unscoped_table":{"deletes":[],"inserts":[]}}),
+        ] {
+            assert!(Stream::default().apply(&update, &expected).is_err());
+        }
     }
 
     #[test]

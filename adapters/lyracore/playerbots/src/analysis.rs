@@ -153,10 +153,10 @@ pub(super) fn distribution(samples: &[(u64, u64)]) -> Value {
 }
 
 impl Measurement {
-    pub fn new(expected: &BTreeSet<u64>) -> Self {
+    pub fn new(expected: &BTreeSet<u64>, creature_entries: BTreeSet<u32>) -> Self {
         Self {
             counts: expected.iter().map(|&guid| (guid, 0)).collect(),
-            movement: crate::movement::Movement::new(expected),
+            movement: crate::movement::Movement::new(expected, creature_entries),
             ..Self::default()
         }
     }
@@ -295,7 +295,7 @@ mod tests {
 
     #[test]
     fn a_deleted_runner_cannot_supply_a_later_progress_baseline() {
-        let mut measurement = Measurement::new(&BTreeSet::from([11]));
+        let mut measurement = Measurement::new(&BTreeSet::from([11]), BTreeSet::new());
         let state = runner();
         measurement
             .observe_transaction(&transaction(&measurement, &state), false)
@@ -363,7 +363,7 @@ mod tests {
 
     #[test]
     fn a_stale_route_count_is_not_added_again_while_movement_runs() {
-        let mut measurement = Measurement::new(&BTreeSet::from([11]));
+        let mut measurement = Measurement::new(&BTreeSet::from([11]), BTreeSet::new());
         let mut state = runner();
         measurement
             .observe_transaction(&transaction(&measurement, &state), false)
@@ -417,7 +417,7 @@ mod tests {
 
     #[test]
     fn a_runner_update_before_the_window_cannot_be_counted_in_the_next_pass() {
-        let mut measurement = Measurement::new(&BTreeSet::from([11]));
+        let mut measurement = Measurement::new(&BTreeSet::from([11]), BTreeSet::new());
         let mut state = runner();
         measurement
             .observe_transaction(&transaction(&measurement, &state), false)
@@ -445,7 +445,7 @@ mod tests {
         let expected = BTreeSet::from([1_000_001]);
         let mut stream = crate::stream::Stream::default();
         assert!(stream.apply(&update, &expected).unwrap().is_none());
-        let mut measurement = Measurement::new(&expected);
+        let mut measurement = Measurement::new(&expected, BTreeSet::new());
         measurement.observe_transaction(&update, false).unwrap();
         let state = &measurement.previous[&1_000_001];
         assert!(optional(state, "foreground").unwrap().is_none());

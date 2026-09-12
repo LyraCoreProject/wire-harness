@@ -24,6 +24,30 @@ const MAX_LINE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_STREAM_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const MAX_LOG_BYTES: u64 = 256 * 1024 * 1024;
 const WARMUP_SECONDS: u64 = 30;
+const OWNERSHIP_EVIDENCE_SCHEMA: u32 = 1;
+const AUTONOMOUS_CREATURE_ENTRIES: [u32; 4] = [6, 38, 69, 299];
+
+#[derive(Deserialize, Serialize)]
+struct OwnershipEvidence {
+    schema: u32,
+    creature_entries: Vec<u32>,
+    queries: Vec<String>,
+}
+
+fn ownership_queries(entries: &[u32]) -> Vec<String> {
+    let mut queries: Vec<_> = stream::OWNERSHIP_TABLES
+        .iter()
+        .map(|table| format!("SELECT * FROM {table}"))
+        .collect();
+    for table in [movement::ENTITY, "game_creature_spawn"] {
+        queries.extend(
+            entries
+                .iter()
+                .map(|entry| format!("SELECT * FROM {table} WHERE entry = {entry}")),
+        );
+    }
+    queries
+}
 
 #[derive(Deserialize, Serialize)]
 struct Inputs {
@@ -40,6 +64,7 @@ struct Inputs {
     wasm_sha256: String,
     cli_sha256: String,
     fixture_resources: Value,
+    ownership_evidence: OwnershipEvidence,
 }
 
 impl Inputs {
@@ -87,6 +112,13 @@ impl Inputs {
         if !(60..=3600).contains(&self.seconds) {
             bail!("measurement duration must be sixty through 3600 seconds");
         }
+        if self.ownership_evidence.schema != OWNERSHIP_EVIDENCE_SCHEMA
+            || self.ownership_evidence.creature_entries != AUTONOMOUS_CREATURE_ENTRIES
+            || self.ownership_evidence.queries
+                != ownership_queries(&self.ownership_evidence.creature_entries)
+        {
+            bail!("ownership evidence query identity differs from this observer");
+        }
         Ok(guids)
     }
 }
@@ -132,6 +164,9 @@ fn subscribe(
         for guid in &inputs.bot_guids {
             command.arg(format!("SELECT * FROM {table} WHERE guid = {guid}"));
         }
+    }
+    for query in &inputs.ownership_evidence.queries {
+        command.arg(query);
     }
     let mut child = Subscription(
         command
@@ -254,7 +289,13 @@ fn collect(
     let origin = Instant::now();
     let (mut subscription, receiver) = subscribe(inputs, directory, origin)?;
     let mut stream = stream::Stream::default();
-    let mut measurement = analysis::Measurement::new(expected);
+    let creature_entries = inputs
+        .ownership_evidence
+        .creature_entries
+        .iter()
+        .copied()
+        .collect();
+    let mut measurement = analysis::Measurement::new(expected, creature_entries);
     let mut warmed = BTreeSet::new();
     let mut stream_bytes = 0;
     let mut before = None;
@@ -400,4 +441,35 @@ fn main() -> Result<()> {
         serde_json::to_vec_pretty(&report)?,
     )?;
     result.map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ownership_query_identity_is_exact_and_bounded() {
+        let queries = ownership_queries(&AUTONOMOUS_CREATURE_ENTRIES);
+        assert_eq!(queries.len(), 13);
+        assert_eq!(queries[0], "SELECT * FROM game_creature_quest_tap");
+        assert_eq!(queries[4], "SELECT * FROM game_corpse_loot_eligible");
+        assert_eq!(
+            &queries[5..9],
+            [
+                "SELECT * FROM game_world_entity WHERE entry = 6",
+                "SELECT * FROM game_world_entity WHERE entry = 38",
+                "SELECT * FROM game_world_entity WHERE entry = 69",
+                "SELECT * FROM game_world_entity WHERE entry = 299",
+            ]
+        );
+        assert_eq!(
+            &queries[9..],
+            [
+                "SELECT * FROM game_creature_spawn WHERE entry = 6",
+                "SELECT * FROM game_creature_spawn WHERE entry = 38",
+                "SELECT * FROM game_creature_spawn WHERE entry = 69",
+                "SELECT * FROM game_creature_spawn WHERE entry = 299",
+            ]
+        );
+    }
 }
