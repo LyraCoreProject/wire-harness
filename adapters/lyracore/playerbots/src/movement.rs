@@ -328,36 +328,47 @@ mod tests {
     }
 
     #[test]
-    fn a_declared_rabbit_stays_outside_bot_movement_accounting() {
+    fn declared_grind_creatures_stay_outside_bot_movement_accounting() {
         let expected = BTreeSet::from([11]);
-        let mut movement = Movement::new(&expected, BTreeSet::from([721]));
+        let declared = BTreeSet::from([257, 721, 883, 890]);
+        let mut movement = Movement::new(&expected, declared.clone());
         let bot = json!({"guid":11,"entry":0,"map_id":0,"instance_id":0,"x":0.0,"y":10.0,"z":50.0});
-        let creature =
-            json!({"guid":90,"entry":721,"map_id":0,"instance_id":0,"x":1.0,"y":10.0,"z":50.0});
+        let kobold =
+            json!({"guid":90,"entry":257,"map_id":0,"instance_id":0,"x":1.0,"y":10.0,"z":50.0});
+        let rabbit =
+            json!({"guid":91,"entry":721,"map_id":0,"instance_id":0,"x":2.0,"y":10.0,"z":50.0});
+        let deer =
+            json!({"guid":92,"entry":883,"map_id":0,"instance_id":0,"x":3.0,"y":10.0,"z":50.0});
+        let fawn =
+            json!({"guid":93,"entry":890,"map_id":0,"instance_id":0,"x":4.0,"y":10.0,"z":50.0});
         movement
             .observe(
-                &json!({ENTITY:{"deletes":[],"inserts":[bot,creature.clone()]}}),
+                &json!({ENTITY:{"deletes":[],"inserts":[bot,kobold.clone(),rabbit,deer,fawn]}}),
                 false,
             )
             .unwrap();
         movement.ready().unwrap();
         let moved =
-            json!({"guid":90,"entry":721,"map_id":0,"instance_id":0,"x":2.0,"y":10.0,"z":50.0});
+            json!({"guid":90,"entry":257,"map_id":0,"instance_id":0,"x":4.0,"y":10.0,"z":50.0});
         movement
             .observe(
-                &json!({ENTITY:{"deletes":[creature],"inserts":[moved]}}),
+                &json!({ENTITY:{"deletes":[kobold],"inserts":[moved]}}),
                 true,
             )
             .unwrap();
         let report = movement.report();
         assert_eq!(report["completed_leg_micros"]["count"], 0);
-        assert_eq!(report["retained_declared_creatures"], 1);
-        assert_eq!(report["declared_creature_entries"], json!([721]));
+        assert_eq!(report["retained_declared_creatures"], 4);
+        assert_eq!(
+            report["declared_creature_entries"],
+            json!([257, 721, 883, 890])
+        );
     }
 
     #[test]
     fn an_undeclared_creature_cannot_enter_the_entity_stream() {
-        let mut movement = Movement::new(&BTreeSet::from([11]), BTreeSet::from([721]));
+        let mut movement =
+            Movement::new(&BTreeSet::from([11]), BTreeSet::from([257, 721, 883, 890]));
         let error = movement
             .observe(
                 &json!({ENTITY:{"deletes":[],"inserts":[{"guid":90,"entry":7}]}}),
