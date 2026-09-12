@@ -25,7 +25,7 @@ const MAX_STREAM_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const MAX_LOG_BYTES: u64 = 256 * 1024 * 1024;
 const WARMUP_SECONDS: u64 = 30;
 const OWNERSHIP_EVIDENCE_SCHEMA: u32 = 1;
-const AUTONOMOUS_CREATURE_ENTRIES: [u32; 4] = [6, 38, 69, 299];
+const AUTONOMOUS_CREATURE_ENTRIES: [u32; 5] = [6, 38, 69, 299, 721];
 
 #[derive(Deserialize, Serialize)]
 struct OwnershipEvidence {
@@ -450,25 +450,27 @@ mod tests {
     #[test]
     fn ownership_query_identity_is_exact_and_bounded() {
         let queries = ownership_queries(&AUTONOMOUS_CREATURE_ENTRIES);
-        assert_eq!(queries.len(), 13);
+        assert_eq!(queries.len(), 15);
         assert_eq!(queries[0], "SELECT * FROM game_creature_quest_tap");
         assert_eq!(queries[4], "SELECT * FROM game_corpse_loot_eligible");
         assert_eq!(
-            &queries[5..9],
+            &queries[5..10],
             [
                 "SELECT * FROM game_world_entity WHERE entry = 6",
                 "SELECT * FROM game_world_entity WHERE entry = 38",
                 "SELECT * FROM game_world_entity WHERE entry = 69",
                 "SELECT * FROM game_world_entity WHERE entry = 299",
+                "SELECT * FROM game_world_entity WHERE entry = 721",
             ]
         );
         assert_eq!(
-            &queries[9..],
+            &queries[10..],
             [
                 "SELECT * FROM game_creature_spawn WHERE entry = 6",
                 "SELECT * FROM game_creature_spawn WHERE entry = 38",
                 "SELECT * FROM game_creature_spawn WHERE entry = 69",
                 "SELECT * FROM game_creature_spawn WHERE entry = 299",
+                "SELECT * FROM game_creature_spawn WHERE entry = 721",
             ]
         );
     }
