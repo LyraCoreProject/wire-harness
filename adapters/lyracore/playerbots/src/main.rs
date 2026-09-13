@@ -7,7 +7,7 @@ mod timing;
 
 use std::collections::BTreeSet;
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -131,6 +131,129 @@ impl Drop for Subscription {
     }
 }
 
+struct DecisionLogs {
+    child: Subscription,
+    path: PathBuf,
+}
+
+impl DecisionLogs {
+    fn start(inputs: &Inputs, directory: &Path) -> Result<Self> {
+        let path = directory.join("decision-logs.jsonl");
+        let mut child = Subscription(
+            Command::new(&inputs.spacetime)
+                .arg("--config-path")
+                .arg(&inputs.config_path)
+                .args([
+                    "logs",
+                    "--no-config",
+                    "--format",
+                    "json",
+                    "--num-lines",
+                    "1",
+                    "--follow",
+                    "-s",
+                    &inputs.server,
+                    &inputs.database_identity,
+                ])
+                .stdout(File::create(&path)?)
+                .stderr(File::create(directory.join("decision-logs.stderr"))?)
+                .spawn()?,
+        );
+        let started = Instant::now();
+        loop {
+            check_log_size(&path)?;
+            if let Some(status) = child.0.try_wait()? {
+                bail!("decision log collection exited before its initial snapshot: {status}");
+            }
+            let bytes = fs::read(&path)?;
+            if !bytes.is_empty() && bytes.last() == Some(&b'\n') {
+                for line in bytes
+                    .split(|byte| *byte == b'\n')
+                    .filter(|line| !line.is_empty())
+                {
+                    serde_json::from_slice::<Value>(line)
+                        .context("decision log initial snapshot is not complete JSON")?;
+                }
+                return Ok(Self { child, path });
+            }
+            if started.elapsed() > Duration::from_secs(20) {
+                bail!("decision log initial snapshot exceeded twenty seconds");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    fn check(&mut self) -> Result<()> {
+        check_log_size(&self.path)?;
+        if let Some(status) = self.child.0.try_wait()? {
+            bail!("decision log collection exited during measurement: {status}");
+        }
+        Ok(())
+    }
+
+    fn finish(mut self, expected: &BTreeSet<timing::Decision>) -> Result<Value> {
+        let started = Instant::now();
+        loop {
+            self.check()?;
+            if let Some(raw) = complete_log_text(&self.path)? {
+                if timing::report(&raw, expected).is_ok() {
+                    break;
+                }
+            }
+            if started.elapsed() > Duration::from_secs(20) {
+                let raw = complete_log_text(&self.path)?
+                    .context("decision log collection has no complete record")?;
+                return timing::report(&raw, expected)
+                    .context("decision log collection did not receive every measured decision");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        self.child
+            .0
+            .kill()
+            .context("failed to stop decision log collection")?;
+        self.child
+            .0
+            .wait()
+            .context("failed to wait for decision log collection")?;
+        retain_complete_log_lines(&self.path)?;
+        timing::report(&fs::read_to_string(&self.path)?, expected)
+    }
+}
+
+fn check_log_size(path: &Path) -> Result<()> {
+    if fs::metadata(path)?.len() > MAX_LOG_BYTES {
+        bail!("decision log evidence exceeds the stream limit");
+    }
+    Ok(())
+}
+
+fn complete_log_text(path: &Path) -> Result<Option<String>> {
+    let mut bytes = fs::read(path)?;
+    let Some(end) = bytes.iter().rposition(|byte| *byte == b'\n') else {
+        return Ok(None);
+    };
+    bytes.truncate(end + 1);
+    Ok(Some(
+        String::from_utf8(bytes).context("decision log output is not UTF-8")?,
+    ))
+}
+
+fn retain_complete_log_lines(path: &Path) -> Result<()> {
+    let bytes = fs::read(path)?;
+    let end = bytes
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .context("decision log collection has no complete record")?
+        + 1;
+    if end < bytes.len() {
+        let file = File::options().write(true).open(path)?;
+        file.set_len(end as u64)?;
+        file.sync_all()?;
+    }
+    Ok(())
+}
+
 struct Received {
     micros: u64,
     line: String,
@@ -238,46 +361,23 @@ fn retain_scrape(
     ))
 }
 
-fn decision_timings(
-    inputs: &Inputs,
-    directory: &Path,
-    expected: &BTreeSet<timing::Decision>,
-) -> Result<Value> {
-    let path = directory.join("decision-logs.jsonl");
-    let mut child = Subscription(
-        Command::new(&inputs.spacetime)
-            .arg("--config-path")
-            .arg(&inputs.config_path)
-            .args([
-                "logs",
-                "--no-config",
-                "--format",
-                "json",
-                "-s",
-                &inputs.server,
-                &inputs.database_identity,
-            ])
-            .stdout(File::create(&path)?)
-            .stderr(File::create(directory.join("decision-logs.stderr"))?)
-            .spawn()?,
-    );
-    let started = Instant::now();
-    loop {
-        if fs::metadata(&path)?.len() > MAX_LOG_BYTES {
-            bail!("decision log evidence exceeds the stream limit");
-        }
-        if let Some(status) = child.0.try_wait()? {
-            if !status.success() {
-                bail!("decision log collection failed: {status}");
-            }
-            break;
-        }
-        if started.elapsed() > Duration::from_secs(20) {
-            bail!("decision log collection exceeded twenty seconds");
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    timing::report(&fs::read_to_string(path)?, expected)
+fn retain_measurement_window(directory: &Path, start_micros: u64, seconds: u64) -> Result<Value> {
+    let duration_micros = seconds
+        .checked_mul(1_000_000)
+        .context("measurement duration overflow")?;
+    let end_micros = start_micros
+        .checked_add(duration_micros)
+        .context("measurement window overflow")?;
+    let window = serde_json::json!({
+        "start_micros": start_micros,
+        "end_micros": end_micros,
+        "duration_micros": duration_micros,
+        "end_boundary": "exclusive",
+    });
+    let mut file = File::create(directory.join("measurement-window.json"))?;
+    file.write_all(&serde_json::to_vec_pretty(&window)?)?;
+    file.sync_all()?;
+    Ok(window)
 }
 
 fn collect(
@@ -286,6 +386,7 @@ fn collect(
     expected: &BTreeSet<u64>,
     archives: &mut evidence::Archives,
 ) -> Result<Value> {
+    let mut decision_logs = DecisionLogs::start(inputs, directory)?;
     let origin = Instant::now();
     let (mut subscription, receiver) = subscribe(inputs, directory, origin)?;
     let mut stream = stream::Stream::default();
@@ -300,10 +401,12 @@ fn collect(
     let mut stream_bytes = 0;
     let mut before = None;
     let mut before_window = Value::Null;
+    let mut measurement_window = Value::Null;
     let mut start_micros = None;
     let mut measured_passes = 0_u64;
     let mut measured_decisions = BTreeSet::new();
     loop {
+        decision_logs.check()?;
         let now = origin.elapsed();
         if start_micros
             .is_some_and(|start| now.as_micros() as u64 >= start + (inputs.seconds + 5) * 1_000_000)
@@ -366,7 +469,9 @@ fn collect(
             )?;
             before = Some(snapshot);
             before_window = window;
-            start_micros = Some(origin.elapsed().as_micros() as u64);
+            let start = origin.elapsed().as_micros() as u64;
+            measurement_window = retain_measurement_window(directory, start, inputs.seconds)?;
+            start_micros = Some(start);
         }
         if after_window {
             break;
@@ -402,10 +507,11 @@ fn collect(
         metric_window_micros as f64 / 1_000_000.0,
     )?;
     drop(subscription);
-    let timing_report = decision_timings(inputs, directory, &measured_decisions)?;
+    let timing_report = decision_logs.finish(&measured_decisions)?;
     Ok(
         serde_json::json!({"status":"captured", "measured_passes":measured_passes,
         "stream_bytes":stream_bytes,"warmup_micros":start_micros,
+        "measurement_window":measurement_window,
         "before_scrape":before_window,"after_scrape":after_window,
         "transaction_measurements":counter_report,"rows_scanned":scanned_rows,
         "decision_timings":timing_report,
@@ -446,6 +552,51 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct Directory(PathBuf);
+
+    impl Directory {
+        fn new() -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "playerbots-observer-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for Directory {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    fn inputs(spacetime: PathBuf, config_path: PathBuf) -> Inputs {
+        Inputs {
+            spacetime,
+            config_path,
+            server: "http://127.0.0.1:3000".into(),
+            database_identity: "1".repeat(64),
+            bot_guids: (1..=10).collect(),
+            seconds: 60,
+            core_revision: "2".repeat(40),
+            package_revision: "3".repeat(40),
+            content_identity: "4".repeat(64),
+            geometry_revision: "fixture".into(),
+            wasm_sha256: "5".repeat(64),
+            cli_sha256: "6".repeat(64),
+            fixture_resources: serde_json::json!({}),
+            ownership_evidence: OwnershipEvidence {
+                schema: OWNERSHIP_EVIDENCE_SCHEMA,
+                creature_entries: AUTONOMOUS_CREATURE_ENTRIES.into(),
+                queries: ownership_queries(&AUTONOMOUS_CREATURE_ENTRIES),
+            },
+        }
+    }
 
     #[test]
     fn ownership_query_identity_is_exact_and_bounded() {
@@ -479,5 +630,73 @@ mod tests {
                 "SELECT * FROM game_creature_spawn WHERE entry = 890",
             ]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn following_decision_logs_survive_backing_file_replacement() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = Directory::new();
+        let config = directory.0.join("config.toml");
+        fs::write(&config, "").unwrap();
+        let backing = directory.0.join("current.log");
+        let arguments = directory.0.join("arguments");
+        let command = directory.0.join("spacetime");
+        let first = serde_json::json!({"function":"tick_creatures","message":
+            "Timing span \"playerbots_decision guid=1 generation=1 observed_micros=1\": 1ms"});
+        let second = serde_json::json!({"function":"tick_creatures","message":
+            "Timing span \"playerbots_decision guid=2 generation=1 observed_micros=2\": 2ms"});
+        fs::write(
+            &command,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf '%s\\n' '{{\"message\":\"ready\"}}'\nsleep .1\nprintf '%s\\n' '{}' > '{}'\nprintf '%s\\n' '{}'\nsleep .1\nprintf '%s\\n' '{}' > '{}'\nprintf '%s\\n' '{}'\nprintf '{{\"partial\":'\nsleep 30\n",
+                arguments.display(),
+                first,
+                backing.display(),
+                first,
+                second,
+                backing.display(),
+                second,
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&command, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let logs = DecisionLogs::start(&inputs(command, config), &directory.0).unwrap();
+        let expected = [(1, 1, 1), (2, 1, 2)].into_iter().collect();
+        let report = logs.finish(&expected).unwrap();
+
+        assert_eq!(report["count"], 2);
+        assert_eq!(fs::read_to_string(backing).unwrap(), format!("{second}\n"));
+        let retained = fs::read_to_string(directory.0.join("decision-logs.jsonl")).unwrap();
+        assert!(retained.contains(&first.to_string()));
+        assert!(retained.contains(&second.to_string()));
+        assert!(retained
+            .lines()
+            .all(|line| serde_json::from_str::<Value>(line).is_ok()));
+        let arguments = fs::read_to_string(arguments).unwrap();
+        assert!(arguments.contains("--num-lines\n1\n--follow\n"));
+    }
+
+    #[test]
+    fn measurement_window_survives_later_capture_failure() {
+        let directory = Directory::new();
+        let result = evidence::retain(&directory.0, |_archives| {
+            retain_measurement_window(&directory.0, 42, 60)?;
+            bail!("later aggregation failed")
+        });
+
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("later aggregation failed"));
+        let window: Value =
+            serde_json::from_slice(&fs::read(directory.0.join("measurement-window.json")).unwrap())
+                .unwrap();
+        assert_eq!(window["start_micros"], 42);
+        assert_eq!(window["end_micros"], 60_000_042);
+        assert_eq!(window["duration_micros"], 60_000_000);
+        assert_eq!(window["end_boundary"], "exclusive");
     }
 }
