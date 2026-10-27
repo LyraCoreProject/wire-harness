@@ -46,7 +46,7 @@ fn malformed_and_unknown_packets_fail_without_raw_bytes_in_errors() {
 fn timestamps_use_milliseconds_and_rolls_keep_their_guid() {
     assert_eq!(
         decode(0x01cf, &[2, 0, 0, 0]).unwrap().fields["time"],
-        Field::TimeMs(2000)
+        Field::WallClockMs(2000)
     );
     let packet = decode(
         0x01fb,

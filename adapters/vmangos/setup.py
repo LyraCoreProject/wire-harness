@@ -39,14 +39,29 @@ def digest(path):
 
 def asset(kind):
     name = PINS[f'{kind}_asset']
-    path = ROOT / 'downloads' / name
-    cached = Path.home() / '.cache/lyracore-scratch/vmangos-db' / name
-    if not path.exists() and kind == 'database' and cached.is_file():
-        shutil.copyfile(cached, path)
-    if not path.exists():
-        run(['gh', 'release', 'download', PINS[f'{kind}_tag'], '--repo', 'vmangos/core', '--pattern', name, '--dir', str(path.parent)])
-    if digest(path) != PINS[f'{kind}_sha256']:
-        raise RuntimeError(f'{kind} archive checksum mismatch')
+    checksum = PINS[f'{kind}_sha256']
+    path = ROOT / 'cache/sha256' / checksum
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        if digest(path) != checksum:
+            raise RuntimeError(f'{kind} cached archive checksum mismatch')
+        return path
+    candidates = [ROOT / 'downloads' / name,
+                  Path.home() / '.cache/lyracore-scratch/vmangos-db' / name]
+    partial = path.with_suffix('.partial')
+    try:
+        cached = next((candidate for candidate in candidates if candidate.is_file()), None)
+        if cached:
+            shutil.copyfile(cached, partial)
+        else:
+            with partial.open('wb') as output:
+                run(['gh', 'api', f"repos/vmangos/core/releases/assets/{PINS[f'{kind}_asset_id']}",
+                     '-H', 'Accept: application/octet-stream'], stdout=output)
+        if digest(partial) != checksum:
+            raise RuntimeError(f'{kind} archive checksum mismatch')
+        partial.replace(path)
+    finally:
+        partial.unlink(missing_ok=True)
     return path
 
 
@@ -56,8 +71,10 @@ def prepare():
     for name in ['downloads', 'binaries', 'config', 'init', 'imports', 'data', 'logs', 'credentials', 'diagnostics']:
         (ROOT / name).mkdir(exist_ok=True)
     pin_file = ROOT / 'runtime-pins.json'
-    if pin_file.exists() and json.loads(pin_file.read_text()) != PINS:
-        raise RuntimeError('runtime pins changed; prepare a fresh Reference Server before recording')
+    if pin_file.exists():
+        old = json.loads(pin_file.read_text())
+        if any(old.get(key) != value for key, value in PINS.items() if not key.endswith('_asset_id')):
+            raise RuntimeError('runtime pins changed; prepare a fresh Reference Server before recording')
     pin_file.write_text(json.dumps(PINS, indent=2) + '\n')
     archive = asset('binary')
     if not (ROOT / 'binaries/.verified').exists():
@@ -126,6 +143,24 @@ def extract(data):
     marker.write_text(PINS['binary_sha256'])
 
 
+GM_CONFIG = {
+    'GM.LoginState': '0',
+    'GM.Visible': '1',
+    'GM.AcceptTickets': '0',
+    'GM.Chat': '0',
+    'GM.WhisperingTo': '0',
+    'GM.CheatGod': '0',
+}
+
+
+def verify_configuration():
+    text = (ROOT / 'config/mangosd.conf').read_text()
+    for key, expected in GM_CONFIG.items():
+        values = re.findall(r'^' + re.escape(key) + r'\s*=\s*(.*?)\s*$', text, re.MULTILINE)
+        if values != [expected]:
+            raise RuntimeError(f'Reference Server requires {key} = {expected}')
+
+
 def configure():
     env_file = ROOT / 'db.env'
     if env_file.exists():
@@ -161,7 +196,7 @@ SQL
         if server == 'realmd':
             values.update({'LoginDatabaseInfo': f'"database;3306;conformance;{password};realmd"', 'StrictVersionCheck': '0'})
         else:
-            values.update({'DataDir': '"/runtime/data"', 'Console.Enable': '0'})
+            values.update({'DataDir': '"/runtime/data"', 'Console.Enable': '0', **GM_CONFIG})
             for key, database in [('Login', 'realmd'), ('World', 'mangos'), ('Character', 'characters'), ('Logs', 'logs')]:
                 values[key + 'Database.Info'] = f'"database;3306;conformance;{password};{database}"'
         for key, value in values.items():
@@ -178,29 +213,36 @@ def sql(statement):
                input=statement, text=True, capture_output=True).stdout.strip()
 
 
-def account():
-    password_file = ROOT / 'credentials/gm-password'
-    exists = sql("SELECT COUNT(*) FROM realmd.account WHERE username='CONFORMANCE';") == '1'
+def account(username, level, filename):
+    password_file = ROOT / 'credentials' / (filename + '-password')
+    exists = sql(f"SELECT COUNT(*) FROM realmd.account WHERE username='{username}';") == '1'
     if exists:
         if not password_file.exists():
-            raise RuntimeError('local GM Account exists but its password file is missing')
-        grant_gm()
-        return
-    password = secrets.token_hex(6).upper()
-    salt = (secrets.randbits(255) | (1 << 255)).to_bytes(32, 'little')
-    identity = hashlib.sha1(('CONFORMANCE:' + password).encode('ascii')).digest()
-    exponent = int.from_bytes(hashlib.sha1(salt + identity).digest(), 'little')
-    modulus = int('894B645E89E1535BBDAD5B8B290650530801B18EBFBF5E8FAB3C82872A3E9BB7', 16)
-    verifier = pow(7, exponent, modulus)
-    sql(f"INSERT INTO realmd.account (username,gmlevel,v,s) VALUES ('CONFORMANCE',3,'{verifier:X}','{int.from_bytes(salt, 'little'):X}');\n"
-        "INSERT INTO realmd.realmcharacters (realmid,acctid,numchars) SELECT 1,id,0 FROM realmd.account WHERE username='CONFORMANCE';")
-    secret_file(password_file, password + '\n')
-    (ROOT / 'credentials/gm-account').write_text('CONFORMANCE\n')
-    grant_gm()
+            raise RuntimeError(f'local Account {username} exists but its password file is missing')
+    else:
+        password = secrets.token_hex(6).upper()
+        salt = (secrets.randbits(255) | (1 << 255)).to_bytes(32, 'little')
+        identity = hashlib.sha1((username + ':' + password).encode('ascii')).digest()
+        exponent = int.from_bytes(hashlib.sha1(salt + identity).digest(), 'little')
+        modulus = int('894B645E89E1535BBDAD5B8B290650530801B18EBFBF5E8FAB3C82872A3E9BB7', 16)
+        verifier = pow(7, exponent, modulus)
+        sql(f"INSERT INTO realmd.account (username,gmlevel,v,s) VALUES ('{username}',{level},'{verifier:X}','{int.from_bytes(salt, 'little'):X}');\n"
+            f"INSERT INTO realmd.realmcharacters (realmid,acctid,numchars) SELECT 1,id,0 FROM realmd.account WHERE username='{username}';")
+        secret_file(password_file, password + '\n')
+    (ROOT / 'credentials' / (filename + '-account')).write_text(username + '\n')
+    sql(f"UPDATE realmd.account SET gmlevel={level} WHERE username='{username}';\n"
+        f"DELETE FROM realmd.account_access WHERE id=(SELECT id FROM realmd.account WHERE username='{username}');\n"
+        f"INSERT INTO realmd.account_access (id,gmlevel,RealmID) SELECT id,{level},1 FROM realmd.account WHERE username='{username}';")
+    verify_account(username, level)
 
 
-def grant_gm():
-    sql("REPLACE INTO realmd.account_access (id,gmlevel,RealmID) SELECT id,3,1 FROM realmd.account WHERE username='CONFORMANCE';")
+def verify_account(username, level=0):
+    if not re.fullmatch(r'[A-Z0-9_]{1,16}', username):
+        raise RuntimeError('invalid Reference Server Account name')
+    actual = sql(f"SELECT gmlevel FROM realmd.account WHERE username='{username}';")
+    grants = sql(f"SELECT gmlevel FROM realmd.account_access WHERE id=(SELECT id FROM realmd.account WHERE username='{username}');")
+    if actual != str(level) or not grants or any(value != str(level) for value in grants.splitlines()):
+        raise RuntimeError(f'Account {username} must have gmlevel {level} in account and account_access')
 
 
 def wait_for_port(port):
@@ -216,17 +258,31 @@ def wait_for_port(port):
 
 def main():
     parser = argparse.ArgumentParser(description='Prepare the disposable build-5875 Reference Server.')
-    parser.add_argument('--lyracore-checkout', type=Path, required=True)
-    parser.add_argument('--lyracore-cli', type=Path, required=True)
+    parser.add_argument('--lyracore-checkout', type=Path)
+    parser.add_argument('--lyracore-cli', type=Path)
+    parser.add_argument('--verify-account')
     args = parser.parse_args()
+    if args.verify_account:
+        verify_configuration()
+        verify_account(args.verify_account)
+        print(f'Reference Server GM settings checked; {args.verify_account} has gmlevel 0.')
+        return
+    if not args.lyracore_checkout or not args.lyracore_cli:
+        parser.error('setup requires --lyracore-checkout and --lyracore-cli')
     run(['docker', 'info'], stdout=subprocess.DEVNULL)
     data = client_data(args)
     prepare()
     extract(data)
     configure()
     run([*COMPOSE, 'up', '-d', '--wait', '--wait-timeout', '180', 'database'])
-    account()
-    run([*COMPOSE, 'up', '-d', 'auth', 'world'])
+    old_account = ROOT / 'credentials/gm-account'
+    player_password = ROOT / 'credentials/player-password'
+    if not player_password.exists() and old_account.exists() and old_account.read_text().strip() == 'CONFORMANCE':
+        secret_file(player_password, (ROOT / 'credentials/gm-password').read_text())
+    account('CONFORMANCE', 0, 'player')
+    account('CONFORMANCEGM', 3, 'gm')
+    verify_configuration()
+    run([*COMPOSE, 'up', '-d', '--force-recreate', 'auth', 'world'])
     wait_for_port(13724)
     wait_for_port(18085)
     provenance = {key: PINS[key] for key in ['binary_sha256', 'source_commit', 'database_commit']}

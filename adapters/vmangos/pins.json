@@ -6,5 +6,7 @@
   "database_tag": "db_latest",
   "database_asset": "db-4641790.zip",
   "database_sha256": "9e178f1d70363e92a7b8c259000102dc9739333d79ca00c99ea32dd1fb43e904",
-  "database_commit": "464179081673cfd240f7ffe7f0daf96bca0b5a70"
+  "database_commit": "464179081673cfd240f7ffe7f0daf96bca0b5a70",
+  "binary_asset_id": 679402824,
+  "database_asset_id": 595362290
 }

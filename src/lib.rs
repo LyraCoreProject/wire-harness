@@ -2,10 +2,12 @@
 
 #![allow(clippy::type_complexity)]
 
+pub mod catalogue;
 pub mod cli;
 pub mod compare;
 pub mod decode;
 pub mod metrics;
+pub mod runner;
 pub mod scenario;
 pub mod spatial;
 pub mod trace;
@@ -503,6 +505,23 @@ pub fn logon(account: &str, password: &str) -> Result<([u8; 40], String)> {
     Ok((key, endpoints().world_addr(&advertised)))
 }
 
+#[derive(Debug)]
+pub enum LogonProofFailure {
+    Rejected,
+    ServerMismatch,
+}
+
+impl std::fmt::Display for LogonProofFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Rejected => "logon proof rejected",
+            Self::ServerMismatch => "server proof mismatch",
+        })
+    }
+}
+
+impl std::error::Error for LogonProofFailure {}
+
 /// Returns the advertised world address without consulting process-global endpoints.
 pub fn logon_at(logon_addr: &str, account: &str, password: &str) -> Result<([u8; 40], String)> {
     let addr = if logon_addr.contains(':') {
@@ -565,11 +584,12 @@ pub fn logon_at(logon_addr: &str, account: &str, password: &str) -> Result<([u8;
             server_proof,
             ..
         }) => server_proof,
-        other => bail!("logon proof rejected: {other:?}"),
+        LogonSmsg::CMD_AUTH_LOGON_PROOF(_) => return Err(LogonProofFailure::Rejected.into()),
+        _ => bail!("unexpected logon proof response"),
     };
     let srp = challenge
         .verify_server_proof(server_proof)
-        .map_err(|e| anyhow!("server proof mismatch: {e:?}"))?;
+        .map_err(|_| LogonProofFailure::ServerMismatch)?;
     let k: [u8; 40] = *srp.session_key();
 
     wow_login_messages::version_8::CMD_REALM_LIST_Client {}.write(&mut s)?;

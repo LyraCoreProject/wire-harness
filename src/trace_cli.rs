@@ -1,6 +1,6 @@
 use anyhow::{bail, ensure, Result};
-use wire_client::compare::{compare, EquivalenceRules};
-use wire_client::trace::Trace;
+use wire_client::compare::{compare, DeliberateDeviation};
+use wire_client::trace::{GoldenTrace, Trace};
 
 pub fn compare_command() -> Result<bool> {
     let args: Vec<_> = std::env::args().skip(1).collect();
@@ -8,22 +8,26 @@ pub fn compare_command() -> Result<bool> {
         return Ok(false);
     }
     ensure!(
-        (3..=4).contains(&args.len()),
-        "compare needs GOLDEN ACTUAL [RULES_JSON]"
+        (4..=5).contains(&args.len()),
+        "compare needs SCENARIO GOLDEN CANDIDATE [DEVIATIONS_JSON]"
     );
-    let expected = Trace::parse(&std::fs::read(&args[1])?)?;
-    let actual = Trace::parse(&std::fs::read(&args[2])?)?;
-    let rules: EquivalenceRules = if let Some(path) = args.get(3) {
+    let expected = GoldenTrace::new(
+        &std::fs::read_to_string(&args[1])?,
+        Trace::parse(&std::fs::read(&args[2])?)?,
+    )?;
+    let actual = Trace::parse(&std::fs::read(&args[3])?)?;
+    let deviations: Vec<DeliberateDeviation> = if let Some(path) = args.get(4) {
         serde_json::from_slice(&std::fs::read(path)?)?
     } else {
-        EquivalenceRules::default()
+        Vec::new()
     };
-    let comparison = compare(&expected, &actual, &rules)?;
+    let comparison = compare(&expected, &actual, &deviations)?;
     println!("{}", serde_json::to_string_pretty(&comparison)?);
     if !comparison.is_match() {
         bail!(
-            "trace differs at {} fields or packet groups",
-            comparison.differences.len()
+            "trace has {} differences, including {} Deliberate Deviations",
+            comparison.differences.len(),
+            comparison.deviation_count()
         );
     }
     Ok(true)

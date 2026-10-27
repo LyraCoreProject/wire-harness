@@ -9,6 +9,7 @@ pub enum Field {
     Float(f64),
     Guid(u64),
     TimeMs(u64),
+    WallClockMs(u64),
     Text(String),
     List(Vec<Field>),
     Object(BTreeMap<String, Field>),
@@ -68,7 +69,10 @@ pub fn decode(opcode: u16, body: &[u8]) -> Result<Packet> {
             fields.insert("sequence".into(), Field::Unsigned(body.u32()?.into()));
         }
         0x01cf => {
-            fields.insert("time".into(), Field::TimeMs(u64::from(body.u32()?) * 1000));
+            fields.insert(
+                "time".into(),
+                Field::WallClockMs(u64::from(body.u32()?) * 1000),
+            );
         }
         0x0236 => {
             fields.insert("map".into(), Field::Unsigned(body.u32()?.into()));
