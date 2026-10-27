@@ -261,7 +261,20 @@ def main():
     parser.add_argument('--lyracore-checkout', type=Path)
     parser.add_argument('--lyracore-cli', type=Path)
     parser.add_argument('--verify-account')
+    parser.add_argument('--taxi-node', type=int)
     args = parser.parse_args()
+    if args.taxi_node is not None:
+        if not 1 <= args.taxi_node <= 256:
+            parser.error('taxi node must be 1 through 256')
+        row = sql(
+            'SELECT map_id,x,y,z FROM mangos.taxi_nodes '
+            f'WHERE id={args.taxi_node} AND build<=5875 ORDER BY build DESC LIMIT 1;'
+        )
+        if not row:
+            raise RuntimeError('Reference Server taxi node is absent')
+        map_id, x, y, z = row.split('\t')
+        print(json.dumps(dict(map=int(map_id), x=float(x), y=float(y), z=float(z), orientation=0.0)))
+        return
     if args.verify_account:
         verify_configuration()
         verify_account(args.verify_account)
@@ -280,7 +293,7 @@ def main():
     if not player_password.exists() and old_account.exists() and old_account.read_text().strip() == 'CONFORMANCE':
         secret_file(player_password, (ROOT / 'credentials/gm-password').read_text())
     account('CONFORMANCE', 0, 'player')
-    account('CONFORMANCEGM', 3, 'gm')
+    account('CONFORMANCEGM', 5, 'gm')
     verify_configuration()
     run([*COMPOSE, 'up', '-d', '--force-recreate', 'auth', 'world'])
     wait_for_port(13724)

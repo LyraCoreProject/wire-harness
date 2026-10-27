@@ -19,19 +19,24 @@ The Reference Server adapter uses a gmlevel 0 Account for gameplay and a separat
 for setup. Its wrapper supplies both passwords through stdin. See the
 [Reference Server instructions](../adapters/vmangos/README.md).
 
-Schema 2 labels a trace's `origin.kind` as `golden` or `candidate`. A Golden Trace carries the
+Schema 3 labels a trace's `origin.kind` as `golden` or `candidate`. A Golden Trace carries the
 Reference Server's binary release, archive SHA-256, full source SHA and full database commit in
 `origin.provenance`. A candidate carries its adapter name and requires no vmangos provenance.
-The header also has the scenario id, Behavior, SHA-256 of the exact scenario file, schema version
-and `recorded_at_unix_ms`. The recorder stamps this time after fixture setup, immediately before
-running the scenario. A moving release label alone does not identify a recording. Schema 1 recordings must be recorded
-again; do not convert their headers by hand.
+The header also has the scenario id, Behavior, SHA-256 of the exact scenario file, schema version,
+`character_guid` and `recorded_at_unix_ms`. The recorder stamps this time after fixture setup,
+immediately before running the scenario. A moving release label alone does not identify a recording.
+Older schemas must be recorded again; do not convert their headers by hand.
 
 `decode::Field` holds text in memory and cannot serialize. `Trace::record` recursively replaces
 every text field, including empty strings and nested fields, with SHA-256 of its UTF-8 bytes.
 `RecordedField` has no plaintext variant. Numeric ids, flags and positions retain their types and
 values. Structural field names are decoder identifiers, never packet text. The parser rejects
 unknown fields, invalid digests, non-finite numbers and incomplete Golden Trace provenance.
+
+The opening records every frame from the final fixture login until the first step. Opening packets
+are scrubbed but are excluded from comparison and GUID mappings. They must form a prefix of the
+trace. They cannot excuse a packet received after a step. Every packet has `received_after_ms`,
+which is null during the opening and otherwise measures time since the current request was sent.
 
 Every received opcode in a checkpoint window becomes an observation. Declared replies and
 broadcasts go through the independent decoder. Undeclared packets use the `unexpected` stream,
@@ -64,7 +69,9 @@ candidate origin or a scenario whose id, Behavior or exact bytes differ from the
 Its scenario and trace are immutable through the comparison interface.
 
 In-process callers use `compare_observations(&golden, &observations, recorded_at_unix_ms, &deviations)`.
-They can build observations with `Observation::from_frame` to use the same independent decoder and
+For Character-scoped rules use
+`compare_character_observations(&golden, &observations, character_guid, recorded_at_unix_ms, &deviations)`.
+A nonzero GUID is required for both traces in that case. Callers can build observations with `Observation::from_frame` to use the same independent decoder and
 opcode classification as the wire runner. This path needs no candidate server provenance.
 
 ## Comparison
@@ -98,6 +105,19 @@ supply a replacement tolerance or random range to `compare`. General rule kinds 
 - Random fields require a name, reason, opcode, path, numeric type and inclusive range. Both values
   must have that type and fall in the range. Random rules cannot override GUID or timestamp types.
   An unused random rule is a reported difference; invalid or duplicate rules fail scenario parsing.
+- Named `identities` rules map unsigned 32-bit identifiers bijectively per rule, including zero.
+  They cover server-local counters such as spline ids; they cannot override GUID or time fields.
+- Named `clocks` rules compare unsigned 32-bit monotonic timestamps relative to their first sample,
+  with wraparound and `time_tolerance_ms`. The origin is unobservable between server processes.
+- Named `packet_timing` rules compare elapsed packet arrival times from the step's send, with their
+  own inclusive tolerance. Missing arrival times fail. Identity, clock and timing rules must be used.
+- A named `character_scope` rule selects packets by explicit decoded subject paths. Packets naming
+  the Character remain; packets naming only other entities are excluded from comparison. For object
+  VALUES updates, the rule selects numeric field indices and preserves each field's ordered changes
+  and multiplicity across packet batching. Other updates naming the Character remain strict.
+  Opening, malformed, unknown-checkpoint and mislabeled packets cannot bypass their normal checks.
+  Every original packet remains in the trace. This scopes a Behavior's outcome when nearby entities
+  differ with world data; it is not a general ignore-field switch.
 - Other values, including text digests, compare exactly. Missing or extra fields and changed types
   fail. There is no general ignore-field option.
 

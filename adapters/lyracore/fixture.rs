@@ -3,9 +3,8 @@ use std::process::{Command, Stdio};
 
 use anyhow::{ensure, Context, Result};
 use wire_client::cli::Invocation;
-use wire_client::runner::FixtureAdapter;
+use wire_client::runner::{FixtureAdapter, PreparedClient};
 use wire_client::scenario::FixtureVerb;
-use wire_client::WireClient;
 
 pub struct Adapter<'a> {
     invocation: &'a Invocation,
@@ -82,21 +81,92 @@ impl<'a> Adapter<'a> {
     }
 }
 
+fn reducer_calls(guid: u64, fixtures: &[FixtureVerb]) -> Vec<(&'static str, serde_json::Value)> {
+    use serde_json::json;
+    fixtures
+        .iter()
+        .flat_map(|fixture| match fixture {
+            FixtureVerb::Character { level, at, .. } => vec![
+                ("debug_set_level", json!([guid, level])),
+                (
+                    "debug_teleport",
+                    json!([guid, at.map, at.x, at.y, at.z, at.orientation]),
+                ),
+            ],
+            FixtureVerb::Money { copper } => vec![("debug_set_money", json!([guid, copper]))],
+            FixtureVerb::KnownFlightNode { node_id } => {
+                vec![("debug_learn_taxi_node", json!([guid, node_id]))]
+            }
+            FixtureVerb::Creature { entry, offset, .. } => {
+                vec![("debug_spawn_at_feet", json!([guid, entry, offset]))]
+            }
+        })
+        .collect()
+}
+
 impl FixtureAdapter for Adapter<'_> {
-    fn prepare(&mut self, fixtures: &[FixtureVerb]) -> Result<WireClient> {
-        ensure!(fixtures.len() == 1, "one Character fixture is required");
-        let fixture = &fixtures[0];
-        let FixtureVerb::Character { level, at, .. } = fixture;
+    fn prepare(&mut self, fixtures: &[FixtureVerb]) -> Result<PreparedClient> {
+        let fixture = fixtures.first().context("Character fixture is required")?;
+        let FixtureVerb::Character { at, .. } = fixture else {
+            anyhow::bail!("Character must be the first fixture")
+        };
         let client = super::create(self.invocation, fixture)?;
-        self.call(
-            "debug_set_level",
-            serde_json::json!([client.self_guid, level]),
-        )?;
-        self.call(
-            "debug_teleport",
-            serde_json::json!([client.self_guid, at.map, at.x, at.y, at.z, at.orientation]),
-        )?;
+        let guid = client.self_guid;
+        for verb in fixtures
+            .iter()
+            .filter(|verb| !matches!(verb, FixtureVerb::Creature { .. }))
+        {
+            for (reducer, args) in reducer_calls(guid, std::slice::from_ref(verb)) {
+                self.call(reducer, args)?;
+            }
+        }
         drop(client);
-        super::reconnect_checked(self.invocation, fixture)
+        let mut client = super::connect(self.invocation)?;
+        client.player_login(guid)?;
+        let mut bindings = std::collections::BTreeMap::new();
+        for verb in fixtures {
+            if let FixtureVerb::Creature { id, entry, offset } = verb {
+                let before = client.seen_guids.clone();
+                for (reducer, args) in reducer_calls(guid, std::slice::from_ref(verb)) {
+                    self.call(reducer, args)?;
+                }
+                bindings.insert(
+                    id.clone(),
+                    super::new_creature(&mut client, &before, *entry, &at.offset(*offset))?,
+                );
+            }
+        }
+        drop(client);
+        let mut prepared = super::reconnect_checked(self.invocation, fixture)?;
+        prepared.fixtures = bindings;
+        Ok(prepared)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn taxi_fixtures_call_the_agreed_debug_reducers() {
+        let fixtures = vec![
+            FixtureVerb::Money { copper: 1000 },
+            FixtureVerb::KnownFlightNode { node_id: 2 },
+            FixtureVerb::KnownFlightNode { node_id: 4 },
+            FixtureVerb::Creature {
+                id: "master".into(),
+                entry: 352,
+                offset: 2.0,
+            },
+        ];
+        assert_eq!(
+            reducer_calls(17, &fixtures),
+            vec![
+                ("debug_set_money", serde_json::json!([17, 1000])),
+                ("debug_learn_taxi_node", serde_json::json!([17, 2])),
+                ("debug_learn_taxi_node", serde_json::json!([17, 4])),
+                ("debug_spawn_at_feet", serde_json::json!([17, 352, 2.0])),
+            ]
+        );
     }
 }

@@ -12,9 +12,13 @@ struct Connection {
     replies: VecDeque<Option<(u16, Vec<u8>)>>,
     sent: Vec<(u32, Vec<u8>)>,
     fail: bool,
+    opening: Vec<wire_client::scenario::Observation>,
 }
 
 impl Transport for Connection {
+    fn take_opening(&mut self) -> Vec<wire_client::scenario::Observation> {
+        std::mem::take(&mut self.opening)
+    }
     fn character_guid(&self) -> u64 {
         7
     }
@@ -34,7 +38,9 @@ fn connection() -> Connection {
     Connection {
         sent: vec![],
         fail: false,
+        opening: vec![],
         replies: [
+            None,
             Some((0x01dd, vec![7, 0, 0, 0])),
             None,
             Some((
@@ -81,7 +87,7 @@ fn missing_and_duplicate_replies_are_reported_after_the_run() {
     let mut duplicate = connection();
     duplicate
         .replies
-        .push_front(Some((0x01dd, vec![7, 0, 0, 0])));
+        .insert(1, Some((0x01dd, vec![7, 0, 0, 0])));
     let observed = run_on(&scenario, &mut duplicate).unwrap();
     assert_eq!(
         check_observations(&scenario, &observed)
@@ -110,7 +116,7 @@ fn broadcast_capture_does_not_change_reply_order() {
     let mut connection = connection();
     connection
         .replies
-        .push_front(Some((0x01cf, vec![2, 0, 0, 0])));
+        .insert(1, Some((0x01cf, vec![2, 0, 0, 0])));
     let observed = run_on(&Scenario::parse(&scenario).unwrap(), &mut connection).unwrap();
     assert_eq!(observed[0].stream, Stream::Broadcast("clock".into()));
     assert_eq!(observed[1].stream, Stream::Reply("ping".into()));
@@ -119,7 +125,7 @@ fn broadcast_capture_does_not_change_reply_order() {
 #[test]
 fn invalid_scenarios_fail_before_fixture_setup() {
     for invalid in [
-        SCENARIO.replace("schema_version = 2", "schema_version = 99"),
+        SCENARIO.replace("schema_version = 3", "schema_version = 99"),
         SCENARIO.replace("level = 1", "level = 61"),
         SCENARIO.replace("id = \"name\"", "id = \"ping\""),
         SCENARIO.replace("window_ms = 250", "window_ms = 0"),
@@ -138,7 +144,7 @@ fn every_undeclared_opcode_is_reported_without_retaining_its_body() {
     for opcode in [0xffff, 0x01cf, 0xffff] {
         connection
             .replies
-            .push_front(Some((opcode, b"private packet text".to_vec())));
+            .insert(1, Some((opcode, b"private packet text".to_vec())));
     }
     let observed = run_on(&scenario, &mut connection).unwrap();
     assert_eq!(observed.len(), 5);
@@ -160,7 +166,7 @@ fn every_undeclared_opcode_is_reported_without_retaining_its_body() {
 fn malformed_declared_replies_are_differences_without_stopping_later_checkpoints() {
     let scenario = Scenario::parse(SCENARIO).unwrap();
     let mut connection = connection();
-    connection.replies[0] = Some((0x01dd, vec![1]));
+    connection.replies[1] = Some((0x01dd, vec![1]));
     let observed = run_on(&scenario, &mut connection).unwrap();
     assert_eq!(observed.len(), 2);
     assert_eq!(
@@ -170,4 +176,115 @@ fn malformed_declared_replies_are_differences_without_stopping_later_checkpoints
             .rule,
         "packet_decode"
     );
+}
+
+#[test]
+fn opening_records_every_frame_before_the_first_request() {
+    let scenario = Scenario::parse(SCENARIO).unwrap();
+    let mut connection = connection();
+    connection
+        .opening
+        .push(wire_client::scenario::Observation::opening(
+            0xfffe,
+            b"buffered login",
+        ));
+    connection
+        .replies
+        .push_front(Some((0xffff, b"private login text".to_vec())));
+    connection
+        .replies
+        .push_front(Some((0x01dd, 99u32.to_le_bytes().to_vec())));
+    let observed = run_on(&scenario, &mut connection).unwrap();
+    assert_eq!(observed.len(), 5);
+    assert!(observed[..3].iter().all(|o| o.stream == Stream::Opening));
+    assert_eq!(observed[0].packet.opcode, 0xfffe);
+    assert_eq!(observed[2].packet.opcode, 0xffff);
+    assert!(observed[2].packet.fields.is_empty());
+    assert!(check_observations(&scenario, &observed).unwrap().is_match());
+}
+
+#[test]
+fn multiple_fixtures_require_unique_bindings_and_valid_arguments() {
+    use wire_client::scenario::FixtureVerb;
+    let text = include_str!("../scenarios/taxi_single_hop.toml");
+    let scenario = Scenario::parse(text).unwrap();
+    assert_eq!(scenario.fixtures.len(), 5);
+    for fixture in [
+        scenario.fixtures[0].clone(),
+        FixtureVerb::Money { copper: 1 },
+        FixtureVerb::KnownFlightNode { node_id: 2 },
+        FixtureVerb::KnownFlightNode { node_id: 0 },
+        FixtureVerb::KnownFlightNode { node_id: 257 },
+        FixtureVerb::Creature {
+            id: "flight_master".into(),
+            entry: 352,
+            offset: 1.0,
+        },
+        FixtureVerb::Creature {
+            id: "second".into(),
+            entry: 0,
+            offset: 1.0,
+        },
+        FixtureVerb::Creature {
+            id: "second".into(),
+            entry: 352,
+            offset: f32::NAN,
+        },
+    ] {
+        let mut invalid = scenario.clone();
+        invalid.fixtures.push(fixture);
+        assert!(invalid.validate().is_err());
+    }
+    let mut reversed = scenario.clone();
+    reversed.fixtures.swap(0, 1);
+    assert!(reversed.validate().is_err());
+    assert!(
+        Scenario::parse(&text.replace("fixture = \"flight_master\"", "fixture = \"absent\""))
+            .is_err()
+    );
+    let mut multiple_creatures = scenario;
+    multiple_creatures.fixtures.push(FixtureVerb::Creature {
+        id: "second".into(),
+        entry: 352,
+        offset: -2.0,
+    });
+    assert!(multiple_creatures.validate().is_ok());
+}
+
+#[test]
+fn landing_acknowledges_only_the_passengers_full_guid_and_counter() {
+    let mut scenario = Scenario::parse(SCENARIO).unwrap();
+    scenario.steps.truncate(1);
+    scenario
+        .rules
+        .unexpected_packets
+        .retain(|rule| rule.checkpoint == "ping");
+    scenario.steps[0]
+        .checkpoint
+        .broadcasts
+        .push(wire_client::scenario::Broadcast {
+            opcode: 199,
+            stream: "landing".into(),
+        });
+    let mut connection = connection();
+    connection.replies.clear();
+    connection.replies.push_back(None);
+    for guid in [8u8, 7] {
+        let mut body = vec![1, guid];
+        body.extend(0u32.to_le_bytes());
+        body.extend(0u32.to_le_bytes());
+        body.extend(1234u32.to_le_bytes());
+        body.extend([0; 20]);
+        connection.replies.push_back(Some((199, body)));
+    }
+    connection.replies.push_back(Some((199, vec![1, 7])));
+    let observed = run_on(&scenario, &mut connection).unwrap();
+    assert_eq!(observed.len(), 3);
+    assert_eq!(observed[2].stream, Stream::Malformed);
+    assert_eq!(connection.sent.len(), 2);
+    let mut acknowledgement = 7u64.to_le_bytes().to_vec();
+    acknowledgement.extend([0; 4]);
+    acknowledgement.extend(1234u32.to_le_bytes());
+    assert_eq!(connection.sent[1], (199, acknowledgement));
+    assert!(observed.iter().all(|o| o.received_after_ms.is_some()));
 }

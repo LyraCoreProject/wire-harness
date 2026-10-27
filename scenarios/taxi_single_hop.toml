@@ -1,0 +1,147 @@
+# Read docs/taxi.md for node and packet evidence before changing this scenario.
+schema_version = 3
+id = "taxi_single_hop"
+behavior = "taxi_single_hop"
+
+[opening]
+window_ms = 1000
+
+[rules]
+# GUID bijections preserve the passenger and flight master across server-local allocations.
+# Replies retain request order; named broadcast streams may interleave independently.
+# Route vertices, flags, node masks, fare and landing position compare exactly.
+# Duration is integer milliseconds; 1 ms covers final rounding of a float spline-length sum.
+time_tolerance_ms = 1
+# Wall-clock fields occur only in the opening phase of this scenario.
+wall_clock_tolerance_ms = 2000
+
+[rules.character_scope]
+name = "passenger_and_taxi_state"
+reason = "Nearby entities and their movement, spells, combat, emotes and despawn animations depend on world data. Keep packets naming the passenger as source or target. Compare the passenger's movement and every money, unit-flags and mount-display update, preserving each field's order and multiplicity across packet batching."
+packets = [
+  { opcode = 221, paths = [["guid"]] },
+  { opcode = 170, paths = [["guid"]] },
+  { opcode = 533, paths = [["guid"]] },
+  { opcode = 259, paths = [["guid"]] },
+  { opcode = 305, paths = [["caster"], ["targets"]] },
+  { opcode = 306, paths = [["caster"], ["targets"], ["hits"], ["misses"]] },
+  { opcode = 316, paths = [["guid"]] },
+  { opcode = 323, paths = [["attacker"], ["victim"]] },
+  { opcode = 324, paths = [["attacker"], ["victim"]] },
+  { opcode = 769, paths = [["guid"]] },
+  { opcode = 781, paths = [["guid"]] },
+  { opcode = 782, paths = [["guid"]] },
+]
+update_fields = [46, 133, 1176]
+
+[[rules.identities]]
+name = "spline_identity"
+reason = "Spline ids are server-local sequence numbers. Preserve a bijection across the flight and landing; the number itself is not elapsed time."
+opcode = 221
+path = ["spline_id"]
+
+[[fixtures]]
+verb = "character"
+name = "Taxirider"
+race = "human"
+class = "warrior"
+level = 1
+at = { map = 0, x = -8840.56, y = 489.7, z = 109.61, orientation = 0.0 }
+
+[[fixtures]]
+verb = "money"
+copper = 1000
+
+[[fixtures]]
+verb = "known_flight_node"
+node_id = 2
+
+[[fixtures]]
+verb = "known_flight_node"
+node_id = 4
+
+[[fixtures]]
+verb = "creature"
+id = "flight_master"
+entry = 352
+offset = 2.0
+
+[[steps]]
+id = "status"
+send = { opcode = "CMSG_TAXINODE_STATUS_QUERY", target = { fixture = "flight_master" } }
+[steps.checkpoint]
+window_ms = 250
+replies = [427]
+broadcasts = [{ opcode = 221, stream = "movement" }, { opcode = 169, stream = "values" }]
+expect = [
+  { opcode = 427, path = ["known"], value = { type = "unsigned", value = 1 }, count = 1 },
+]
+
+[[steps]]
+id = "nodes"
+send = { opcode = "CMSG_TAXIQUERYAVAILABLENODES", target = { fixture = "flight_master" } }
+[steps.checkpoint]
+window_ms = 250
+replies = [425]
+broadcasts = [{ opcode = 221, stream = "movement" }, { opcode = 169, stream = "values" }]
+expect = [
+  { opcode = 425, path = ["node"], value = { type = "unsigned", value = 2 }, count = 1 },
+  { opcode = 425, path = ["known_nodes", "0"], value = { type = "unsigned", value = 10 }, count = 1 },
+]
+
+[[steps]]
+id = "flight"
+send = { opcode = "CMSG_ACTIVATETAXI", target = { fixture = "flight_master" }, source = 2, destination = 4 }
+[steps.checkpoint]
+window_ms = 80000
+replies = [334, 430, 366, 221, 367, 334, 199]
+broadcasts = [
+  { opcode = 169, stream = "values" },
+  { opcode = 305, stream = "spells" },
+  { opcode = 306, stream = "spells" },
+  { opcode = 259, stream = "emotes" },
+  { opcode = 170, stream = "entities" },
+  { opcode = 533, stream = "entities" },
+  { opcode = 316, stream = "combat" },
+  { opcode = 323, stream = "combat" },
+  { opcode = 324, stream = "combat" },
+  { opcode = 769, stream = "movement_modes" },
+  { opcode = 781, stream = "movement_modes" },
+  { opcode = 782, stream = "movement_modes" },
+]
+expect = [
+  { opcode = 430, path = ["result"], value = { type = "unsigned", value = 0 }, count = 1 },
+  { opcode = 199, path = ["flags"], value = { type = "unsigned", value = 0 }, count = 1 },
+  { opcode = 169, path = ["field_133", "1"], value = { type = "unsigned", value = 0 }, count = 1 },
+  { opcode = 169, path = ["field_1176", "0"], value = { type = "unsigned", value = 890 }, count = 1 },
+]
+
+[[rules.clocks]]
+name = "landing_clock_origin"
+reason = "The landing timestamp uses the server's monotonic clock, whose origin differs per process. Compare elapsed clock differences from its first sample; landing arrival time is checked separately."
+opcode = 199
+path = ["timestamp"]
+
+[[rules.identities]]
+name = "teleport_counter"
+reason = "Teleport acknowledgement counters belong to each connection. Preserve identity, including zero, and require the runner to echo the actual counter."
+opcode = 199
+path = ["counter"]
+
+[[rules.packet_timing]]
+name = "landing_delivery"
+reason = "Landing follows a scheduled flight-end tick. 150 ms covers one configured 100 ms map tick plus 50 ms of local delivery jitter; the advertised spline duration still has its separate 1 ms limit."
+opcode = 199
+tolerance_ms = 150
+
+[[rules.unexpected_packets]]
+name = "zone_world_states"
+reason = "Crossing zones sends world-state catalogues whose contents depend on world data, not the taxi rule. Keep each opcode in the trace."
+checkpoint = "flight"
+opcode = 706
+
+[[rules.unexpected_packets]]
+name = "zone_weather"
+reason = "Zone weather changes independently of the flight and depends on the world's weather state. Keep each opcode in the trace."
+checkpoint = "flight"
+opcode = 756

@@ -1,6 +1,9 @@
-schema_version = 2
+schema_version = 3
 id = "connection_identity"
 behavior = "connection_identity"
+
+[opening]
+window_ms = 1000
 
 [rules]
 time_tolerance_ms = 100

@@ -8,11 +8,18 @@ pub struct Entry {
     pub trace: &'static str,
 }
 
-pub const ENTRIES: &[Entry] = &[Entry {
-    id: "connection_identity",
-    scenario: include_str!("../scenarios/connection_identity.toml"),
-    trace: include_str!("../traces/connection_identity.json"),
-}];
+pub const ENTRIES: &[Entry] = &[
+    Entry {
+        id: "connection_identity",
+        scenario: include_str!("../scenarios/connection_identity.toml"),
+        trace: include_str!("../traces/connection_identity.json"),
+    },
+    Entry {
+        id: "taxi_single_hop",
+        scenario: include_str!("../scenarios/taxi_single_hop.toml"),
+        trace: include_str!("../traces/taxi_single_hop.json"),
+    },
+];
 
 pub fn get(id: &str) -> Result<GoldenTrace> {
     let entry = ENTRIES

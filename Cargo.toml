@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "wire-client"
-version = "0.2.0-conformance.2"
+version = "0.2.0-conformance.3"
 edition = "2021"
 rust-version = "1.80"
 license = "MIT OR Apache-2.0"

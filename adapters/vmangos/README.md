@@ -24,7 +24,7 @@ loads all four MySQL dumps into the Reference Server's MariaDB and creates two A
 | Account | gmlevel | Purpose | Password file under `credentials/` |
 | --- | --- | --- | --- |
 | `CONFORMANCE` | 0 | Scenario gameplay | `player-password` |
-| `CONFORMANCEGM` | 3 | Fixture setup in a separate World Session | `gm-password` |
+| `CONFORMANCEGM` | 5 | Fixture setup in a separate World Session | `gm-password` |
 
 Passwords are generated locally, stored with mode 0600 and passed through stdin. Setup writes both
 `account.gmlevel` and realm 1's `account_access` entry, removes older grants for these Accounts,
@@ -42,8 +42,9 @@ python3 adapters/vmangos/setup.py --verify-account CONFORMANCE
 DOCKER
 ```
 
-The GM World Session applies `.levelup NAME DELTA`, `.go xyzo` and `.namego NAME`. Gameplay runs
-on the other Account throughout. The adapter reconnects the scenario Character and checks its
+The GM World Session applies the [Fixture Verbs](../../docs/scenarios.md#fixture-verbs).
+Its security level 5 is required for `.npc spawn add` and `.npc spawn delete` at the pinned revision;
+`.modify money` requires level 4. Gameplay runs on the other Account throughout. The adapter reconnects the scenario Character and checks its
 name, race, class, level, position and orientation before capture.
 Teleport acknowledgements use a full-width GUID, matching the pinned server's
 [packet reader](https://github.com/vmangos/core/blob/d9173eca3ea08dd985c52dabbcc826898d1d0b77/src/game/Server/Packets/Movement.cpp#L16-L23).
@@ -85,7 +86,8 @@ a reviewed re-pin. The script does not build vmangos from source.
 The release's MapExtractor, VMapExtractor and VMapAssembler produce maps, DBCs and vmaps from the
 client's MPQs. MoveMapGenerator produces map 0 tile 32,48, which contains the initial Character
 fixture. Map, collision and navigation settings remain enabled. This setup does not claim
-navigation coverage outside that tile. Generate additional mmaps before adding scenarios elsewhere.
+navigation coverage outside that tile. Generate additional mmaps before adding scenarios that need ground navigation elsewhere.
+The taxi scenario follows a DBC flight spline and does not claim ground-navigation coverage.
 The commands are in `setup.py`; tools and logs stay in the runtime directory. A completed run reuses
 its extracts for the same binary pin.
 
@@ -97,12 +99,13 @@ Warden is disabled by the pinned release's default configuration.
 ## Login and recording
 
 Build with `cargo build --locked --bin vanilla-wire`. If the target directory is outside the
-checkout, set `WIRE_BIN` to its `debug/vanilla-wire`. The scenario fixes the name `Conformant`.
+checkout, set `WIRE_BIN` to its `debug/vanilla-wire`. The connection scenario fixes the name `Conformant`; the taxi scenario uses `Taxirider`.
 The wrapper uses `Conformsetup` for the separate GM Character and supplies both passwords:
 
 ```sh
 newgrp docker <<'DOCKER'
 adapters/vmangos/reference.sh record traces/connection_identity.json
+adapters/vmangos/reference.sh record traces/taxi_single_hop.json scenarios/taxi_single_hop.toml
 DOCKER
 ```
 
@@ -118,7 +121,7 @@ WIRE_CRASH_DIR="$HOME/.cache/lyracore-scratch/reference-server/diagnostics" \
   < "$HOME/.cache/lyracore-scratch/reference-server/credentials/player-password"
 ```
 
-The recorder hashes packet text before writing. It retains every checkpoint opcode, including
+The recorder hashes packet text before writing. It retains opening and checkpoint opcodes, including
 ambient movement covered by named scenario rules. Review the scrubbed trace and its header before
 committing. [Trace rules](../../docs/traces.md) describes candidate recording and comparison.
 

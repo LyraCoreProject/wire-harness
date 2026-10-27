@@ -12,18 +12,18 @@ case ${1:-} in
     exec docker compose -f "$adapter/compose.yml" "$@"
     ;;
   record)
-    [[ $# == 2 ]] || { echo "usage: reference.sh record OUTPUT" >&2; exit 2; }
+    [[ $# == 2 || $# == 3 ]] || { echo "usage: reference.sh record OUTPUT [SCENARIO]" >&2; exit 2; }
     wire_bin=${WIRE_BIN:-$repo/target/debug/vanilla-wire}
     [[ -x $wire_bin ]] || { echo "build vanilla-wire or set WIRE_BIN" >&2; exit 2; }
     export WIRE_GM_ACCOUNT=CONFORMANCEGM WIRE_GM_CHARACTER=Conformsetup
     cat "$REFERENCE_ROOT/credentials/player-password" "$REFERENCE_ROOT/credentials/gm-password" |
-      env WIRE_ADAPTER=vmangos "$wire_bin" record "$repo/scenarios/connection_identity.toml" \
+      env WIRE_ADAPTER=vmangos "$wire_bin" record "${3:-$repo/scenarios/connection_identity.toml}" \
       "$REFERENCE_ROOT/provenance.json" "$2" \
       --host 127.0.0.1 --logon-port 13724 --world-port 18085 \
       --account CONFORMANCE --password-stdin
     ;;
   *)
-    echo "usage: reference.sh {up|down|ps|logs} [COMPOSE_ARGS...] | record OUTPUT" >&2
+    echo "usage: reference.sh {up|down|ps|logs} [COMPOSE_ARGS...] | record OUTPUT [SCENARIO]" >&2
     exit 2
     ;;
 esac

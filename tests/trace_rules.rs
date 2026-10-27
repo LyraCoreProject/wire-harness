@@ -35,6 +35,7 @@ fn packet(opcode: u16, value: Field) -> Observation {
         _ => Stream::Reply("query".into()),
     };
     Observation {
+        received_after_ms: None,
         checkpoint: "query".into(),
         stream,
         packet: Packet {
@@ -111,7 +112,7 @@ fn trace_rejects_plaintext_invalid_digests_unknown_fields_and_unpinned_provenanc
     for invalid in [
         json.replace("text_sha256", "text"),
         json.replace(&String::from(Sha256Digest::of(b"abc")), "abc"),
-        json.replace("\"schema_version\":2", "\"schema_version\":99"),
+        json.replace("\"schema_version\":3", "\"schema_version\":99"),
         json.replace(&"a".repeat(40), "latest"),
         json.replacen("{", "{\"plaintext\":\"secret\",", 1),
     ] {
@@ -411,6 +412,7 @@ fn unexpected_packets_count_even_when_both_traces_contain_them_unless_scenario_e
         let text = scenario(&[477], rules);
         let mut observed = observations(&[Field::Unsigned(7)]);
         observed.push(Observation {
+            received_after_ms: None,
             checkpoint: "query".into(),
             stream: Stream::Unexpected,
             packet: Packet {
@@ -484,6 +486,7 @@ fn unexpected_packet_deviations_report_every_occurrence() {
     let mut actual = observed;
     for _ in 0..2 {
         actual.push(Observation {
+            received_after_ms: None,
             checkpoint: "query".into(),
             stream: Stream::Unexpected,
             packet: Packet {
@@ -533,4 +536,45 @@ fn trace_writer_never_overwrites() {
         *expected.trace()
     );
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn opening_is_scrubbed_but_does_not_compare_or_establish_guid_mappings() {
+    let text = scenario(&[477], "");
+    let mut opening = packet(81, Field::Text("Private name".into()));
+    opening.checkpoint = "opening".into();
+    opening.stream = Stream::Opening;
+    opening.packet.fields.insert("guid".into(), Field::Guid(7));
+    let expected = golden(&text, &[opening, packet(477, Field::Guid(7))], 1000);
+    assert!(!serde_json::to_string(expected.trace())
+        .unwrap()
+        .contains("Private name"));
+    let actual = vec![
+        Observation::opening(0xffff, b"secret"),
+        packet(477, Field::Guid(90)),
+    ];
+    assert!(compare_observations(&expected, &actual, 1000, &[])
+        .unwrap()
+        .is_match());
+    assert!(compare_observations(&expected, &[], 1000, &[])
+        .unwrap()
+        .differences
+        .iter()
+        .any(|d| d.rule == "packet_count"));
+}
+
+#[test]
+fn an_opening_label_cannot_hide_packets_after_a_step() {
+    let text = scenario(&[477], "");
+    assert!(Trace::record(
+        header(&text, 1000),
+        &[
+            packet(477, Field::Unsigned(7)),
+            Observation::opening(0xffff, b"secret")
+        ]
+    )
+    .is_err());
+    let mut opening = Observation::opening(0xffff, b"");
+    opening.checkpoint = "query".into();
+    assert!(Trace::record(header(&text, 1000), &[opening]).is_err());
 }

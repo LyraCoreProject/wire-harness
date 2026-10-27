@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -13,8 +13,15 @@ pub struct Scenario {
     pub id: String,
     pub behavior: String,
     pub rules: EquivalenceRules,
+    pub opening: Opening,
     pub fixtures: Vec<FixtureVerb>,
     pub steps: Vec<Step>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Opening {
+    pub window_ms: u64,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -27,6 +34,17 @@ pub enum FixtureVerb {
         level: u8,
         at: Position,
     },
+    Money {
+        copper: u32,
+    },
+    KnownFlightNode {
+        node_id: u32,
+    },
+    Creature {
+        id: String,
+        entry: u32,
+        offset: f32,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -37,6 +55,17 @@ pub struct Position {
     pub y: f32,
     pub z: f32,
     pub orientation: f32,
+}
+
+impl Position {
+    pub fn offset(&self, distance: f32) -> Self {
+        let (sin, cos) = self.orientation.sin_cos();
+        Self {
+            x: self.x + distance * cos,
+            y: self.y + distance * sin,
+            ..self.clone()
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -54,21 +83,43 @@ pub enum ClientPacket {
     Ping { sequence: u32, latency_ms: u32 },
     #[serde(rename = "CMSG_NAME_QUERY")]
     NameQuery { target: Target },
+    #[serde(rename = "CMSG_TAXINODE_STATUS_QUERY")]
+    TaxiNodeStatusQuery { target: Target },
+    #[serde(rename = "CMSG_TAXIQUERYAVAILABLENODES")]
+    TaxiQueryAvailableNodes { target: Target },
+    #[serde(rename = "CMSG_ACTIVATETAXI")]
+    ActivateTaxi {
+        target: Target,
+        source: u32,
+        destination: u32,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Target {
     Character,
+    Fixture(String),
 }
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Checkpoint {
+    #[serde(default)]
+    pub expect: Vec<Expectation>,
     pub window_ms: u64,
     pub replies: Vec<u16>,
     #[serde(default)]
     pub broadcasts: Vec<Broadcast>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Expectation {
+    pub opcode: u16,
+    pub path: Vec<String>,
+    pub value: crate::trace::RecordedField,
+    pub count: usize,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -86,6 +137,7 @@ pub struct Broadcast {
     deny_unknown_fields
 )]
 pub enum Stream {
+    Opening,
     Reply(String),
     Broadcast(String),
     Unexpected,
@@ -94,6 +146,7 @@ pub enum Stream {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Observation {
+    pub received_after_ms: Option<u64>,
     pub checkpoint: String,
     pub stream: Stream,
     pub packet: Packet,
@@ -115,23 +168,37 @@ impl Scenario {
     }
 
     pub fn validate(&self) -> Result<()> {
-        ensure!(self.schema_version == 2, "unsupported scenario schema");
+        ensure!(self.schema_version == 3, "unsupported scenario schema");
         ensure!(
             identifier(&self.id) && identifier(&self.behavior),
             "invalid scenario or Behavior id"
         );
         ensure!(
-            self.fixtures.len() == 1,
+            !self.fixtures.is_empty()
+                && self.fixtures.len() <= 256
+                && self
+                    .fixtures
+                    .iter()
+                    .filter(|f| matches!(f, FixtureVerb::Character { .. }))
+                    .count()
+                    == 1,
             "exactly one Character fixture is required"
         );
         self.rules.validate()?;
+        ensure!(
+            (1..=30_000).contains(&self.opening.window_ms),
+            "opening window must be 1 through 30000 ms"
+        );
         let FixtureVerb::Character {
             name,
             race,
             class,
             level,
             at,
-        } = &self.fixtures[0];
+        } = &self.fixtures[0]
+        else {
+            anyhow::bail!("Character must be the first fixture")
+        };
         ensure!(
             (2..=12).contains(&name.len())
                 && name.bytes().all(|b| b.is_ascii_alphabetic())
@@ -171,6 +238,37 @@ impl Scenario {
                 .all(|v| v.is_finite()),
             "fixture coordinates must be finite"
         );
+        let mut fixture_ids = BTreeSet::new();
+        let mut nodes = BTreeSet::new();
+        let mut money = false;
+        for fixture in &self.fixtures[1..] {
+            match fixture {
+                FixtureVerb::Character { .. } => anyhow::bail!("duplicate Character fixture"),
+                FixtureVerb::Money { copper } => {
+                    ensure!(
+                        !money && *copper <= 0x7fff_ffff,
+                        "duplicate or overflowing money fixture"
+                    );
+                    money = true;
+                }
+                FixtureVerb::KnownFlightNode { node_id } => {
+                    ensure!(
+                        (1..=256).contains(node_id) && nodes.insert(*node_id),
+                        "invalid or duplicate flight node"
+                    );
+                }
+                FixtureVerb::Creature { id, entry, offset } => {
+                    ensure!(
+                        identifier(id) && fixture_ids.insert(id),
+                        "invalid or duplicate creature fixture id"
+                    );
+                    ensure!(
+                        *entry != 0 && offset.is_finite() && offset.abs() <= 100.0,
+                        "invalid creature fixture"
+                    );
+                }
+            }
+        }
         ensure!(
             !self.steps.is_empty() && self.steps.len() <= 256,
             "scenario needs 1 through 256 steps"
@@ -178,26 +276,65 @@ impl Scenario {
         let mut ids = BTreeSet::new();
         for step in &self.steps {
             ensure!(
-                identifier(&step.id) && ids.insert(&step.id),
+                identifier(&step.id) && step.id != "opening" && ids.insert(&step.id),
                 "invalid or duplicate step id"
             );
             let checkpoint = &step.checkpoint;
             ensure!(
-                (1..=30_000).contains(&checkpoint.window_ms),
-                "checkpoint window must be 1 through 30000 ms"
+                (1..=180_000).contains(&checkpoint.window_ms),
+                "checkpoint window must be 1 through 180000 ms"
             );
             ensure!(
                 !checkpoint.replies.is_empty() && checkpoint.replies.len() <= 256,
                 "checkpoint needs bounded replies"
             );
+            if let Some(Target::Fixture(id)) = step.send.target() {
+                ensure!(
+                    fixture_ids.contains(id),
+                    "request names an unknown creature fixture"
+                );
+            }
             let expected = match step.send {
                 ClientPacket::Ping { .. } => 0x01dd,
                 ClientPacket::NameQuery { .. } => 0x0051,
+                ClientPacket::TaxiNodeStatusQuery { .. } => 0x01ab,
+                ClientPacket::TaxiQueryAvailableNodes { .. } => 0x01a9,
+                ClientPacket::ActivateTaxi {
+                    source,
+                    destination,
+                    ..
+                } => {
+                    ensure!(
+                        source != destination
+                            && nodes.contains(&source)
+                            && nodes.contains(&destination),
+                        "taxi endpoints must be distinct known-node fixtures"
+                    );
+                    0x01ae
+                }
             };
             ensure!(
                 checkpoint.replies.contains(&expected),
                 "checkpoint omits its request's reply opcode"
             );
+            ensure!(
+                checkpoint.expect.len() <= 256,
+                "too many checkpoint assertions"
+            );
+            for assertion in &checkpoint.expect {
+                assertion.value.validate(0)?;
+                ensure!(
+                    assertion.count > 0
+                        && assertion.count <= 4096
+                        && !assertion.path.is_empty()
+                        && assertion.path.iter().all(|p| identifier(p)),
+                    "invalid checkpoint assertion"
+                );
+                ensure!(
+                    checkpoint.stream(&step.id, assertion.opcode) != Stream::Unexpected,
+                    "assertion opcode must be declared"
+                );
+            }
             let mut opcodes = BTreeSet::new();
             for broadcast in &checkpoint.broadcasts {
                 ensure!(identifier(&broadcast.stream), "invalid broadcast stream id");
@@ -224,8 +361,30 @@ impl Scenario {
 }
 
 impl ClientPacket {
-    pub fn encode(&self, character_guid: u64) -> (u32, Vec<u8>) {
+    fn target(&self) -> Option<&Target> {
         match self {
+            Self::Ping { .. } => None,
+            Self::NameQuery { target }
+            | Self::TaxiNodeStatusQuery { target }
+            | Self::TaxiQueryAvailableNodes { target }
+            | Self::ActivateTaxi { target, .. } => Some(target),
+        }
+    }
+
+    pub fn encode(
+        &self,
+        character_guid: u64,
+        fixtures: &BTreeMap<String, u64>,
+    ) -> Result<(u32, Vec<u8>)> {
+        let guid = match self.target() {
+            None => 0,
+            Some(Target::Character) => character_guid,
+            Some(Target::Fixture(id)) => *fixtures.get(id).context("unbound creature fixture")?,
+        };
+        if self.target().is_some() {
+            ensure!(guid != 0, "target GUID must be nonzero");
+        }
+        Ok(match self {
             Self::Ping {
                 sequence,
                 latency_ms,
@@ -234,16 +393,41 @@ impl ClientPacket {
                 body.extend(latency_ms.to_le_bytes());
                 (0x01dc, body)
             }
-            Self::NameQuery {
-                target: Target::Character,
-            } => (0x0050, character_guid.to_le_bytes().to_vec()),
-        }
+            Self::NameQuery { .. } => (0x0050, guid.to_le_bytes().to_vec()),
+            Self::TaxiNodeStatusQuery { .. } => (0x01aa, guid.to_le_bytes().to_vec()),
+            Self::TaxiQueryAvailableNodes { .. } => (0x01ac, guid.to_le_bytes().to_vec()),
+            Self::ActivateTaxi {
+                source,
+                destination,
+                ..
+            } => {
+                let mut body = guid.to_le_bytes().to_vec();
+                body.extend(source.to_le_bytes());
+                body.extend(destination.to_le_bytes());
+                (0x01ad, body)
+            }
+        })
     }
 }
 
 impl Observation {
+    /// Opening packets retain decoded fields where supported; unsupported bodies never reach disk.
+    pub fn opening(opcode: u16, body: &[u8]) -> Self {
+        Self {
+            received_after_ms: None,
+            checkpoint: "opening".into(),
+            stream: Stream::Opening,
+            packet: decode(opcode, body).unwrap_or(Packet {
+                opcode,
+                fields: Default::default(),
+            }),
+        }
+    }
+
     /// Retains every opcode; undeclared bodies are discarded without decoding or storing packet text.
     pub fn from_frame(step: &Step, opcode: u16, body: &[u8]) -> Self {
+        let wire_opcode = opcode;
+        let opcode = if opcode == 0x01f6 { 0x00a9 } else { opcode };
         let stream = step.checkpoint.stream(&step.id, opcode);
         let (stream, packet) = if stream == Stream::Unexpected {
             (
@@ -254,7 +438,7 @@ impl Observation {
                 },
             )
         } else {
-            match decode(opcode, body) {
+            match decode(wire_opcode, body) {
                 Ok(packet) => (stream, packet),
                 Err(_) => (
                     Stream::Malformed,
@@ -266,6 +450,7 @@ impl Observation {
             }
         };
         Self {
+            received_after_ms: None,
             checkpoint: step.id.clone(),
             stream,
             packet,
