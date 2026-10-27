@@ -7,9 +7,6 @@ behavior = "taxi_single_hop"
 window_ms = 1000
 
 [rules]
-# GUID bijections preserve the passenger and flight master across server-local allocations.
-# Replies retain request order; named broadcast streams may interleave independently.
-# Route vertices, flags, node masks, fare and landing position compare exactly.
 # Duration is integer milliseconds; 1 ms covers final rounding of a float spline-length sum.
 time_tolerance_ms = 1
 # Wall-clock fields occur only in the opening phase of this scenario.
@@ -17,7 +14,7 @@ wall_clock_tolerance_ms = 2000
 
 [rules.character_scope]
 name = "passenger_and_taxi_state"
-reason = "Nearby entities and their movement, spells, combat, emotes and despawn animations depend on world data. Keep packets naming the passenger as source or target. Compare the passenger's movement and every money, unit-flags and mount-display update, preserving each field's order and multiplicity across packet batching."
+reason = "Nearby entities depend on world data. Keep packets naming the passenger as source or target. Compare every passenger field, preserving each field's changes and received times across packet batching."
 packets = [
   { opcode = 221, paths = [["guid"]] },
   { opcode = 170, paths = [["guid"]] },
@@ -32,11 +29,10 @@ packets = [
   { opcode = 781, paths = [["guid"]] },
   { opcode = 782, paths = [["guid"]] },
 ]
-update_fields = [46, 133, 1176]
 
 [[rules.identities]]
 name = "spline_identity"
-reason = "Spline ids are server-local sequence numbers. Preserve a bijection across the flight and landing; the number itself is not elapsed time."
+reason = "Require unsigned 32-bit spline ids and preserve a bijection across samples. The number is a server-local sequence, not elapsed time. Identity consistency is unchecked: single sample."
 opcode = 221
 path = ["spline_id"]
 
@@ -97,6 +93,8 @@ window_ms = 80000
 replies = [334, 430, 366, 221, 367, 334, 199]
 broadcasts = [
   { opcode = 169, stream = "values" },
+  { opcode = 706, stream = "zones" },
+  { opcode = 756, stream = "zones" },
   { opcode = 305, stream = "spells" },
   { opcode = 306, stream = "spells" },
   { opcode = 259, stream = "emotes" },
@@ -112,19 +110,20 @@ broadcasts = [
 expect = [
   { opcode = 430, path = ["result"], value = { type = "unsigned", value = 0 }, count = 1 },
   { opcode = 199, path = ["flags"], value = { type = "unsigned", value = 0 }, count = 1 },
-  { opcode = 169, path = ["field_133", "1"], value = { type = "unsigned", value = 0 }, count = 1 },
-  { opcode = 169, path = ["field_1176", "0"], value = { type = "unsigned", value = 890 }, count = 1 },
+  { opcode = 169, path = ["objects", "0", "values", "field_133"], value = { type = "unsigned", value = 0 }, count = 1 },
+  { opcode = 169, path = ["objects", "0", "values", "field_1176"], value = { type = "unsigned", value = 890 }, count = 1 },
 ]
 
 [[rules.clocks]]
 name = "landing_clock_origin"
-reason = "The landing timestamp uses the server's monotonic clock, whose origin differs per process. Compare elapsed clock differences from its first sample; landing arrival time is checked separately."
+reason = "Require an unsigned 32-bit timestamp. Process clock origins differ; elapsed-clock consistency is unchecked: single sample. Future samples compare within one 100 ms map tick; landing delivery has its own rule."
 opcode = 199
 path = ["timestamp"]
+tolerance_ms = 100
 
 [[rules.identities]]
 name = "teleport_counter"
-reason = "Teleport acknowledgement counters belong to each connection. Preserve identity, including zero, and require the runner to echo the actual counter."
+reason = "Require an unsigned 32-bit counter, including zero. Counters belong to each connection; identity consistency is unchecked: single sample. The runner echoes the received counter."
 opcode = 199
 path = ["counter"]
 
@@ -134,14 +133,52 @@ reason = "Landing follows a scheduled flight-end tick. 150 ms covers one configu
 opcode = 199
 tolerance_ms = 150
 
-[[rules.unexpected_packets]]
-name = "zone_world_states"
-reason = "Crossing zones sends world-state catalogues whose contents depend on world data, not the taxi rule. Keep each opcode in the trace."
-checkpoint = "flight"
-opcode = 706
+[[rules.packet_timing]]
+name = "passenger_update_delivery"
+reason = "Each passenger field retains its arrival time from activation. 150 ms covers one 100 ms map tick plus 50 ms local delivery jitter; fare and mount changes must occur at takeoff or landing as recorded."
+opcode = 169
+tolerance_ms = 150
 
-[[rules.unexpected_packets]]
-name = "zone_weather"
-reason = "Zone weather changes independently of the flight and depends on the world's weather state. Keep each opcode in the trace."
-checkpoint = "flight"
+[[rules.packet_timing]]
+name = "zone_world_states_delivery"
+reason = "The Reference Server polls zone changes every 1000 ms. 1150 ms covers that polling phase, one 100 ms map tick and 50 ms local delivery jitter. Count, order, map and zone remain exact. See docs/taxi.md for the pinned source."
+opcode = 706
+tolerance_ms = 1150
+
+[[rules.packet_timing]]
+name = "zone_weather_delivery"
+reason = "Weather follows the same 1000 ms zone poll as world states. 1150 ms covers polling phase, one 100 ms map tick and 50 ms local delivery jitter. See docs/taxi.md for the pinned source."
 opcode = 756
+tolerance_ms = 1150
+
+[[rules.packet_timing]]
+name = "passenger_zone_flags_delivery"
+reason = "PLAYER_FLAGS changes when the passenger leaves the capital's resting area. The 1000 ms zone poll plus one 100 ms update tick and 50 ms local jitter gives 1150 ms. Its value remains exact; fare, mount and unit-flags updates keep their 150 ms bound. See docs/taxi.md."
+opcode = 169
+path = ["objects", "0", "values", "field_190"]
+tolerance_ms = 1150
+
+[[rules.data_fields]]
+name = "zone_world_state_catalogue"
+reason = "The state ids and values depend on the world's event catalogue. Compare packet count, order, delivery time, map and zone; allow this catalogue's contents to differ."
+opcode = 706
+path = ["states"]
+
+[[rules.data_fields]]
+name = "zone_weather_type"
+reason = "The weather type depends on the zone's current weather, independently of this flight. Packet count, order, delivery time and the instant-change flag remain checked."
+opcode = 756
+path = ["weather_type"]
+
+[[rules.random]]
+name = "zone_weather_grade"
+reason = "Weather intensity varies independently of the flight. Both samples must be finite floats between 0 and 1."
+opcode = 756
+path = ["grade"]
+range = { type = "float", minimum = 0.0, maximum = 1.0 }
+
+[[rules.data_fields]]
+name = "zone_weather_sound"
+reason = "The weather sound id follows the independently selected weather type and intensity."
+opcode = 756
+path = ["sound"]

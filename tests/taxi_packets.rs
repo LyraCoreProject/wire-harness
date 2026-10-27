@@ -237,3 +237,49 @@ fn combat_stop_and_despawn_keep_their_subject_guids() {
     assert!(decode(324, &[1, 9, 1, 7, 1]).is_err());
     assert!(decode(533, &[1, 9]).is_err());
 }
+
+#[test]
+fn zone_world_states_decode_map_zone_and_signed_state_values() {
+    let body = [
+        0, 0, 0, 0, 12, 0, 0, 0, 1, 0, 42, 0, 0, 0, 255, 255, 255, 255,
+    ];
+    let packet = decode(706, &body).unwrap();
+    assert_eq!(packet.fields["map"], Field::Unsigned(0));
+    assert_eq!(packet.fields["zone"], Field::Unsigned(12));
+    assert_eq!(
+        packet.fields["states"],
+        Field::List(vec![Field::Object(BTreeMap::from([
+            ("id".into(), Field::Unsigned(42)),
+            ("value".into(), Field::Signed(-1)),
+        ]))])
+    );
+    for end in 0..body.len() {
+        assert!(decode(706, &body[..end]).is_err());
+    }
+    assert!(decode(706, &[body.as_slice(), &[0]].concat()).is_err());
+}
+
+#[test]
+fn zone_weather_decodes_values_and_rejects_malformed_fields() {
+    let body = [1, 0, 0, 0, 0, 0, 0, 63, 7, 0, 0, 0, 1];
+    let packet = decode(756, &body).unwrap();
+    assert_eq!(
+        packet.fields,
+        BTreeMap::from([
+            ("weather_type".into(), Field::Unsigned(1)),
+            ("grade".into(), Field::Float(0.5)),
+            ("sound".into(), Field::Unsigned(7)),
+            ("instant".into(), Field::Unsigned(1)),
+        ])
+    );
+    for end in 0..body.len() {
+        assert!(decode(756, &body[..end]).is_err());
+    }
+    assert!(decode(756, &[body.as_slice(), &[0]].concat()).is_err());
+    let mut invalid = body;
+    invalid[12] = 2;
+    assert!(decode(756, &invalid).is_err());
+    invalid = body;
+    invalid[4..8].copy_from_slice(&f32::NAN.to_le_bytes());
+    assert!(decode(756, &invalid).is_err());
+}

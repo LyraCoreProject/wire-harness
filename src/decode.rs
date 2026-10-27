@@ -240,6 +240,35 @@ pub fn decode(opcode: u16, body: &[u8]) -> Result<Packet> {
     let mut body = Body(body);
     let mut fields = BTreeMap::new();
     match opcode {
+        0x02c2 => {
+            fields.insert("map".into(), Field::Unsigned(body.u32()?.into()));
+            fields.insert("zone".into(), Field::Unsigned(body.u32()?.into()));
+            let count = u16::from_le_bytes(body.bytes()?);
+            ensure!(
+                usize::from(count) <= body.0.len() / 8,
+                "invalid world-state count"
+            );
+            let states = (0..count)
+                .map(|_| {
+                    Ok(Field::Object(BTreeMap::from([
+                        ("id".into(), Field::Unsigned(body.u32()?.into())),
+                        (
+                            "value".into(),
+                            Field::Signed(i32::from_le_bytes(body.bytes()?).into()),
+                        ),
+                    ])))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            fields.insert("states".into(), Field::List(states));
+        }
+        0x02f4 => {
+            fields.insert("weather_type".into(), Field::Unsigned(body.u32()?.into()));
+            fields.insert("grade".into(), body.float()?);
+            fields.insert("sound".into(), Field::Unsigned(body.u32()?.into()));
+            let instant = body.u8()?;
+            ensure!(instant <= 1, "invalid weather instant-change flag");
+            fields.insert("instant".into(), Field::Unsigned(instant.into()));
+        }
         0x00c7 => {
             fields.insert("guid".into(), body.packed_guid()?);
             fields.insert("counter".into(), Field::Unsigned(body.u32()?.into()));
