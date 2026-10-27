@@ -81,3 +81,39 @@ fn reconnect_checked(inv: &Invocation, fixture: &FixtureVerb) -> Result<WireClie
     );
     Ok(client)
 }
+
+pub fn record(invocation: &Invocation, path: &str) -> Result<()> {
+    ensure!(
+        std::env::var("WIRE_ADAPTER").as_deref() == Ok("vmangos"),
+        "Golden Traces must be recorded from the Reference Server adapter"
+    );
+    let [provenance, output] = invocation.args.as_slice() else {
+        bail!("record needs SCENARIO PROVENANCE_JSON OUTPUT");
+    };
+    let provenance: wire_client::trace::Provenance =
+        serde_json::from_slice(&std::fs::read(provenance)?)?;
+    ensure!(
+        provenance.server == "vmangos",
+        "Reference Server provenance must name vmangos"
+    );
+    let scenario_text = std::fs::read_to_string(path)?;
+    let scenario = wire_client::scenario::Scenario::parse(&scenario_text)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_millis()
+        .try_into()?;
+    let header = wire_client::trace::Header::new(&scenario_text, provenance, now)?;
+    ensure!(
+        !std::path::Path::new(output).exists(),
+        "output trace already exists"
+    );
+    let observed = wire_client::scenario::run(&scenario, select(invocation)?.as_mut())?;
+    let trace = wire_client::trace::Trace::record(header, &observed)?;
+    trace.write_new(std::path::Path::new(output))?;
+    println!(
+        "[wire] recorded {}: {} scrubbed packets",
+        scenario.id,
+        trace.packets.len()
+    );
+    Ok(())
+}

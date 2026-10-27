@@ -3,10 +3,12 @@
 #![allow(clippy::type_complexity)]
 
 pub mod cli;
+pub mod compare;
 pub mod decode;
 pub mod metrics;
 pub mod scenario;
 pub mod spatial;
+pub mod trace;
 pub mod values_mask;
 
 pub use cli::{endpoints, set_endpoints, Endpoints};

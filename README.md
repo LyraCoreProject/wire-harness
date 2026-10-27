@@ -66,19 +66,22 @@ The retired shell scenarios and playerbots observer have been removed.
 ## Library
 
 `wire_client` exposes `WireClient`, `Endpoints`, independent `decode` packet fields,
-`values_mask` and `spatial`. `WireClient::login_at` takes explicit endpoints for callers that
+`values_mask`, `spatial`, `scenario`, `trace` and `compare`. `WireClient::login_at` takes explicit endpoints for callers that
 connect to two servers in one process. `decode::decode(opcode, body)` accepts plaintext bodies
 without a socket. Unsupported opcodes, truncated fields and trailing bytes fail.
 
 The conformance runner uses this boundary. See [the scenario format](docs/scenarios.md) for
 Fixture Verbs, checkpoints and in-process reuse. The binary links server setup from `adapters/`;
 the library has no server-specific implementation. Packet text stays in memory until
-the recorder hashes it. No server crate supplies a decoder or a fixture implementation.
+the recorder hashes it. [Golden Traces and comparison](docs/traces.md) describes the file format,
+Equivalence Rules and reusable assertion report. No server crate supplies a decoder or a fixture implementation.
 
 ## Commands
 
 ```
 vanilla-wire smoke --host HOST --account USER --password-stdin --character NAME
+vanilla-wire compare GOLDEN ACTUAL [RULES_JSON]
+vanilla-wire record SCENARIO PROVENANCE_JSON OUTPUT --account USER --character NAME --password-stdin
 vanilla-wire scenario-file PATH --account USER --character NAME --password-stdin
 vanilla-wire scenario NAME [SCENARIO-ARGS…] --account USER --password-stdin [--character NAME]
 vanilla-wire-bench [OPTIONS]        # see --help

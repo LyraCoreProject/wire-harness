@@ -89,6 +89,7 @@ pub fn endpoints() -> &'static Endpoints {
 pub enum Command {
     Smoke,
     ScenarioFile(String),
+    Record(String),
     /// Run the named protocol scenario with `Invocation::args`.
     Scenario(String),
 }
@@ -133,6 +134,8 @@ Speaks the real protocol — SRP6 logon then the encrypted world session — so 
 and assert on decoded SMSG. It is server-agnostic: anything that implements build 5875 will do.
 
 USAGE:
+  vanilla-wire compare GOLDEN ACTUAL [RULES_JSON]
+  vanilla-wire record SCENARIO PROVENANCE_JSON OUTPUT --account USER --character NAME --password-stdin
   vanilla-wire scenario-file PATH --account USER --character NAME --password-stdin
   vanilla-wire smoke --host HOST --account USER --password-stdin --character NAME
   vanilla-wire scenario NAME [SCENARIO-ARGS...] --account USER --password-stdin [--character NAME]
@@ -232,6 +235,11 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs>
     let mut positional = positional.into_iter();
     let command = match positional.next().as_deref() {
         Some("smoke") => Command::Smoke,
+        Some("record") => Command::Record(
+            positional
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("record needs a scenario path"))?,
+        ),
         Some("scenario-file") => Command::ScenarioFile(
             positional
                 .next()
@@ -242,7 +250,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs>
             None => bail!("`scenario` needs a name — e.g. `scenario logout`\n\n{USAGE}"),
         },
         Some(other) => {
-            bail!("unknown command {other:?}: expected smoke, scenario-file or scenario\n\n{USAGE}")
+            bail!("unknown command {other:?}: expected smoke, scenario-file, record or scenario\n\n{USAGE}")
         }
         None => bail!("no command given\n\n{USAGE}"),
     };
