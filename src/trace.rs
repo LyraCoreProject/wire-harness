@@ -58,6 +58,7 @@ pub enum RecordedField {
     Float(f64),
     Guid(u64),
     TimeMs(u64),
+    WallClockMs(u64),
     TextSha256(Sha256Digest),
     List(Vec<RecordedField>),
     Object(BTreeMap<String, RecordedField>),
@@ -71,6 +72,7 @@ impl RecordedField {
             Field::Float(v) => Self::Float(*v),
             Field::Guid(v) => Self::Guid(*v),
             Field::TimeMs(v) => Self::TimeMs(*v),
+            Field::WallClockMs(v) => Self::WallClockMs(*v),
             Field::Text(v) => Self::TextSha256(Sha256Digest::of(v.as_bytes())),
             Field::List(v) => Self::List(v.iter().map(Self::scrub).collect()),
             Field::Object(v) => Self::Object(scrub_fields(v)),
@@ -143,6 +145,13 @@ impl Provenance {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Origin {
+    Golden { provenance: Provenance },
+    Candidate { adapter: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Header {
     pub schema_version: u32,
@@ -150,24 +159,45 @@ pub struct Header {
     pub behavior: String,
     pub scenario_sha256: Sha256Digest,
     pub recorded_at_unix_ms: u64,
-    pub provenance: Provenance,
+    pub origin: Origin,
 }
 
 impl Header {
-    pub fn new(
+    pub fn golden(
         scenario_text: &str,
         provenance: Provenance,
         recorded_at_unix_ms: u64,
     ) -> Result<Self> {
-        let scenario = Scenario::parse(scenario_text)?;
         provenance.validate()?;
+        Self::new(
+            scenario_text,
+            Origin::Golden { provenance },
+            recorded_at_unix_ms,
+        )
+    }
+
+    pub fn candidate(
+        scenario_text: &str,
+        adapter: String,
+        recorded_at_unix_ms: u64,
+    ) -> Result<Self> {
+        ensure!(identifier(&adapter), "invalid candidate adapter identifier");
+        Self::new(
+            scenario_text,
+            Origin::Candidate { adapter },
+            recorded_at_unix_ms,
+        )
+    }
+
+    fn new(scenario_text: &str, origin: Origin, recorded_at_unix_ms: u64) -> Result<Self> {
+        let scenario = Scenario::parse(scenario_text)?;
         Ok(Self {
-            schema_version: 1,
+            schema_version: 2,
             scenario: scenario.id,
             behavior: scenario.behavior,
             scenario_sha256: Sha256Digest::of(scenario_text.as_bytes()),
             recorded_at_unix_ms,
-            provenance,
+            origin,
         })
     }
 }
@@ -215,28 +245,39 @@ impl Trace {
     }
 
     pub fn validate(&self) -> Result<()> {
-        ensure!(self.header.schema_version == 1, "unsupported trace schema");
+        ensure!(self.header.schema_version == 2, "unsupported trace schema");
         ensure!(
             identifier(&self.header.scenario) && identifier(&self.header.behavior),
             "invalid trace identity"
         );
-        self.header.provenance.validate()?;
-        ensure!(
-            !self.packets.is_empty() && self.packets.len() <= 65_536,
-            "trace needs 1 through 65536 packets"
-        );
+        match &self.header.origin {
+            Origin::Golden { provenance } => {
+                provenance.validate()?;
+            }
+            Origin::Candidate { adapter } => {
+                ensure!(identifier(adapter), "invalid candidate adapter identifier")
+            }
+        }
+        ensure!(self.packets.len() <= 65_536, "trace exceeds 65536 packets");
         for packet in &self.packets {
             ensure!(
                 identifier(&packet.checkpoint),
                 "invalid checkpoint identifier"
             );
-            let (Stream::Reply(id) | Stream::Broadcast(id)) = &packet.stream;
-            ensure!(identifier(id), "invalid stream identifier");
-            if matches!(packet.stream, Stream::Reply(_)) {
-                ensure!(
-                    *id == packet.checkpoint,
-                    "reply stream must name its checkpoint request"
-                );
+            match &packet.stream {
+                Stream::Reply(id) => {
+                    ensure!(
+                        *id == packet.checkpoint,
+                        "reply stream must name its checkpoint request"
+                    );
+                }
+                Stream::Broadcast(id) => ensure!(identifier(id), "invalid stream identifier"),
+                Stream::Unexpected | Stream::Malformed => {
+                    ensure!(
+                        packet.fields.is_empty(),
+                        "undecoded packets must not retain fields"
+                    );
+                }
             }
             validate_fields(&packet.fields, 0)?;
         }
@@ -253,5 +294,38 @@ impl Trace {
         file.write_all(&bytes)?;
         file.sync_all()?;
         Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct GoldenTrace {
+    scenario: Scenario,
+    trace: Trace,
+}
+
+impl GoldenTrace {
+    /// Binds rules to the exact scenario bytes hashed by the recorder.
+    pub fn new(scenario_text: &str, trace: Trace) -> Result<Self> {
+        trace.validate()?;
+        ensure!(
+            matches!(trace.header.origin, Origin::Golden { .. }),
+            "expected a Golden Trace, got a candidate"
+        );
+        let scenario = Scenario::parse(scenario_text)?;
+        ensure!(
+            trace.header.scenario_sha256 == Sha256Digest::of(scenario_text.as_bytes())
+                && trace.header.scenario == scenario.id
+                && trace.header.behavior == scenario.behavior,
+            "Golden Trace does not match this scenario revision"
+        );
+        Ok(Self { scenario, trace })
+    }
+
+    pub fn scenario(&self) -> &Scenario {
+        &self.scenario
+    }
+
+    pub fn trace(&self) -> &Trace {
+        &self.trace
     }
 }

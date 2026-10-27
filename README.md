@@ -28,21 +28,23 @@ Build-5875 protocol and nothing else.
 | `src/cli.rs` | Endpoints (`--host`, `--logon-port`, `--world-port`) and identity (`--account`, `--character`, `--class`, `--race`, `--password-stdin`) |
 | `src/values_mask.rs` | `SMSG_UPDATE_OBJECT` VALUES decoder — the harness's OWN implementation |
 | `src/spatial.rs` | Map-coordinate and interest-grid math — the harness's OWN implementation |
-| `src/scenario.rs`, `scenarios/` | TOML scenario model, Fixture Verb trait and wire runner |
+| `src/scenario.rs`, `src/runner.rs`, `scenarios/` | TOML scenario model, Fixture Verb trait and wire runner |
 | `src/main.rs`, `src/scenarios/` | The `smoke` command and the named protocol scenarios |
 | `src/bin/bench/` | `vanilla-wire-bench`, the synthetic-player capacity ramp |
 
 Rules this half keeps:
 
-* **No dependency on any server crate.** Protocol dependencies are the independent gtker crates.
+* **No dependency on any server crate.** The transport client uses the independent gtker crates.
   General-purpose libraries may handle serialization, hashing and errors. This is not a style preference: a path
   dependency on a server is exactly what makes a test client un-runnable against anything else.
 * **No shared decoder with the server.** `values_mask.rs` and `spatial.rs` were once re-exports of
   LyraCore's copies. A test tool that decodes with the encoder's own logic cannot catch an encoder
-  bug — the two errors cancel and a broken server reads green. Independent implementations, with
-  their own unit tests, are the point.
-* **No baked-in fixtures.** No default account, no default password, no default character, no
-  default target name. Every one of those is an argument.
+  bug. Independent implementations have their own unit tests. The conformance decoder and every
+  module the comparator uses may import neither gtker nor LyraCore code.
+  `tests/decoder_boundary.rs` checks that boundary and proves it detects forbidden imports.
+* **No implicit fixtures.** Accounts and passwords come from arguments and stdin. Data scenarios
+  declare their Character fixture, including its name. Other commands require explicit Character
+  and target names.
 * **No password on a command line.** `--password-stdin` is required and takes the password from
   stdin, where `ps`, shell history and CI logs cannot see it. Nothing ever logs it. Scenarios that
   open a second session read that account's password from stdin line 2.
@@ -62,13 +64,19 @@ and assert server state. None of it is protocol.
 `adapter-env.sh` locates a Native Host checkout when setup needs one. See the
 [adapter instructions](adapters/lyracore/README.md) for endpoints and password input.
 The retired shell scenarios and playerbots observer have been removed.
+The [Reference Server adapter](adapters/vmangos/README.md) prepares a pinned vmangos instance in Docker.
 
 ## Library
 
 `wire_client` exposes `WireClient`, `Endpoints`, independent `decode` packet fields,
-`values_mask`, `spatial`, `scenario`, `trace` and `compare`. `WireClient::login_at` takes explicit endpoints for callers that
-connect to two servers in one process. `decode::decode(opcode, body)` accepts plaintext bodies
-without a socket. Unsupported opcodes, truncated fields and trailing bytes fail.
+`values_mask`, `spatial`, `scenario`, `runner`, `catalogue`, `trace` and `compare`.
+`WireClient::login_at` takes explicit endpoints for callers that connect to two servers in one process. `decode::decode(opcode, body)` accepts plaintext bodies
+without a socket. Unsupported opcodes, truncated fields and trailing bytes fail decoding.
+The scenario runner records declared-packet decode failures as differences.
+`WireClient::recv` validates compressed streams and returns compressed object updates as
+`SMSG_UPDATE_OBJECT`; raw reads retain the original opcode and body. The independent VALUES
+parser observes partial masks before typed parsing, so Character fields still update when a
+partial packet lacks the object context that the typed decoder needs.
 
 The conformance runner uses this boundary. See [the scenario format](docs/scenarios.md) for
 Fixture Verbs, checkpoints and in-process reuse. The binary links server setup from `adapters/`;
@@ -80,9 +88,10 @@ Equivalence Rules and reusable assertion report. No server crate supplies a deco
 
 ```
 vanilla-wire smoke --host HOST --account USER --password-stdin --character NAME
-vanilla-wire compare GOLDEN ACTUAL [RULES_JSON]
-vanilla-wire record SCENARIO PROVENANCE_JSON OUTPUT --account USER --character NAME --password-stdin
-vanilla-wire scenario-file PATH --account USER --character NAME --password-stdin
+vanilla-wire compare SCENARIO GOLDEN CANDIDATE [DEVIATIONS_JSON]
+vanilla-wire record SCENARIO PROVENANCE_JSON OUTPUT --account USER --password-stdin
+vanilla-wire candidate SCENARIO OUTPUT --account USER --password-stdin
+vanilla-wire scenario-file PATH --account USER --password-stdin
 vanilla-wire scenario NAME [SCENARIO-ARGS…] --account USER --password-stdin [--character NAME]
 vanilla-wire-bench [OPTIONS]        # see --help
 ```
