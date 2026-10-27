@@ -58,47 +58,10 @@ The orchestration around the client: which accounts a particular dev stack provi
 passwords are, which characters and creature entries the scenarios expect, and the steps that stage
 and assert server state. None of it is protocol.
 
-`adapters/lyracore/` is the one adapter that ships here, because this harness grew inside LyraCore
-and its 47 orchestrators are the harness's own regression history. It is a worked example of what
-an adapter looks like; a second server would get a sibling directory and touch nothing in `src/`.
-
-| Piece | What it is |
-|---|---|
-| `adapters/lyracore/wire.sh` | **The seam.** Fixture credentials, endpoints and class default → the client's CLI |
-| `adapters/lyracore/adapter-env.sh` | Resolves the two roots (this repo, and a LyraCore checkout) |
-| `adapters/lyracore/scenario-lib.sh` | Shared orchestrator helpers (`spacetime sql`/`call`, fixtures, stay sessions) |
-| `adapters/lyracore/test-*.sh`, `wire-suite.sh` | The orchestrators and the regression suite |
-
-Every orchestrator calls the client as `"$WC" <account> <character> [scenario [args…]]`, where
-`$WC` is `adapters/lyracore/wire.sh` (set once, in `scenario-lib.sh`). That is the only path from
-server-specific orchestration into the generic client. Nothing exec's the binary directly except
-`test-login-queue.sh`, which provisions its own throwaway accounts and passes its own password.
-
-Point `WIRE_BIN` at a different build — a downloaded release, say — and the entire suite runs
-against it unchanged.
-
-The LyraCore adapter's **external requirements** (none of which apply to `cargo test`) are stated
-at the top of `adapters/lyracore/adapter-env.sh` and in
-[`adapters/lyracore/README.md`](adapters/lyracore/README.md): a LyraCore checkout
-(`$LYRACORE_DIR`), a running SpacetimeDB node and gateway, the `spacetime` CLI, a module published
-with `--features=debug_reducers`, and the fixture accounts.
-
-#### Adapter configuration
-
-| Variable | Meaning | Default |
-|---|---|---|
-| `LYRACORE_DIR` | Path to a LyraCore checkout | autodetected from `$PWD` |
-| `WIRE_BIN` | Path to the `vanilla-wire` binary | `<this repo>/target/debug/vanilla-wire` |
-| `WIRE_HOST` | Server host | `127.0.0.1` |
-| `WIRE_LOGON_PORT` | Logon tier port | `3724` |
-| `WIRE_WORLD_PORT` | World tier port override | unset (use the realm-list answer) |
-| `WIRE_CLASS` | Class for characters the harness creates | `warlock` (the suite's historical default) |
-| `WIRE_PASSWORD_<ACCOUNT>` | One account's password | see below |
-| `WIRE_FIXTURE_PASSWORD` | Password for the `TEST*` accounts | `test123` |
-
-Fixture credentials are **defaults of the adapter, never of the client**. They describe local
-throwaway accounts on a local dev server; the client itself refuses to run without being told an
-account and given a password.
+`adapters/lyracore/wire.sh` connects to the Native Host with explicit Account credentials.
+`adapter-env.sh` locates a Native Host checkout when setup needs one. See the
+[adapter instructions](adapters/lyracore/README.md) for endpoints and password input.
+The retired shell scenarios and playerbots observer have been removed.
 
 ## Commands
 
@@ -185,17 +148,6 @@ cipher-state continuity, oversized/corrupt compressed frames, the crash-dump rin
 
 The scripts under `adapters/` are **live** tests: they need a running server and that server's
 fixtures. They are not part of `cargo test` and CI never runs them.
-
-The LyraCore bank adapter is Operator-run because it changes a disposable Character's inventory
-and money. It takes the account, Character and banker template explicitly, reads the password from
-stdin, and checks open, deposit, relog persistence, withdrawal and bank bag purchase in order. See
-`adapters/lyracore/test-bank-flow.sh` for its exact command and prerequisites.
-
-The LyraCore dive adapter is also Operator-run. It requires explicit imported-liquid coordinates
-and a disposable Character whose name starts with `Dive`. It checks the imported terrain cell
-before changing the Character, then requires the Breath timer start, matching own Character
-drowning log and health drop, timer stop on surfacing, and durable health and position changes.
-See `adapters/lyracore/test-dive-flow.sh` for its command and prerequisites.
 
 ## Build support
 
