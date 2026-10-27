@@ -22,8 +22,12 @@ fn main() -> Result<()> {
     if let Command::ScenarioFile(path) = &inv.command {
         let scenario = wire_client::scenario::Scenario::parse(&std::fs::read_to_string(path)?)?;
         let mut adapter = adapters::select(&inv)?;
-        let observed = wire_client::runner::run(&scenario, adapter.as_mut())?;
-        let report = wire_client::compare::check_observations(&scenario, &observed)?;
+        let run = wire_client::runner::run(&scenario, adapter.as_mut())?;
+        let report = wire_client::compare::check_character_observations(
+            &scenario,
+            &run.observations,
+            run.character_guid,
+        )?;
         println!("{}", serde_json::to_string_pretty(&report)?);
         if !report.is_match() {
             bail!(
@@ -35,7 +39,7 @@ fn main() -> Result<()> {
         println!(
             "[wire] scenario {} passed: {} observed packets",
             scenario.id,
-            observed.len()
+            run.observations.len()
         );
         return Ok(());
     }

@@ -79,7 +79,7 @@ impl RecordedField {
         }
     }
 
-    fn validate(&self, depth: usize) -> Result<()> {
+    pub(crate) fn validate(&self, depth: usize) -> Result<()> {
         ensure!(depth <= 32, "trace fields exceed 32 levels");
         match self {
             Self::Float(value) => ensure!(value.is_finite(), "non-finite trace field"),
@@ -155,6 +155,7 @@ pub enum Origin {
 #[serde(deny_unknown_fields)]
 pub struct Header {
     pub schema_version: u32,
+    pub character_guid: u64,
     pub scenario: String,
     pub behavior: String,
     pub scenario_sha256: Sha256Digest,
@@ -192,7 +193,8 @@ impl Header {
     fn new(scenario_text: &str, origin: Origin, recorded_at_unix_ms: u64) -> Result<Self> {
         let scenario = Scenario::parse(scenario_text)?;
         Ok(Self {
-            schema_version: 2,
+            schema_version: 3,
+            character_guid: 0,
             scenario: scenario.id,
             behavior: scenario.behavior,
             scenario_sha256: Sha256Digest::of(scenario_text.as_bytes()),
@@ -205,6 +207,7 @@ impl Header {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecordedPacket {
+    pub received_after_ms: Option<u64>,
     pub checkpoint: String,
     pub stream: Stream,
     pub opcode: u16,
@@ -226,6 +229,7 @@ impl Trace {
             packets: observations
                 .iter()
                 .map(|o| RecordedPacket {
+                    received_after_ms: o.received_after_ms,
                     checkpoint: o.checkpoint.clone(),
                     stream: o.stream.clone(),
                     opcode: o.packet.opcode,
@@ -245,7 +249,7 @@ impl Trace {
     }
 
     pub fn validate(&self) -> Result<()> {
-        ensure!(self.header.schema_version == 2, "unsupported trace schema");
+        ensure!(self.header.schema_version == 3, "unsupported trace schema");
         ensure!(
             identifier(&self.header.scenario) && identifier(&self.header.behavior),
             "invalid trace identity"
@@ -259,12 +263,26 @@ impl Trace {
             }
         }
         ensure!(self.packets.len() <= 65_536, "trace exceeds 65536 packets");
+        let mut started = false;
         for packet in &self.packets {
             ensure!(
                 identifier(&packet.checkpoint),
                 "invalid checkpoint identifier"
             );
+            if packet.stream == Stream::Opening {
+                ensure!(
+                    !started && packet.checkpoint == "opening",
+                    "opening packets must precede every step"
+                );
+            } else {
+                started = true;
+                ensure!(
+                    packet.checkpoint != "opening",
+                    "opening checkpoint requires the opening stream"
+                );
+            }
             match &packet.stream {
+                Stream::Opening => (),
                 Stream::Reply(id) => {
                     ensure!(
                         *id == packet.checkpoint,

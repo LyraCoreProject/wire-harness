@@ -1189,11 +1189,8 @@ impl WireClient {
         self.player_login_position(guid).map(|_| ())
     }
 
-    /// Sets self_guid and drains through self creation before returning the login position.
-    pub fn player_login_position(
-        &mut self,
-        guid: u64,
-    ) -> Result<wow_world_messages::vanilla::SMSG_LOGIN_VERIFY_WORLD> {
+    /// Sends login without consuming frames, so conformance can retain the entire opening phase.
+    pub fn start_player_login(&mut self, guid: u64) -> Result<()> {
         self.self_guid = guid;
         self.own_character_health = None;
         self.own_character_ghost = None;
@@ -1201,6 +1198,15 @@ impl WireClient {
         self.send(&CMSG_PLAYER_LOGIN {
             guid: Guid::new(guid),
         })?;
+        Ok(())
+    }
+
+    /// Sets self_guid and drains through self creation before returning the login position.
+    pub fn player_login_position(
+        &mut self,
+        guid: u64,
+    ) -> Result<wow_world_messages::vanilla::SMSG_LOGIN_VERIFY_WORLD> {
+        self.start_player_login(guid)?;
         let WorldSmsg::SMSG_LOGIN_VERIFY_WORLD(position) =
             self.recv_until(|m| matches!(m, WorldSmsg::SMSG_LOGIN_VERIFY_WORLD(_)))?
         else {

@@ -479,7 +479,7 @@ dependencies = [
 
 [[package]]
 name = "wire-client"
-version = "0.2.0-conformance.2"
+version = "0.2.0-conformance.4"
 dependencies = [
  "anyhow",
  "flate2",

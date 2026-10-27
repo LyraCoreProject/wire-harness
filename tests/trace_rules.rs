@@ -35,6 +35,7 @@ fn packet(opcode: u16, value: Field) -> Observation {
         _ => Stream::Reply("query".into()),
     };
     Observation {
+        received_after_ms: None,
         checkpoint: "query".into(),
         stream,
         packet: Packet {
@@ -111,7 +112,7 @@ fn trace_rejects_plaintext_invalid_digests_unknown_fields_and_unpinned_provenanc
     for invalid in [
         json.replace("text_sha256", "text"),
         json.replace(&String::from(Sha256Digest::of(b"abc")), "abc"),
-        json.replace("\"schema_version\":2", "\"schema_version\":99"),
+        json.replace("\"schema_version\":3", "\"schema_version\":99"),
         json.replace(&"a".repeat(40), "latest"),
         json.replacen("{", "{\"plaintext\":\"secret\",", 1),
     ] {
@@ -262,7 +263,7 @@ fn replies_keep_order_while_unrelated_broadcasts_interleave() {
             .unwrap()
             .differences[0]
             .rule,
-        "packet_order"
+        "extra_packet"
     );
     actual.swap(3, 4);
     actual.swap(1, 2);
@@ -373,7 +374,10 @@ fn empty_candidates_and_missing_extra_packets_return_differences() {
         [observed.clone(), observed[..1].to_vec()].concat(),
     ] {
         let report = compare_observations(&expected, &actual, 1000, &[]).unwrap();
-        assert_eq!(report.differences[0].rule, "packet_count");
+        assert!(report
+            .differences
+            .iter()
+            .any(|d| d.rule == "missing_packet" || d.rule == "extra_packet"));
         assert_eq!(report.differences[0].checkpoint, "query");
     }
     let mut changed = expected.trace().clone();
@@ -411,6 +415,7 @@ fn unexpected_packets_count_even_when_both_traces_contain_them_unless_scenario_e
         let text = scenario(&[477], rules);
         let mut observed = observations(&[Field::Unsigned(7)]);
         observed.push(Observation {
+            received_after_ms: None,
             checkpoint: "query".into(),
             stream: Stream::Unexpected,
             packet: Packet {
@@ -484,6 +489,7 @@ fn unexpected_packet_deviations_report_every_occurrence() {
     let mut actual = observed;
     for _ in 0..2 {
         actual.push(Observation {
+            received_after_ms: None,
             checkpoint: "query".into(),
             stream: Stream::Unexpected,
             packet: Packet {
@@ -533,4 +539,175 @@ fn trace_writer_never_overwrites() {
         *expected.trace()
     );
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn opening_is_scrubbed_but_does_not_compare_or_establish_guid_mappings() {
+    let text = scenario(&[477], "");
+    let mut opening = packet(81, Field::Text("Private name".into()));
+    opening.checkpoint = "opening".into();
+    opening.stream = Stream::Opening;
+    opening.packet.fields.insert("guid".into(), Field::Guid(7));
+    let expected = golden(&text, &[opening, packet(477, Field::Guid(7))], 1000);
+    assert!(!serde_json::to_string(expected.trace())
+        .unwrap()
+        .contains("Private name"));
+    let actual = vec![
+        Observation::opening(0xffff, b"secret"),
+        packet(477, Field::Guid(90)),
+    ];
+    assert!(compare_observations(&expected, &actual, 1000, &[])
+        .unwrap()
+        .is_match());
+    assert!(compare_observations(&expected, &[], 1000, &[])
+        .unwrap()
+        .differences
+        .iter()
+        .any(|d| d.rule == "missing_packet"));
+}
+
+#[test]
+fn an_opening_label_cannot_hide_packets_after_a_step() {
+    let text = scenario(&[477], "");
+    assert!(Trace::record(
+        header(&text, 1000),
+        &[
+            packet(477, Field::Unsigned(7)),
+            Observation::opening(0xffff, b"secret")
+        ]
+    )
+    .is_err());
+    let mut opening = Observation::opening(0xffff, b"");
+    opening.checkpoint = "query".into();
+    assert!(Trace::record(header(&text, 1000), &[opening]).is_err());
+}
+
+fn long_stream() -> (GoldenTrace, Vec<Observation>) {
+    let text = scenario(&vec![477; 120], "");
+    let packets = observations(&(0..120).map(Field::Unsigned).collect::<Vec<_>>());
+    (golden(&text, &packets, 1000), packets)
+}
+
+#[test]
+fn one_missing_packet_in_a_long_stream_is_one_difference() {
+    let (expected, mut actual) = long_stream();
+    actual.remove(37);
+    let report = compare_observations(&expected, &actual, 1000, &[]).unwrap();
+    assert_eq!(report.differences.len(), 1);
+    assert_eq!(report.differences[0].rule, "missing_packet");
+    assert_eq!(report.differences[0].packet_index, Some(37));
+}
+
+#[test]
+fn one_extra_packet_in_a_long_stream_is_one_difference() {
+    let (expected, mut actual) = long_stream();
+    actual.insert(37, packet(477, Field::Unsigned(500)));
+    let report = compare_observations(&expected, &actual, 1000, &[]).unwrap();
+    assert_eq!(report.differences.len(), 1);
+    assert_eq!(report.differences[0].rule, "extra_packet");
+    assert_eq!(report.differences[0].packet_index, Some(37));
+}
+
+#[test]
+fn a_changed_field_after_a_missing_packet_compares_at_its_reference_index() {
+    let (expected, mut actual) = long_stream();
+    actual.remove(37);
+    actual[79]
+        .packet
+        .fields
+        .insert("value".into(), Field::Unsigned(500));
+    let report = compare_observations(&expected, &actual, 1000, &[]).unwrap();
+    assert_eq!(report.differences.len(), 2);
+    let changed = &report.differences[1];
+    assert_eq!(changed.rule, "exact_field");
+    assert_eq!(changed.packet_index, Some(80));
+    assert_eq!(changed.expected, Some(RecordedField::Unsigned(80)));
+    assert_eq!(changed.actual, Some(RecordedField::Unsigned(500)));
+    let again = compare_observations(&expected, &actual, 1000, &[]).unwrap();
+    assert_eq!(
+        serde_json::to_string(&report).unwrap(),
+        serde_json::to_string(&again).unwrap()
+    );
+}
+
+#[test]
+fn a_missing_list_item_does_not_shift_later_field_comparisons() {
+    let text = scenario(&[477], "");
+    let items: Vec<_> = (0..80).map(Field::Unsigned).collect();
+    let expected = golden(&text, &[packet(477, Field::List(items.clone()))], 1000);
+    let mut actual = items;
+    actual.remove(20);
+    let report =
+        compare_observations(&expected, &[packet(477, Field::List(actual))], 1000, &[]).unwrap();
+    assert_eq!(report.differences.len(), 1);
+    assert_eq!(report.differences[0].field_path, ["value", "20"]);
+}
+
+#[test]
+fn alignment_uses_subject_guids_mapped_by_an_earlier_reply() {
+    let text = scenario(&[477], "");
+    let make = |offset: u64| {
+        let mut packets = vec![packet(
+            477,
+            Field::List((1..=40).map(|i| Field::Guid(offset + i)).collect()),
+        )];
+        for i in 1..=40 {
+            let mut observed = packet(507, Field::Unsigned(i));
+            observed
+                .packet
+                .fields
+                .insert("guid".into(), Field::Guid(offset + i));
+            packets.push(observed);
+        }
+        packets
+    };
+    let expected = golden(&text, &make(0), 1000);
+    let mut actual = make(100);
+    actual.remove(8);
+    actual[29]
+        .packet
+        .fields
+        .insert("value".into(), Field::Unsigned(500));
+    let report = compare_observations(&expected, &actual, 1000, &[]).unwrap();
+    assert_eq!(report.differences.len(), 2);
+    assert_eq!(report.differences[0].rule, "missing_packet");
+    assert_eq!(report.differences[0].packet_index, Some(7));
+    assert_eq!(
+        report.differences[1].expected,
+        Some(RecordedField::Unsigned(30))
+    );
+    assert_eq!(
+        report.differences[1].actual,
+        Some(RecordedField::Unsigned(500))
+    );
+}
+
+#[test]
+fn data_field_exceptions_preserve_presence_shape_and_typed_identity_fields() {
+    let rule = "[[rules.data_fields]]\nname='catalogue'\nreason='The catalogue depends on world data.'\nopcode=477\npath=['value']";
+    assert!(matches(&[Field::Unsigned(1)], &[Field::Unsigned(2)], rule));
+    assert!(!matches(&[Field::Unsigned(1)], &[Field::Signed(1)], rule));
+    for value in [Field::Guid(1), Field::TimeMs(1), Field::WallClockMs(1000)] {
+        assert!(!matches(
+            std::slice::from_ref(&value),
+            std::slice::from_ref(&value),
+            rule
+        ));
+    }
+    let text = scenario(&[477], rule);
+    let expected = golden(&text, &[packet(477, Field::Unsigned(1))], 1000);
+    let mut actual = packet(477, Field::Unsigned(2));
+    actual.packet.fields.clear();
+    let report = compare_observations(&expected, &[actual], 1000, &[]).unwrap();
+    assert!(report
+        .differences
+        .iter()
+        .any(|difference| difference.rule == "field_shape"));
+    for invalid in [
+        rule.replace("['value']", "[]"),
+        rule.replace("The catalogue depends on world data.", ""),
+        format!("{rule}\n{rule}"),
+    ] {
+        assert!(Scenario::parse(&scenario(&[477], &invalid)).is_err());
+    }
 }

@@ -27,3 +27,20 @@ LYRACORE_WIRE_HARNESS_DIR=/path/to/wire-harness ./lyracore dev smoke ACCOUNT Cha
 The CLI builds and runs `vanilla-wire smoke` directly, with the password on stdin. Keep the binary
 name, `adapters/lyracore/` directory and `wire.sh` available for CLI consumers. No adapter starts,
 restarts or provisions a Realm. Use a local Realm you own.
+
+## Data scenarios
+
+The fixture adapter calls these existing debug reducers as the Operator: `debug_set_level(character_guid, level)`,
+`debug_teleport(character_guid, map_id, x, y, z, orientation)`,
+`debug_set_money(character_guid: u64, copper: u32)` and
+`debug_spawn_at_feet(character_guid: u64, creature_entry: u32, offset: f32)`.
+Creature offsets follow the Character's orientation. Captured CREATE updates bind each scenario
+creature id to the spawned GUID and verify its entry and position.
+
+The known-node verb calls the agreed T2d reducer
+`debug_learn_taxi_node(character_guid: u64, node_id: u32)`. Core must restrict it to the Operator and
+`debug_reducers`, validate the Character and `game_taxi_node`, and use the discovery path to persist
+the known node without starting a flight or sending a packet. The adapter's exact call is unit-tested;
+live verification of this verb and the complete LyraCore taxi scenario is pending T2d. The other
+required reducers already exist. Fixture creatures in LyraCore live for the disposable Realm's
+lifetime; use a fresh Realm when resetting them.
