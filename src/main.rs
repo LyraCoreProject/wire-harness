@@ -1,16 +1,7 @@
-//! `vanilla-wire` — the standalone build-5875 wire client's driver binary.
-//!
-//! Two commands (see `wire_client::cli::USAGE`):
-//!   * `smoke` — logon → world handshake → enter the world → report. The generic acceptance test:
-//!     it asserts nothing project-specific, so it passes against ANY working 5875 server given a
-//!     reachable host and valid credentials.
-//!   * `scenario NAME [ARGS…]` — one named protocol scenario (`src/scenarios/`).
-//!
-//! Every server fact (host, ports) and every identity fact (account, character, class, password)
-//! comes from the CLI. Nothing here knows what server it is talking to.
-
 use anyhow::{bail, Result};
 
+#[path = "../adapters/mod.rs"]
+mod adapters;
 mod scenarios;
 use wire_client::cli::{invocation, Command};
 use wire_client::WireClient;
@@ -18,6 +9,17 @@ use wow_world_messages::vanilla::opcodes::ServerOpcodeMessage as Smsg;
 
 fn main() -> Result<()> {
     let inv = invocation()?;
+    if let Command::ScenarioFile(path) = &inv.command {
+        let scenario = wire_client::scenario::Scenario::parse(&std::fs::read_to_string(path)?)?;
+        let mut adapter = adapters::select(&inv)?;
+        let observed = wire_client::scenario::run(&scenario, adapter.as_mut())?;
+        println!(
+            "[wire] scenario {} passed: {} decoded packets",
+            scenario.id,
+            observed.len()
+        );
+        return Ok(());
+    }
     let (account, password, char_name) = (
         inv.account.clone(),
         inv.password.clone(),
@@ -25,6 +27,7 @@ fn main() -> Result<()> {
     );
     let mode: Option<&str> = match &inv.command {
         Command::Smoke => None,
+        Command::ScenarioFile(_) => unreachable!("scenario-file returned above"),
         Command::Scenario(name) => Some(name.as_str()),
     };
     let mut args = inv.args.clone().into_iter();

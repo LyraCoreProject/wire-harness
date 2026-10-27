@@ -31,7 +31,11 @@ older `rust-version` in `Cargo.toml` — don't raise it casually.
 
 ## Adding a scenario
 
-A scenario is one function in `src/scenarios/`, reached by name through
+Conformance scenarios are TOML files under `scenarios/`. Follow [the format](docs/scenarios.md).
+Implement each Fixture Verb in both server adapters before adding a scenario that uses it.
+Keep Account credentials outside the scenario.
+
+The older protocol checks use one function in `src/scenarios/`, reached by name through
 `vanilla-wire scenario NAME`. Document its arguments in a `// Usage: vanilla-wire scenario …`
 comment directly above it, register it in its family's dispatcher, and keep every server-specific
 value (guids, entries, coordinates, account names) in the caller's hands as an argument.
@@ -40,9 +44,8 @@ value (guids, entries, coordinates, account names) in the caller's hands as an a
 
 Create `adapters/<server>/` alongside `adapters/lyracore/`. It needs its own seam script — the
 equivalent of `wire.sh`, translating that server's fixture identities into the client's CLI — and a
-README stating the external requirements its scripts assume. Nothing in `src/` should have to
-change; if it does, that is a sign the client is missing a flag rather than a sign the boundary
-should move.
+README stating the external requirements its scripts assume. Register Fixture Verb implementations in `adapters/mod.rs`. The binary imports that module;
+the library does not link it. Keep setup and server constants out of `src/`.
 
 ## Live tests
 

@@ -5,6 +5,7 @@
 pub mod cli;
 pub mod decode;
 pub mod metrics;
+pub mod scenario;
 pub mod spatial;
 pub mod values_mask;
 
@@ -816,7 +817,7 @@ impl WireClient {
                 Ok(m) => {
                     self.note_update(&m);
                     if matches!(m, WorldSmsg::SMSG_NEW_WORLD(_)) {
-                        let _ = self.send(&MSG_MOVE_WORLDPORT_ACK {});
+                        self.send(&MSG_MOVE_WORLDPORT_ACK {})?;
                     }
                     return Ok(m);
                 }
@@ -1124,9 +1125,15 @@ impl WireClient {
         Ok(r.result)
     }
 
-    /// Enter the world as `guid`, draining the post-login burst up to (and including) the
-    /// self CREATE_OBJECT. Sets `self_guid`.
     pub fn player_login(&mut self, guid: u64) -> Result<()> {
+        self.player_login_position(guid).map(|_| ())
+    }
+
+    /// Sets self_guid and drains through self creation before returning the login position.
+    pub fn player_login_position(
+        &mut self,
+        guid: u64,
+    ) -> Result<wow_world_messages::vanilla::SMSG_LOGIN_VERIFY_WORLD> {
         self.self_guid = guid;
         self.own_character_health = None;
         self.own_character_ghost = None;
@@ -1134,10 +1141,11 @@ impl WireClient {
         self.send(&CMSG_PLAYER_LOGIN {
             guid: Guid::new(guid),
         })?;
-        // The burst starts with SMSG_LOGIN_VERIFY_WORLD and ends with the self CREATE_OBJECT.
-        self.recv_until(|m| matches!(m, WorldSmsg::SMSG_LOGIN_VERIFY_WORLD(_)))?;
-        // Drain through the self-spawn CREATE_OBJECT so subsequent reads are gameplay traffic, capturing
-        // SMSG_INITIAL_SPELLS (the client spellbook) en route.
+        let WorldSmsg::SMSG_LOGIN_VERIFY_WORLD(position) =
+            self.recv_until(|m| matches!(m, WorldSmsg::SMSG_LOGIN_VERIFY_WORLD(_)))?
+        else {
+            unreachable!("matched login position")
+        };
         loop {
             let m = self.recv()?;
             match &m {
@@ -1162,7 +1170,7 @@ impl WireClient {
                 _ => {}
             }
         }
-        Ok(())
+        Ok(*position)
     }
 
     /// Select a target by guid (CMSG_SET_SELECTION).

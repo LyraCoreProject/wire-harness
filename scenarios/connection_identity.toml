@@ -1,0 +1,20 @@
+schema_version = 1
+id = "connection_identity"
+behavior = "connection_identity"
+
+[[fixtures]]
+verb = "character"
+race = "human"
+class = "warrior"
+level = 1
+at = { map = 0, x = -8949.95, y = -132.493, z = 83.5312, orientation = 0.0 }
+
+[[steps]]
+id = "ping"
+send = { opcode = "CMSG_PING", sequence = 7, latency_ms = 0 }
+checkpoint = { window_ms = 250, replies = [477] }
+
+[[steps]]
+id = "name"
+send = { opcode = "CMSG_NAME_QUERY", target = "character" }
+checkpoint = { window_ms = 250, replies = [81] }

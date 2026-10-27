@@ -28,6 +28,7 @@ Build-5875 protocol and nothing else.
 | `src/cli.rs` | Endpoints (`--host`, `--logon-port`, `--world-port`) and identity (`--account`, `--character`, `--class`, `--race`, `--password-stdin`) |
 | `src/values_mask.rs` | `SMSG_UPDATE_OBJECT` VALUES decoder — the harness's OWN implementation |
 | `src/spatial.rs` | Map-coordinate and interest-grid math — the harness's OWN implementation |
+| `src/scenario.rs`, `scenarios/` | TOML scenario model, Fixture Verb trait and wire runner |
 | `src/main.rs`, `src/scenarios/` | The `smoke` command and the named protocol scenarios |
 | `src/bin/bench/` | `vanilla-wire-bench`, the synthetic-player capacity ramp |
 
@@ -69,13 +70,16 @@ The retired shell scenarios and playerbots observer have been removed.
 connect to two servers in one process. `decode::decode(opcode, body)` accepts plaintext bodies
 without a socket. Unsupported opcodes, truncated fields and trailing bytes fail.
 
-The conformance scenarios and comparator will use this boundary. Packet text stays in memory until
+The conformance runner uses this boundary. See [the scenario format](docs/scenarios.md) for
+Fixture Verbs, checkpoints and in-process reuse. The binary links server setup from `adapters/`;
+the library has no server-specific implementation. Packet text stays in memory until
 the recorder hashes it. No server crate supplies a decoder or a fixture implementation.
 
 ## Commands
 
 ```
 vanilla-wire smoke --host HOST --account USER --password-stdin --character NAME
+vanilla-wire scenario-file PATH --account USER --character NAME --password-stdin
 vanilla-wire scenario NAME [SCENARIO-ARGS…] --account USER --password-stdin [--character NAME]
 vanilla-wire-bench [OPTIONS]        # see --help
 ```

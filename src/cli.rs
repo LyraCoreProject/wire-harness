@@ -85,18 +85,15 @@ pub fn endpoints() -> &'static Endpoints {
         .unwrap_or_else(|| FALLBACK.get_or_init(Endpoints::default))
 }
 
-/// What the invocation asked for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
-    /// Log in, enter the world, report what came back, exit. The generic acceptance test: it needs
-    /// nothing from the server but a working 5875 implementation and valid credentials.
     Smoke,
+    ScenarioFile(String),
     /// Run the named protocol scenario with `Invocation::args`.
     Scenario(String),
 }
 
-/// A fully parsed invocation, password included.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Invocation {
     pub command: Command,
     pub endpoints: Endpoints,
@@ -105,8 +102,7 @@ pub struct Invocation {
     pub class: Class,
     pub race: Race,
     pub password: String,
-    /// Passwords for the EXTRA accounts a multi-session scenario logs in as, in the order the
-    /// scenario asks for them. Read from the 2nd..Nth line of stdin — never from argv.
+    /// Passwords from stdin lines 2 onward, in session order.
     pub peer_passwords: Vec<String>,
     /// Positional arguments after the command (and after the scenario name).
     pub args: Vec<String>,
@@ -137,6 +133,7 @@ Speaks the real protocol — SRP6 logon then the encrypted world session — so 
 and assert on decoded SMSG. It is server-agnostic: anything that implements build 5875 will do.
 
 USAGE:
+  vanilla-wire scenario-file PATH --account USER --character NAME --password-stdin
   vanilla-wire smoke --host HOST --account USER --password-stdin --character NAME
   vanilla-wire scenario NAME [SCENARIO-ARGS...] --account USER --password-stdin [--character NAME]
 
@@ -235,12 +232,17 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs>
     let mut positional = positional.into_iter();
     let command = match positional.next().as_deref() {
         Some("smoke") => Command::Smoke,
+        Some("scenario-file") => Command::ScenarioFile(
+            positional
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("scenario-file needs a TOML path"))?,
+        ),
         Some("scenario") => match positional.next() {
             Some(name) => Command::Scenario(name),
             None => bail!("`scenario` needs a name — e.g. `scenario logout`\n\n{USAGE}"),
         },
         Some(other) => {
-            bail!("unknown command {other:?} — expected `smoke` or `scenario`\n\n{USAGE}")
+            bail!("unknown command {other:?}: expected smoke, scenario-file or scenario\n\n{USAGE}")
         }
         None => bail!("no command given\n\n{USAGE}"),
     };
