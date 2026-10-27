@@ -1380,7 +1380,13 @@ pub fn compare(
                         .packet_timing
                         .iter()
                         .enumerate()
-                        .filter(|(_, rule)| rule.applies(e) || rule.applies(a))
+                        .filter(|(_, rule)| {
+                            if rule.values_only {
+                                rule.applies(e) && rule.applies(a)
+                            } else {
+                                rule.applies(e) || rule.applies(a)
+                            }
+                        })
                         .max_by_key(|(_, rule)| rule.path.len())
                     {
                         comparator.used_timing.insert(index);

@@ -642,6 +642,37 @@ tolerance_ms = 1150
             }
         }
     }
+    let mut unscoped: toml::Value = toml::from_str(&text).unwrap();
+    unscoped["rules"]
+        .as_table_mut()
+        .unwrap()
+        .remove("character_scope");
+    let unscoped = toml::to_string(&unscoped).unwrap();
+    let mut observed = make(7);
+    let mut later_flag = observed[4].clone();
+    later_flag.received_after_ms = Some(20000);
+    observed.push(later_flag);
+    let expected = golden(&unscoped, &observed);
+    let mut actual = observed;
+    actual[4].received_after_ms = Some(10951);
+    let Field::List(objects) = actual[4].packet.fields.get_mut("objects").unwrap() else {
+        panic!()
+    };
+    let Field::Object(object) = &mut objects[0] else {
+        panic!()
+    };
+    object.insert("kind".into(), Field::Unsigned(2));
+    let report = compare_character_observations(&expected, &actual, 7, 1000, &[]).unwrap();
+    assert_eq!(report.rule_difference_count(), 2);
+    assert!(report
+        .differences
+        .iter()
+        .any(|difference| difference.rule == "passenger_delivery"));
+    assert!(report
+        .differences
+        .iter()
+        .any(|difference| difference.rule == "exact_field"
+            && difference.field_path == ["objects", "0", "kind"]));
 }
 
 #[test]
