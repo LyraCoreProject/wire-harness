@@ -1,9 +1,3 @@
-# CI runs offline: no server, no server checkout,
-# no network beyond crates.io. That is the property worth protecting — the moment CI needs a running
-# LyraCore to go green, the boundary this repository exists to draw has quietly moved.
-#
-# Live scenarios require a running Realm and do not run here. The playerbots observer tests
-# parse retained input; the suite runner uses temporary scenario scripts.
 name: ci
 
 on:
@@ -25,16 +19,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Linux is where it is developed; macOS is the one that catches the assumptions a Linux-only
-        # tool accretes (BSD userland, case-insensitive FS, a different linker).
         os: [ubuntu-latest, macos-latest]
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
-      # No toolchain action: rust-toolchain.toml pins the version and rustup (preinstalled on both
-      # runners) honours it for every cargo command run in this repo. Installing a toolchain here
-      # would be a second, silently-diverging source of truth.
       - name: Show the pinned toolchain
         run: rustup show active-toolchain && cargo --version
 
@@ -45,8 +34,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-            adapters/lyracore/playerbots/target
-          key: ci-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'adapters/lyracore/playerbots/Cargo.lock', 'rust-toolchain.toml') }}
+          key: ci-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: ci-${{ runner.os }}-
 
       - name: Format
@@ -55,33 +43,14 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --locked -- -D warnings
 
-      # --locked: the lockfile is committed and a CI run must not silently resolve a different
-      # dependency tree than the one a developer tested against.
       - name: Test
         run: cargo test --locked
 
-      # The generic client must build with nothing else present. `cargo test` already proves that
-      # (there is no server crate in the tree to depend on), so this is the release-profile check
-      # that the binaries the adapters and #246 consume actually link.
       - name: Build release binaries
         run: cargo build --release --locked --bins
 
-      - name: Check the playerbots observer offline
-        shell: bash
-        run: |
-          cargo fmt --manifest-path adapters/lyracore/playerbots/Cargo.toml --check
-          cargo clippy --manifest-path adapters/lyracore/playerbots/Cargo.toml --all-targets --locked -- -D warnings
-          cargo test --manifest-path adapters/lyracore/playerbots/Cargo.toml --locked
-          cargo build --manifest-path adapters/lyracore/playerbots/Cargo.toml --release --locked
-
-      - name: Test suite dispatch without a Realm
-        shell: bash
-        run: |
-          bash tests/lyracore-suite.sh
-          bash tests/lyracore-bank-flow.sh
-          bash tests/lyracore-dive-flow.sh
-          bash tests/lyracore-operator-actor.sh
-          bash tests/lyracore-party-isolation.sh
+      - name: Test adapter arguments
+        run: python3 -m unittest discover -s tests -p "test_*.py"
 
       - name: Syntax-check the adapter scripts
         shell: bash
@@ -102,8 +71,6 @@ jobs:
       - name: Cache cargo registry + coverage target dir
         uses: actions/cache@v4
         with:
-          # cargo-llvm-cov builds into its OWN target subdirectory so a coverage run never
-          # invalidates a normal build cache.
           path: |
             ~/.cargo/registry
             ~/.cargo/git
@@ -117,31 +84,19 @@ jobs:
           rustup component add llvm-tools-preview
           cargo llvm-cov --version || cargo install cargo-llvm-cov --locked
 
-      # ONE instrumented build (--no-report), then three cheap reports off the same profdata: the
-      # human-readable table in the log, the per-line HTML, and the gate. Running `cargo llvm-cov`
-      # three times over would rebuild three times.
       - name: Measure
         run: cargo llvm-cov --locked --no-report
 
-      # Printed BEFORE the gate, unconditionally, so a failing run says which number moved instead
-      # of only that one did.
       - name: Report
         run: |
           cargo llvm-cov report --summary-only
           cargo llvm-cov report --html --output-dir target/coverage
 
-      # A RATCHET, not a target. The floors sit just under the measured baseline. They are low
-      # because most of the crate is scenario code whose only honest exercise is a live server —
-      # the covered part is the protocol core (values_mask 100%, spatial 100%, cli 79%, framing).
-      # Raise them from a measurement; lowering one is a deliberate act that belongs in the same
-      # commit as whatever removed the coverage.
       - name: Enforce the floors
         run: |
           cargo llvm-cov report --summary-only \
             --fail-under-lines 25 --fail-under-regions 25 --fail-under-functions 25
 
-      # always(): a FAILING run still ships the per-line HTML, which is exactly what a reviewer
-      # needs to see which lines the branch stopped covering.
       - name: Upload coverage artifacts
         if: always()
         uses: actions/upload-artifact@v4
