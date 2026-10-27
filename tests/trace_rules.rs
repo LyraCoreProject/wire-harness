@@ -381,3 +381,14 @@ fn random_paths_are_scoped_to_the_opcode_and_nested_location() {
     rules.random[0].opcode = 2;
     assert!(!compare(&e, &a, &rules).unwrap().is_match());
 }
+
+#[test]
+fn committed_recording_parses_and_names_the_current_scenario_revision() {
+    let recorded = Trace::parse(include_bytes!("../traces/connection_identity.json")).unwrap();
+    let scenario = include_str!("../scenarios/connection_identity.toml");
+    let expected = Header::new(scenario, recorded.header.provenance.clone(), 0).unwrap();
+    assert_eq!(recorded.header.scenario, expected.scenario);
+    assert_eq!(recorded.header.behavior, expected.behavior);
+    assert_eq!(recorded.header.scenario_sha256, expected.scenario_sha256);
+    assert_eq!(recorded.header.provenance.server, "vmangos");
+}

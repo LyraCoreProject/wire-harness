@@ -1,0 +1,49 @@
+name: lyracore-reference
+services:
+  database:
+    image: mariadb:10.11.15@sha256:85c39719200637250bb8abe3ccd239239d6f175156fc1698141409fcf8e01a38
+    env_file: ${REFERENCE_ROOT:?run setup.py}/db.env
+    volumes:
+      - ${REFERENCE_ROOT}/database:/var/lib/mysql
+      - ${REFERENCE_ROOT}/init:/docker-entrypoint-initdb.d:ro
+      - ${REFERENCE_ROOT}/imports:/imports:ro
+    healthcheck:
+      test: [CMD, healthcheck.sh, --connect, --innodb_initialized]
+      interval: 2s
+      timeout: 5s
+      retries: 90
+    mem_limit: 1g
+  auth:
+    image: ubuntu:24.04@sha256:24737cef17f4e22b1977df7d9a05e77c4e28b7da5b8911f8d8ccda136bf3573c
+    user: ${REFERENCE_UID:?run setup.py}:${REFERENCE_GID:?run setup.py}
+    environment:
+      LD_LIBRARY_PATH: /opt/vmangos/lib
+    command: [/opt/vmangos/bin/realmd, -c, /runtime/config/realmd.conf]
+    working_dir: /runtime
+    volumes:
+      - ${REFERENCE_ROOT}/binaries/vmangos-linux-amd64:/opt/vmangos:ro
+      - ${REFERENCE_ROOT}/config:/runtime/config:ro
+      - ${REFERENCE_ROOT}/logs:/runtime/logs
+    ports: ["127.0.0.1:13724:3724"]
+    depends_on:
+      database:
+        condition: service_healthy
+    mem_limit: 256m
+  world:
+    image: ubuntu:24.04@sha256:24737cef17f4e22b1977df7d9a05e77c4e28b7da5b8911f8d8ccda136bf3573c
+    user: ${REFERENCE_UID}:${REFERENCE_GID}
+    environment:
+      LD_LIBRARY_PATH: /opt/vmangos/lib
+    command: [/opt/vmangos/bin/mangosd, -c, /runtime/config/mangosd.conf]
+    working_dir: /runtime
+    volumes:
+      - ${REFERENCE_ROOT}/binaries/vmangos-linux-amd64:/opt/vmangos:ro
+      - ${REFERENCE_ROOT}/config:/runtime/config:ro
+      - ${REFERENCE_ROOT}/data:/runtime/data:ro
+      - ${REFERENCE_ROOT}/logs:/runtime/logs
+    ports: ["127.0.0.1:18085:8085"]
+    depends_on:
+      database:
+        condition: service_healthy
+    mem_limit: 3g
+    cpus: 2

@@ -12,7 +12,8 @@ WIRE_ADAPTER=vmangos vanilla-wire record scenarios/connection_identity.toml \
   --account ACCOUNT --character Freshname --password-stdin
 ```
 
-The command requires a fresh output path and a fresh Character. It verifies the scenario and
+The command requires a fresh output path and a fresh Character. Use the same Character name
+on the reference and candidate servers because name digests compare exactly. It verifies the scenario and
 fixtures before recording. It accepts only the Reference Server adapter and vmangos provenance.
 The setup script supplies the provenance file. It names the binary release, SHA-256 of its archive,
 full source SHA and full database commit. The header also carries the scenario id, Behavior,

@@ -62,6 +62,7 @@ and assert server state. None of it is protocol.
 `adapter-env.sh` locates a Native Host checkout when setup needs one. See the
 [adapter instructions](adapters/lyracore/README.md) for endpoints and password input.
 The retired shell scenarios and playerbots observer have been removed.
+The [Reference Server adapter](adapters/vmangos/README.md) prepares a pinned vmangos instance in Docker.
 
 ## Library
 
@@ -69,6 +70,10 @@ The retired shell scenarios and playerbots observer have been removed.
 `values_mask`, `spatial`, `scenario`, `trace` and `compare`. `WireClient::login_at` takes explicit endpoints for callers that
 connect to two servers in one process. `decode::decode(opcode, body)` accepts plaintext bodies
 without a socket. Unsupported opcodes, truncated fields and trailing bytes fail.
+`WireClient::recv` validates compressed streams and returns compressed object updates as
+`SMSG_UPDATE_OBJECT`; raw reads retain the original opcode and body. The independent VALUES
+parser observes partial masks before typed parsing, so Character fields still update when a
+partial packet lacks the object context that the typed decoder needs.
 
 The conformance runner uses this boundary. See [the scenario format](docs/scenarios.md) for
 Fixture Verbs, checkpoints and in-process reuse. The binary links server setup from `adapters/`;

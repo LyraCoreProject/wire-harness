@@ -53,14 +53,10 @@ use wow_world_messages::Guid;
 /// Port assumed when a `--logon`/`logon_at` address names a bare host.
 const LOGON_PORT: u16 = cli::DEFAULT_LOGON_PORT;
 
-/// `SMSG_COMPRESSED_MOVES` carries a u32 decompressed-size prefix inside the protocol's already
-/// bounded u16 frame. The generated wow_messages 0.3 decoder trusts that prefix for two allocations
-/// and unwraps zlib errors, so inspect it before handing the frame over. Four MiB is orders of
-/// magnitude above a legitimate 1.12 movement batch while keeping one corrupt session from asking
-/// the process allocator for hundreds of GiB (issue #210).
+// Both compressed packet layouts start with the uncompressed size as a little-endian u32.
 const SMSG_COMPRESSED_MOVES_OPCODE: u16 = 0x02FB;
-/// Vanilla `SMSG_UPDATE_OBJECT`. Kept here because partial VALUES frames cannot pass through the
-/// generated decoder, but their fields still update client-observed state.
+const SMSG_COMPRESSED_UPDATE_OBJECT_OPCODE: u16 = 0x01F6;
+// See README.md for partial VALUES handling before typed parsing.
 const SMSG_UPDATE_OBJECT_OPCODE: u16 = 0x00A9;
 const UNIT_FIELD_HEALTH_INDEX: u16 = 22;
 const PLAYER_FLAGS_INDEX: u16 = 190;
@@ -406,15 +402,16 @@ fn read_guarded_world_message<R: Read>(
     let preview_len = payload_len.min(FRAME_DIAGNOSTIC_BYTES);
     let preview = body[..preview_len].to_vec();
     log.record_attempt(header_raw, opcode, &preview);
-    observe_frame(opcode, &body);
-
-    if opcode == SMSG_COMPRESSED_MOVES_OPCODE {
+    if matches!(
+        opcode,
+        SMSG_COMPRESSED_MOVES_OPCODE | SMSG_COMPRESSED_UPDATE_OBJECT_OPCODE
+    ) {
         if payload_len < 4 {
             return Err(unsafe_frame(
                 opcode,
                 &preview,
                 format!(
-                    "compressed-moves payload is {payload_len} bytes; the decompressed-size prefix needs 4"
+                    "compressed payload is {payload_len} bytes; the decompressed-size prefix needs 4"
                 ),
             ));
         }
@@ -428,6 +425,39 @@ fn read_guarded_world_message<R: Read>(
                 ),
             ));
         }
+        let mut decoder = flate2::Decompress::new(true);
+        let mut inflated = Vec::with_capacity(declared + 1);
+        let status = decoder
+            .decompress_vec(&body[4..], &mut inflated, flate2::FlushDecompress::Finish)
+            .map_err(|_| unsafe_frame(opcode, &preview, "invalid compressed payload"))?;
+        if status != flate2::Status::StreamEnd
+            || inflated.len() != declared
+            || decoder.total_in() != (body.len() - 4) as u64
+        {
+            return Err(unsafe_frame(
+                opcode,
+                &preview,
+                "compressed payload size mismatch",
+            ));
+        }
+        if opcode == SMSG_COMPRESSED_UPDATE_OBJECT_OPCODE {
+            let count = inflated
+                .get(..4)
+                .and_then(|v| v.try_into().ok())
+                .map(u32::from_le_bytes);
+            if count.map_or(true, |count| {
+                count as usize > inflated.len() || count > 65_536
+            }) {
+                return Err(unsafe_frame(
+                    opcode,
+                    &preview,
+                    "invalid compressed object count",
+                ));
+            }
+            observe_frame(SMSG_UPDATE_OBJECT_OPCODE, &inflated);
+        }
+    } else {
+        observe_frame(opcode, &body);
     }
 
     let consumed = std::rc::Rc::new(std::cell::Cell::new(0usize));
@@ -443,7 +473,15 @@ fn read_guarded_world_message<R: Read>(
         Ok(Ok(m)) => {
             let actual_body_len = consumed.get();
             log.record_decoded(opcode, payload_len, actual_body_len);
-            Ok(m)
+            Ok(match m {
+                WorldSmsg::SMSG_COMPRESSED_UPDATE_OBJECT(update) => WorldSmsg::SMSG_UPDATE_OBJECT(
+                    Box::new(wow_world_messages::vanilla::SMSG_UPDATE_OBJECT {
+                        has_transport: update.has_transport,
+                        objects: update.objects,
+                    }),
+                ),
+                other => other,
+            })
         }
         Ok(Err(e)) => Err(anyhow::Error::new(e)),
         Err(payload) => Err(unsafe_frame(
@@ -527,7 +565,7 @@ pub fn logon_at(logon_addr: &str, account: &str, password: &str) -> Result<([u8;
             server_proof,
             ..
         }) => server_proof,
-        other => bail!("logon proof failed (wrong password / unprovisioned): {other:?}"),
+        other => bail!("logon proof rejected: {other:?}"),
     };
     let srp = challenge
         .verify_server_proof(server_proof)
@@ -1578,6 +1616,54 @@ mod tests {
         mask
     }
 
+    fn compressed(body: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(body).unwrap();
+        let mut payload = (body.len() as u32).to_le_bytes().to_vec();
+        payload.extend(encoder.finish().unwrap());
+        payload
+    }
+
+    #[test]
+    fn compressed_login_snapshot_preserves_state_and_the_next_frame() {
+        let guid = 42;
+        let payload = compressed(&create_object_frame(guid, Some(100), None, None));
+        let mut client = client_receiving_frames(&[
+            (SMSG_COMPRESSED_UPDATE_OBJECT_OPCODE, &payload),
+            (0x01dd, &[7, 0, 0, 0]),
+        ]);
+        client.self_guid = guid;
+        let message = client.recv().unwrap();
+        assert_eq!(player_create_mask(&message).unit_health(), Some(100));
+        assert_eq!(client.seen_guids, [guid]);
+        assert_eq!(client.own_character_is_dead(), Some(false));
+        assert!(matches!(client.recv().unwrap(), WorldSmsg::SMSG_PONG(_)));
+    }
+
+    #[test]
+    fn compressed_object_sizes_and_stream_integrity_are_checked() {
+        let good = compressed(&create_object_frame(42, Some(100), None, None));
+        let mut dishonest = good.clone();
+        dishonest[..4].copy_from_slice(&1u32.to_le_bytes());
+        let mut extra = good.clone();
+        extra.push(0);
+        let mut oversized = good.clone();
+        oversized[..4].copy_from_slice(&(MAX_DECOMPRESSED_FRAME_BYTES + 1).to_le_bytes());
+        let mut impossible_count = vec![255, 255, 255, 255, 0];
+        impossible_count = compressed(&impossible_count);
+        for payload in [
+            dishonest,
+            extra,
+            oversized,
+            impossible_count,
+            good[..good.len() - 2].to_vec(),
+        ] {
+            let mut client = client_receiving_frame(SMSG_COMPRESSED_UPDATE_OBJECT_OPCODE, &payload);
+            assert!(is_unsafe_server_frame(&client.recv().unwrap_err()));
+        }
+    }
+
     #[test]
     fn login_snapshot_observes_the_own_character_as_alive() {
         let guid = 0x2Au64;
@@ -1925,8 +2011,8 @@ mod tests {
             "missing frame preview: {diagnostic}"
         );
         assert!(
-            diagnostic.contains("decoder panicked"),
-            "missing panic diagnosis: {diagnostic}"
+            diagnostic.contains("invalid compressed payload"),
+            "missing compressed-stream diagnosis: {diagnostic}"
         );
     }
 
@@ -1963,11 +2049,6 @@ mod tests {
         }
     }
 
-    /// Issue #209 deliverable 1: on the SAME "decoder panicked" failure
-    /// [`corrupt_compressed_frame_becomes_a_diagnostic_instead_of_a_decoder_panic`] pins, the session
-    /// must ALSO dump a file recording the frames that led into it — not just the inline error
-    /// string. This is the actual point of the capture: turning "it crashed" into "here is the exact
-    /// byte sequence", per two clean decodes then the corrupt one.
     #[test]
     fn a_fatal_decode_dumps_the_preceding_ring_and_the_failing_frame_to_disk() {
         let label = "CRASHTEST-basic";
@@ -1977,9 +2058,9 @@ mod tests {
         corrupt.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
         let mut client = client_receiving_frames_labeled(
             &[
-                (0x004D, &[]),                            // SMSG_LOGOUT_COMPLETE (clean)
-                (0x004F, &[]),                            // SMSG_LOGOUT_CANCEL_ACK (clean)
-                (SMSG_COMPRESSED_MOVES_OPCODE, &corrupt), // the fatal one
+                (0x004D, &[]), // SMSG_LOGOUT_COMPLETE (clean)
+                (0x004F, &[]), // SMSG_LOGOUT_CANCEL_ACK (clean)
+                (SMSG_COMPRESSED_MOVES_OPCODE, &corrupt),
             ],
             label,
         );
@@ -2039,7 +2120,7 @@ mod tests {
             "missing failing body preview: {text}"
         );
         assert!(
-            text.contains("decoder panicked"),
+            text.contains("invalid compressed payload"),
             "missing the actual error text: {text}"
         );
 
