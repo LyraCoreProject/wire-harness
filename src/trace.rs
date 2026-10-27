@@ -322,7 +322,7 @@ pub struct GoldenTrace {
 }
 
 impl GoldenTrace {
-    /// Binds rules to the exact scenario bytes hashed by the recorder.
+    /// Binds rules to recorded scenario bytes and checks disclosures; see docs/traces.md.
     pub fn new(scenario_text: &str, trace: Trace) -> Result<Self> {
         trace.validate()?;
         ensure!(
@@ -336,6 +336,7 @@ impl GoldenTrace {
                 && trace.header.behavior == scenario.behavior,
             "Golden Trace does not match this scenario revision"
         );
+        crate::compare::validate_rule_samples(&scenario, &trace)?;
         Ok(Self { scenario, trace })
     }
 

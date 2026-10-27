@@ -98,6 +98,8 @@ pub struct PacketSubjects {
 #[serde(deny_unknown_fields)]
 pub struct PacketTimingRule {
     #[serde(default)]
+    pub values_only: bool,
+    #[serde(default)]
     pub path: Vec<String>,
     pub name: String,
     pub reason: String,
@@ -189,6 +191,15 @@ impl EquivalenceRules {
                 "invalid timing field path"
             );
             ensure!(
+                !rule.values_only
+                    || (rule.opcode == 0x00a9
+                        && rule.path.len() == 4
+                        && rule.path[0] == "objects"
+                        && rule.path[1].parse::<usize>().is_ok()
+                        && rule.path[2] == "values"),
+                "values_only timing requires an object VALUES field path"
+            );
+            ensure!(
                 timed.insert((rule.opcode, &rule.path)),
                 "duplicate packet timing rule"
             );
@@ -237,6 +248,7 @@ impl EquivalenceRules {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Difference {
+    pub classification: DifferenceClass,
     pub checkpoint: String,
     pub stream: Option<Stream>,
     pub packet_index: Option<usize>,
@@ -247,6 +259,13 @@ pub struct Difference {
     pub reason: String,
     pub expected: Option<Field>,
     pub actual: Option<Field>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DifferenceClass {
+    Rule,
+    Data,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -262,8 +281,20 @@ impl Comparison {
             .count()
     }
 
+    /// Data records remain listed; only rule differences make a comparison fail.
     pub fn is_match(&self) -> bool {
-        self.differences.is_empty()
+        self.rule_difference_count() == 0
+    }
+
+    pub fn rule_difference_count(&self) -> usize {
+        self.differences
+            .iter()
+            .filter(|difference| difference.classification == DifferenceClass::Rule)
+            .count()
+    }
+
+    pub fn data_difference_count(&self) -> usize {
+        self.differences.len() - self.rule_difference_count()
     }
 }
 
@@ -329,12 +360,25 @@ fn data_shape_matches(expected: &Field, actual: &Field) -> bool {
     }
 }
 
-// Hirschberg's LCS uses linear scratch space; equal fields break ties between repeated keys.
+// See docs/traces.md for alignment ties and the bounded score cache.
 fn align(
     expected: usize,
     actual: usize,
     score: impl Fn(usize, usize) -> Option<usize>,
 ) -> Vec<(Option<usize>, Option<usize>)> {
+    let scores = expected
+        .checked_mul(actual)
+        .filter(|&count| count <= 1_048_576)
+        .map(|_| {
+            (0..expected)
+                .flat_map(|i| (0..actual).map(move |j| (i, j)))
+                .map(|(i, j)| score(i, j))
+                .collect::<Vec<_>>()
+        });
+    let score = |i, j| match &scores {
+        Some(scores) => scores[i * actual + j],
+        None => score(i, j),
+    };
     fn lengths(
         e: &[usize],
         a: &[usize],
@@ -479,6 +523,7 @@ impl Comparator<'_> {
         actual: Option<&Field>,
     ) {
         self.differences.push(Difference {
+            classification: DifferenceClass::Rule,
             checkpoint: location.checkpoint.clone(),
             stream: location.stream.clone(),
             packet_index: location.packet_index,
@@ -523,7 +568,8 @@ impl Comparator<'_> {
             .find(|(_, rule)| rule.opcode == opcode && rule.path == location.path)
         {
             self.used_data_fields.insert(index);
-            if !data_shape_matches(expected, actual) {
+            let valid_shape = data_shape_matches(expected, actual);
+            if !valid_shape || expected != actual {
                 self.difference(
                     location,
                     &rule.name,
@@ -531,6 +577,9 @@ impl Comparator<'_> {
                     Some(expected),
                     Some(actual),
                 );
+                if valid_shape {
+                    self.differences.last_mut().unwrap().classification = DifferenceClass::Data;
+                }
             }
             return;
         }
@@ -749,6 +798,9 @@ pub struct AppliedDeviation {
 
 impl DeliberateDeviation {
     fn applies(&self, difference: &Difference) -> bool {
+        if difference.classification != DifferenceClass::Rule {
+            return false;
+        }
         match &self.difference {
             DeviationKind::FieldValue {
                 checkpoint,
@@ -910,6 +962,68 @@ fn field_at<'a>(fields: &'a BTreeMap<String, Field>, path: &[String]) -> Option<
     Some(value)
 }
 
+impl PacketTimingRule {
+    fn applies(&self, packet: &RecordedPacket) -> bool {
+        self.opcode == packet.opcode
+            && (self.path.is_empty() || field_at(&packet.fields, &self.path).is_some())
+            && (!self.values_only
+                || field_at(
+                    &packet.fields,
+                    &[self.path[0].clone(), self.path[1].clone(), "kind".into()],
+                ) == Some(&Field::Unsigned(0)))
+    }
+}
+
+pub(crate) fn validate_rule_samples(scenario: &Scenario, trace: &Trace) -> Result<()> {
+    let trace = scoped_trace(scenario, trace)?;
+    for (name, reason, opcode, path, unchecked) in scenario
+        .rules
+        .identities
+        .iter()
+        .map(|rule| {
+            (
+                &rule.name,
+                &rule.reason,
+                rule.opcode,
+                &rule.path,
+                "identity consistency is unchecked: single sample",
+            )
+        })
+        .chain(scenario.rules.clocks.iter().map(|rule| {
+            (
+                &rule.name,
+                &rule.reason,
+                rule.opcode,
+                &rule.path,
+                "clock consistency is unchecked: single sample",
+            )
+        }))
+    {
+        let samples = trace
+            .packets
+            .iter()
+            .filter(|packet| {
+                packet.opcode == opcode
+                    && scenario.steps.iter().any(|step| {
+                        step.id == packet.checkpoint
+                            && step.checkpoint.stream(&step.id, opcode) == packet.stream
+                            && !matches!(
+                                packet.stream,
+                                Stream::Opening | Stream::Unexpected | Stream::Malformed
+                            )
+                    })
+                    && field_at(&packet.fields, path).is_some()
+            })
+            .take(2)
+            .count();
+        ensure!(
+            samples != 1 || reason.to_ascii_lowercase().contains(unchecked),
+            "rule {name} has one sample; its reason must state '{unchecked}'"
+        );
+    }
+    Ok(())
+}
+
 type Streams<'a> = BTreeMap<(String, Stream, Option<String>), Vec<&'a RecordedPacket>>;
 
 impl Comparator<'_> {
@@ -982,6 +1096,23 @@ impl Comparator<'_> {
                     e,
                     a,
                 );
+            }
+            if packet.opcode == 0x02f4
+                && packet.fields.get("weather_type") == Some(&Field::Unsigned(0))
+            {
+                for (name, required) in
+                    [("grade", Field::Float(0.0)), ("sound", Field::Unsigned(0))]
+                {
+                    if packet.fields.get(name) != Some(&required) {
+                        self.difference(
+                            &location.child(name.into()),
+                            "clear_weather",
+                            "weather type 0 requires grade and sound 0",
+                            Some(&required),
+                            packet.fields.get(name),
+                        );
+                    }
+                }
             }
             streams
                 .entry((
@@ -1127,7 +1258,7 @@ fn comparator(rules: &EquivalenceRules, recorded_at: (u64, u64)) -> Comparator<'
     }
 }
 
-/// Checks checkpoint replies and every received opcode, without requiring a Golden Trace.
+/// Checks replies, received opcodes and single-sample disclosures without requiring a Golden Trace.
 pub fn check_observations(scenario: &Scenario, observations: &[Observation]) -> Result<Comparison> {
     check_character_observations(scenario, observations, 0)
 }
@@ -1149,13 +1280,15 @@ pub fn check_character_observations(
             adapter: "observations".into(),
         },
     };
-    let trace = scoped_trace(scenario, &Trace::record(header, observations)?)?;
+    let trace = Trace::record(header, observations)?;
+    validate_rule_samples(scenario, &trace)?;
+    let trace = scoped_trace(scenario, &trace)?;
     let mut comparator = comparator(&scenario.rules, (0, 0));
     comparator.packets(scenario, &trace, false, true);
     comparator.finish(&[])
 }
 
-/// Deviations annotate counted differences; they never make is_match return true.
+/// Deviations annotate rule differences; they never make is_match return true.
 pub fn compare(
     expected: &GoldenTrace,
     actual: &Trace,
@@ -1248,10 +1381,11 @@ pub fn compare(
                         .iter()
                         .enumerate()
                         .filter(|(_, rule)| {
-                            rule.opcode == e.opcode
-                                && (rule.path.is_empty()
-                                    || field_at(&e.fields, &rule.path).is_some()
-                                    || field_at(&a.fields, &rule.path).is_some())
+                            if rule.values_only {
+                                rule.applies(e) && rule.applies(a)
+                            } else {
+                                rule.applies(e) || rule.applies(a)
+                            }
                         })
                         .max_by_key(|(_, rule)| rule.path.len())
                     {
@@ -1279,15 +1413,16 @@ pub fn compare(
                         .map(|rule| (rule.opcode, &rule.path))
                         .chain(rules.clocks.iter().map(|rule| (rule.opcode, &rule.path)))
                         .chain(rules.random.iter().map(|rule| (rule.opcode, &rule.path)))
-                        .chain(
-                            rules
-                                .packet_timing
-                                .iter()
-                                .map(|rule| (rule.opcode, &rule.path)),
-                        )
                     {
                         if opcode == packet.opcode && field_at(&packet.fields, path).is_some() {
                             comparator.unmatched_fields.insert((opcode, path.clone()));
+                        }
+                    }
+                    for rule in &rules.packet_timing {
+                        if rule.applies(packet) && !rule.path.is_empty() {
+                            comparator
+                                .unmatched_fields
+                                .insert((rule.opcode, rule.path.clone()));
                         }
                     }
                     comparator.difference(

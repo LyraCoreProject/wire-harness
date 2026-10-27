@@ -265,6 +265,12 @@ pub fn decode(opcode: u16, body: &[u8]) -> Result<Packet> {
             fields.insert("weather_type".into(), Field::Unsigned(body.u32()?.into()));
             fields.insert("grade".into(), body.float()?);
             fields.insert("sound".into(), Field::Unsigned(body.u32()?.into()));
+            ensure!(
+                fields["weather_type"] != Field::Unsigned(0)
+                    || (fields["grade"] == Field::Float(0.0)
+                        && fields["sound"] == Field::Unsigned(0)),
+                "weather type 0 requires grade and sound 0"
+            );
             let instant = body.u8()?;
             ensure!(instant <= 1, "invalid weather instant-change flag");
             fields.insert("instant".into(), Field::Unsigned(instant.into()));

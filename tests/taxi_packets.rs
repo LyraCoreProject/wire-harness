@@ -283,3 +283,14 @@ fn zone_weather_decodes_values_and_rejects_malformed_fields() {
     invalid[4..8].copy_from_slice(&f32::NAN.to_le_bytes());
     assert!(decode(756, &invalid).is_err());
 }
+
+#[test]
+fn clear_weather_requires_zero_grade_and_sound() {
+    let mut body = [0; 13];
+    assert!(decode(756, &body).is_ok());
+    body[4..8].copy_from_slice(&0.5_f32.to_le_bytes());
+    assert!(decode(756, &body).is_err());
+    body[4..8].copy_from_slice(&0.0_f32.to_le_bytes());
+    body[8..12].copy_from_slice(&8533_u32.to_le_bytes());
+    assert!(decode(756, &body).is_err());
+}

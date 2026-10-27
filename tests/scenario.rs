@@ -138,6 +138,28 @@ fn invalid_scenarios_fail_before_fixture_setup() {
 }
 
 #[test]
+fn values_only_timing_requires_an_object_values_field_path() {
+    let scenario = Scenario::parse(include_str!("../scenarios/taxi_single_hop.toml")).unwrap();
+    for (opcode, path) in [
+        (756, vec!["objects", "0", "values", "field_190"]),
+        (169, vec![]),
+        (169, vec!["objects", "first", "values", "field_190"]),
+        (169, vec!["objects", "0", "kind"]),
+    ] {
+        let mut invalid = scenario.clone();
+        let rule = invalid
+            .rules
+            .packet_timing
+            .iter_mut()
+            .find(|rule| rule.values_only)
+            .unwrap();
+        rule.opcode = opcode;
+        rule.path = path.into_iter().map(str::to_owned).collect();
+        assert!(invalid.validate().is_err());
+    }
+}
+
+#[test]
 fn every_undeclared_opcode_is_reported_without_retaining_its_body() {
     let scenario = Scenario::parse(SCENARIO).unwrap();
     let mut connection = connection();
