@@ -1,9 +1,14 @@
-schema_version = 1
+schema_version = 2
 id = "connection_identity"
 behavior = "connection_identity"
 
+[rules]
+time_tolerance_ms = 100
+wall_clock_tolerance_ms = 2000
+
 [[fixtures]]
 verb = "character"
+name = "Conformant"
 race = "human"
 class = "warrior"
 level = 1
@@ -18,3 +23,15 @@ checkpoint = { window_ms = 250, replies = [477] }
 id = "name"
 send = { opcode = "CMSG_NAME_QUERY", target = "character" }
 checkpoint = { window_ms = 250, replies = [81] }
+
+[[rules.unexpected_packets]]
+name = "ambient_movement_during_ping"
+reason = "Nearby creature movement is independent of the ping reply. Retain its opcode only."
+checkpoint = "ping"
+opcode = 221
+
+[[rules.unexpected_packets]]
+name = "ambient_movement_during_name_query"
+reason = "Nearby creature movement is independent of the name reply. Retain its opcode only."
+checkpoint = "name"
+opcode = 221

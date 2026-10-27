@@ -1,0 +1,12 @@
+{
+  "binary_tag": "latest",
+  "binary_asset": "dev-linux-amd64-d9173ec.tar.gz",
+  "binary_sha256": "6fadf9dd692fdffccec1ad75aea15ff3e8d75b92a162f750f6affc9da6fd7d88",
+  "source_commit": "d9173eca3ea08dd985c52dabbcc826898d1d0b77",
+  "database_tag": "db_latest",
+  "database_asset": "db-4641790.zip",
+  "database_sha256": "9e178f1d70363e92a7b8c259000102dc9739333d79ca00c99ea32dd1fb43e904",
+  "database_commit": "464179081673cfd240f7ffe7f0daf96bca0b5a70",
+  "binary_asset_id": 679402824,
+  "database_asset_id": 595362290
+}

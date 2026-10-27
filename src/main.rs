@@ -3,18 +3,37 @@ use anyhow::{bail, Result};
 #[path = "../adapters/mod.rs"]
 mod adapters;
 mod scenarios;
+mod trace_cli;
 use wire_client::cli::{invocation, Command};
 use wire_client::WireClient;
 use wow_world_messages::vanilla::opcodes::ServerOpcodeMessage as Smsg;
 
 fn main() -> Result<()> {
+    if trace_cli::compare_command()? {
+        return Ok(());
+    }
     let inv = invocation()?;
+    if let Command::Record(path) = &inv.command {
+        return adapters::record(&inv, path, true);
+    }
+    if let Command::Candidate(path) = &inv.command {
+        return adapters::record(&inv, path, false);
+    }
     if let Command::ScenarioFile(path) = &inv.command {
         let scenario = wire_client::scenario::Scenario::parse(&std::fs::read_to_string(path)?)?;
         let mut adapter = adapters::select(&inv)?;
-        let observed = wire_client::scenario::run(&scenario, adapter.as_mut())?;
+        let observed = wire_client::runner::run(&scenario, adapter.as_mut())?;
+        let report = wire_client::compare::check_observations(&scenario, &observed)?;
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        if !report.is_match() {
+            bail!(
+                "scenario {} has {} differences",
+                scenario.id,
+                report.differences.len()
+            );
+        }
         println!(
-            "[wire] scenario {} passed: {} decoded packets",
+            "[wire] scenario {} passed: {} observed packets",
             scenario.id,
             observed.len()
         );
@@ -27,7 +46,9 @@ fn main() -> Result<()> {
     );
     let mode: Option<&str> = match &inv.command {
         Command::Smoke => None,
-        Command::ScenarioFile(_) => unreachable!("scenario-file returned above"),
+        Command::ScenarioFile(_) | Command::Record(_) | Command::Candidate(_) => {
+            unreachable!("data scenario returned above")
+        }
         Command::Scenario(name) => Some(name.as_str()),
     };
     let mut args = inv.args.clone().into_iter();

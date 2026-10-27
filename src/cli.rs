@@ -1,22 +1,4 @@
-//! The standalone client's CLI surface: where the server it talks to, and the identity it talks
-//! as, are configured — and the ONLY place either is allowed to come from (#244).
-//!
-//! Two rules this module exists to enforce:
-//!
-//! 1. **No fixture is baked in.** There is no default account, no default password and no default
-//!    character. A harness that shipped `TEST`/`test123`/`Ginger` defaults only ran against one
-//!    server — the one those rows exist on — and every scenario silently inherited that stack.
-//!    Every run now names its own credentials, so "a reachable build-5875 server plus test
-//!    credentials" is the whole requirement.
-//! 2. **The password never touches argv.** It is read from stdin, never printed, and never
-//!    included in any log line. A positional plaintext password is visible in `ps`, in shell
-//!    history and in every CI log that echoes its command line.
-//!
-//! Endpoints are process-global ([`set_endpoints`]) rather than threaded through every scenario:
-//! which server a process talks to is a property of the whole run, and the alternative was an
-//! extra parameter on ~60 scenario functions and their four dispatchers. Unset, they resolve to
-//! the vanilla defaults, so a library consumer that never calls [`set_endpoints`] behaves exactly
-//! like a stock 1.12 client.
+//! Read README.md for credentials and docs/scenarios.md for scenario fixture names.
 
 use std::io::Read;
 use std::sync::OnceLock;
@@ -89,6 +71,8 @@ pub fn endpoints() -> &'static Endpoints {
 pub enum Command {
     Smoke,
     ScenarioFile(String),
+    Record(String),
+    Candidate(String),
     /// Run the named protocol scenario with `Invocation::args`.
     Scenario(String),
 }
@@ -133,7 +117,10 @@ Speaks the real protocol — SRP6 logon then the encrypted world session — so 
 and assert on decoded SMSG. It is server-agnostic: anything that implements build 5875 will do.
 
 USAGE:
-  vanilla-wire scenario-file PATH --account USER --character NAME --password-stdin
+  vanilla-wire compare SCENARIO GOLDEN CANDIDATE [DEVIATIONS_JSON]
+  vanilla-wire record SCENARIO PROVENANCE_JSON OUTPUT --account USER --password-stdin
+  vanilla-wire candidate SCENARIO OUTPUT --account USER --password-stdin
+  vanilla-wire scenario-file PATH --account USER --password-stdin
   vanilla-wire smoke --host HOST --account USER --password-stdin --character NAME
   vanilla-wire scenario NAME [SCENARIO-ARGS...] --account USER --password-stdin [--character NAME]
 
@@ -232,17 +219,27 @@ pub fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<ParsedArgs>
     let mut positional = positional.into_iter();
     let command = match positional.next().as_deref() {
         Some("smoke") => Command::Smoke,
+        Some("record") => Command::Record(
+            positional
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("record needs a scenario path"))?,
+        ),
         Some("scenario-file") => Command::ScenarioFile(
             positional
                 .next()
                 .ok_or_else(|| anyhow::anyhow!("scenario-file needs a TOML path"))?,
+        ),
+        Some("candidate") => Command::Candidate(
+            positional
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("candidate needs a TOML path"))?,
         ),
         Some("scenario") => match positional.next() {
             Some(name) => Command::Scenario(name),
             None => bail!("`scenario` needs a name — e.g. `scenario logout`\n\n{USAGE}"),
         },
         Some(other) => {
-            bail!("unknown command {other:?}: expected smoke, scenario-file or scenario\n\n{USAGE}")
+            bail!("unknown command {other:?}: expected smoke, scenario-file, record, candidate or scenario\n\n{USAGE}")
         }
         None => bail!("no command given\n\n{USAGE}"),
     };

@@ -1,6 +1,7 @@
 use anyhow::{bail, ensure, Result};
 use wire_client::cli::Invocation;
-use wire_client::scenario::{FixtureAdapter, FixtureVerb};
+use wire_client::runner::FixtureAdapter;
+use wire_client::scenario::FixtureVerb;
 use wire_client::{logon_at, WireClient};
 use wow_world_messages::vanilla::{opcodes::ServerOpcodeMessage as Smsg, CMSG_CHAR_ENUM};
 
@@ -18,23 +19,32 @@ pub fn select(invocation: &Invocation) -> Result<Box<dyn FixtureAdapter + '_>> {
 }
 
 fn connect(inv: &Invocation) -> Result<WireClient> {
-    ensure!(!inv.character.is_empty(), "--character is required");
-    let (key, advertised) = logon_at(&inv.endpoints.logon_addr, &inv.account, &inv.password)?;
+    let (key, advertised) = if std::env::var("WIRE_ADAPTER").as_deref() == Ok("vmangos") {
+        vmangos_fixture_impl::logon(inv)?
+    } else {
+        logon_at(&inv.endpoints.logon_addr, &inv.account, &inv.password)?
+    };
     WireClient::connect_world(&inv.endpoints.world_addr(&advertised), &inv.account, key)
 }
 
 fn create(inv: &Invocation, fixture: &FixtureVerb) -> Result<WireClient> {
-    let FixtureVerb::Character { race, class, .. } = fixture;
+    let FixtureVerb::Character {
+        name, race, class, ..
+    } = fixture;
+    ensure!(
+        inv.character.is_empty() || inv.character == *name,
+        "--character must match the scenario fixture name"
+    );
     let mut client = connect(inv)?;
     ensure!(
         !client
             .char_enum()?
             .iter()
-            .any(|(_, name, _)| name.eq_ignore_ascii_case(&inv.character)),
-        "fixture Character already exists; choose a fresh name"
+            .any(|(_, existing, _)| existing.eq_ignore_ascii_case(name)),
+        "fixture Character already exists; reset the disposable fixture before rerunning"
     );
     let guid = client.create_or_find_char_as(
-        &inv.character,
+        name,
         wire_client::cli::parse_class(class)?,
         wire_client::cli::parse_race(race)?,
     )?;
@@ -44,6 +54,7 @@ fn create(inv: &Invocation, fixture: &FixtureVerb) -> Result<WireClient> {
 
 fn reconnect_checked(inv: &Invocation, fixture: &FixtureVerb) -> Result<WireClient> {
     let FixtureVerb::Character {
+        name,
         race,
         class,
         level,
@@ -58,7 +69,7 @@ fn reconnect_checked(inv: &Invocation, fixture: &FixtureVerb) -> Result<WireClie
     let character = list
         .characters
         .iter()
-        .find(|c| c.name.eq_ignore_ascii_case(&inv.character))
+        .find(|c| c.name == *name)
         .ok_or_else(|| anyhow::anyhow!("fixture Character missing after setup"))?;
     ensure!(
         character.race == wire_client::cli::parse_race(race)?
@@ -76,8 +87,72 @@ fn reconnect_checked(inv: &Invocation, fixture: &FixtureVerb) -> Result<WireClie
     let guid = character.guid.guid();
     let position = client.player_login_position(guid)?;
     ensure!(
-        (position.orientation - at.orientation).abs() < 0.01,
-        "fixture orientation did not apply"
+        position.map.as_int() == at.map
+            && (position.position.x - at.x).abs() < 0.1
+            && (position.position.y - at.y).abs() < 0.1
+            && (position.position.z - at.z).abs() < 0.1
+            && (position.orientation - at.orientation).abs() < 0.01,
+        "fixture login position or orientation did not apply"
     );
     Ok(client)
+}
+
+pub fn record(invocation: &Invocation, path: &str, golden: bool) -> Result<()> {
+    use wire_client::trace::{Header, Trace};
+    let adapter_name = std::env::var("WIRE_ADAPTER")?;
+    let (provenance, output) = if golden {
+        ensure!(
+            adapter_name == "vmangos",
+            "Golden Traces require the Reference Server adapter"
+        );
+        let [provenance, output] = invocation.args.as_slice() else {
+            bail!("record needs SCENARIO PROVENANCE_JSON OUTPUT");
+        };
+        let provenance: wire_client::trace::Provenance =
+            serde_json::from_slice(&std::fs::read(provenance)?)?;
+        ensure!(
+            provenance.server == "vmangos",
+            "Reference Server provenance must name vmangos"
+        );
+        (Some(provenance), output)
+    } else {
+        let [output] = invocation.args.as_slice() else {
+            bail!("candidate needs SCENARIO OUTPUT");
+        };
+        (None, output)
+    };
+    ensure!(
+        !std::path::Path::new(output).exists(),
+        "output trace already exists"
+    );
+    let scenario_text = std::fs::read_to_string(path)?;
+    let scenario = wire_client::scenario::Scenario::parse(&scenario_text)?;
+    let mut adapter = select(invocation)?;
+    let mut client = adapter.prepare(&scenario.fixtures)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_millis()
+        .try_into()?;
+    let header = match provenance {
+        Some(provenance) => Header::golden(&scenario_text, provenance, now)?,
+        None => Header::candidate(&scenario_text, adapter_name, now)?,
+    };
+    let observed = wire_client::runner::run_on(&scenario, &mut client)?;
+    let trace = Trace::record(header, &observed)?;
+    if golden {
+        let expected = wire_client::trace::GoldenTrace::new(&scenario_text, trace.clone())?;
+        let report = wire_client::compare::compare(&expected, &trace, &[])?;
+        if !report.is_match() {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            bail!("Reference Server observations do not satisfy the scenario");
+        }
+    }
+    trace.write_new(std::path::Path::new(output))?;
+    println!(
+        "[wire] recorded {} {}: {} scrubbed packets",
+        if golden { "Golden Trace" } else { "candidate" },
+        scenario.id,
+        trace.packets.len()
+    );
+    Ok(())
 }
