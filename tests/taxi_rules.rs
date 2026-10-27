@@ -19,7 +19,7 @@ reason = "Scope this test to the Character's flight state."
 packets = [{opcode=221,paths=[["guid"]]}]
 [[rules.identities]]
 name = "spline"
-reason = "Spline ids are server-local identities."
+reason = "Spline ids are server-local identities. Identity consistency is unchecked: single sample."
 opcode = 221
 path = ["spline_id"]
 [[fixtures]]
@@ -397,7 +397,7 @@ fn absent_packet_does_not_add_unused_identity_clock_or_timing_records() {
         r#"
 [[rules.clocks]]
 name = "clock"
-reason = "Monotonic clock origin; unchecked: single sample."
+reason = "Clock consistency is unchecked: single sample."
 opcode = 221
 path = ["timestamp"]
 tolerance_ms = 100
@@ -429,7 +429,7 @@ fn single_identity_and_clock_samples_require_unsigned_32_bit_values() {
         r#"
 [[rules.clocks]]
 name = "clock"
-reason = "Monotonic clock origin; unchecked: single sample."
+reason = "Clock consistency is unchecked: single sample."
 opcode = 221
 path = ["timestamp"]
 tolerance_ms = 100
@@ -535,6 +535,8 @@ fn zone_data_exceptions_cover_only_the_named_fields() {
         }
     }
     assert!(compare(&expected, &actual, &[]).unwrap().is_match());
+    let report = compare(&expected, &actual, &[]).unwrap();
+    assert_eq!(report.data_difference_count(), 6);
     let weather = actual
         .packets
         .iter_mut()
@@ -544,8 +546,11 @@ fn zone_data_exceptions_cover_only_the_named_fields() {
         .fields
         .insert("instant".into(), Recorded::Unsigned(1));
     let report = compare(&expected, &actual, &[]).unwrap();
-    assert_eq!(report.differences.len(), 1);
-    assert_eq!(report.differences[0].field_path, ["instant"]);
+    assert_eq!(report.rule_difference_count(), 1);
+    assert!(report
+        .differences
+        .iter()
+        .any(|difference| difference.field_path == ["instant"]));
 }
 
 #[test]
@@ -580,6 +585,7 @@ name = "zone_flag_delivery"
 reason = "Zone polling plus a map tick and local delivery jitter."
 opcode = 169
 path = ["objects", "0", "values", "field_190"]
+values_only = true
 tolerance_ms = 1150
 [[fixtures]]"#,
     );
@@ -612,6 +618,140 @@ tolerance_ms = 1150
         .differences
         .iter()
         .all(|difference| difference.rule == "passenger_delivery"));
+    for kind in [2, 3] {
+        let mut observed = make(7);
+        let mut create = update(7, &[(190, 0), (1176, 890)]);
+        let Field::List(objects) = create.packet.fields.get_mut("objects").unwrap() else {
+            panic!()
+        };
+        let Field::Object(object) = &mut objects[0] else {
+            panic!()
+        };
+        object.insert("kind".into(), Field::Unsigned(kind));
+        create.received_after_ms = Some(100);
+        observed.push(create);
+        let expected = golden(&text, &observed);
+        for (delay, equivalent) in [(150, true), (151, false)] {
+            let mut actual = observed.clone();
+            actual.last_mut().unwrap().received_after_ms = Some(100 + delay);
+            let report = compare_character_observations(&expected, &actual, 7, 1000, &[]).unwrap();
+            assert_eq!(report.is_match(), equivalent);
+            if !equivalent {
+                assert_eq!(report.differences.len(), 1);
+                assert_eq!(report.differences[0].rule, "passenger_delivery");
+            }
+        }
+    }
+}
+
+#[test]
+fn single_sample_rules_require_the_unchecked_consistency_in_the_reason() {
+    let text = SCENARIO.replace(
+        "[[fixtures]]",
+        r#"
+[[rules.clocks]]
+name = "clock"
+reason = "Clock consistency is unchecked: single sample."
+opcode = 221
+path = ["timestamp"]
+tolerance_ms = 100
+[[fixtures]]"#,
+    );
+    let mut observed = base(7);
+    observed[1]
+        .packet
+        .fields
+        .insert("timestamp".into(), Field::Unsigned(100));
+    for (declaration, inadequate) in [
+        (
+            "Identity consistency is unchecked: single sample.",
+            "Unsigned 32-bit identities.",
+        ),
+        (
+            "Clock consistency is unchecked: single sample.",
+            "Unchecked: single sample.",
+        ),
+        (
+            "Identity consistency is unchecked: single sample.",
+            "Unchecked: single sample.",
+        ),
+        (
+            "Clock consistency is unchecked: single sample.",
+            "Process clocks have different origins.",
+        ),
+    ] {
+        let invalid = text.replace(declaration, inadequate);
+        let mut header = golden(&text, &observed).trace().header.clone();
+        header.scenario_sha256 = Sha256Digest::of(invalid.as_bytes());
+        let trace = Trace::record(header, &observed).unwrap();
+        let error = GoldenTrace::new(&invalid, trace).unwrap_err().to_string();
+        assert!(error.contains("has one sample"), "{error}");
+        let scenario = wire_client::scenario::Scenario::parse(&invalid).unwrap();
+        assert!(
+            wire_client::compare::check_character_observations(&scenario, &observed, 7).is_err()
+        );
+    }
+    let multi = text
+        .replace("Identity consistency is unchecked: single sample.", "")
+        .replace(
+            "Clock consistency is unchecked: single sample.",
+            "Clocks have different origins.",
+        );
+    let mut second = observed[1].clone();
+    second
+        .packet
+        .fields
+        .insert("timestamp".into(), Field::Unsigned(200));
+    observed.push(second);
+    let expected = golden(&multi, &observed);
+    assert!(compare(&expected, expected.trace(), &[])
+        .unwrap()
+        .is_match());
+}
+
+#[test]
+fn opening_and_other_characters_do_not_supply_rule_samples() {
+    let text = SCENARIO.replace("Identity consistency is unchecked: single sample.", "");
+    let mut observed = base(7);
+    let mut opening = movement(7, 1);
+    opening.checkpoint = "opening".into();
+    opening.stream = Stream::Opening;
+    observed.insert(0, opening);
+    observed.push(movement(99, 2));
+    let scenario = wire_client::scenario::Scenario::parse(&text).unwrap();
+    let error =
+        wire_client::compare::check_character_observations(&scenario, &observed, 7).unwrap_err();
+    assert!(error.to_string().contains("rule spline has one sample"));
+}
+
+#[test]
+fn clear_weather_in_recorded_observations_cannot_use_data_rules_to_hide_invalid_values() {
+    use wire_client::compare::DifferenceClass;
+    use wire_client::trace::RecordedField as Recorded;
+    let expected = wire_client::catalogue::get("taxi_single_hop").unwrap();
+    for (field, invalid) in [
+        ("grade", Recorded::Float(0.5)),
+        ("sound", Recorded::Unsigned(8533)),
+    ] {
+        let mut actual = expected.trace().clone();
+        let packet = actual
+            .packets
+            .iter_mut()
+            .find(|packet| packet.checkpoint == "flight" && packet.opcode == 756)
+            .unwrap();
+        packet
+            .fields
+            .insert("weather_type".into(), Recorded::Unsigned(0));
+        packet.fields.insert(field.into(), invalid);
+        let report = compare(&expected, &actual, &[]).unwrap();
+        assert!(!report.is_match());
+        assert!(report
+            .differences
+            .iter()
+            .any(|difference| difference.rule == "clear_weather"
+                && difference.field_path == [field]
+                && difference.classification == DifferenceClass::Rule));
+    }
 }
 
 #[test]

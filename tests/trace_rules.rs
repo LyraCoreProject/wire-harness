@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
-use wire_client::compare::{compare, compare_observations, DeliberateDeviation, DeviationKind};
+use wire_client::compare::{
+    compare, compare_observations, DeliberateDeviation, DeviationKind, DifferenceClass,
+};
 use wire_client::decode::{Field, Packet};
 use wire_client::scenario::{Observation, Scenario, Stream};
 use wire_client::trace::{GoldenTrace, Header, Provenance, RecordedField, Sha256Digest, Trace};
@@ -710,4 +712,162 @@ fn data_field_exceptions_preserve_presence_shape_and_typed_identity_fields() {
     ] {
         assert!(Scenario::parse(&scenario(&[477], &invalid)).is_err());
     }
+}
+
+#[test]
+fn data_differences_are_tagged_and_keep_the_rule_signature_and_scrubbed_values() {
+    let rule = "[[rules.data_fields]]\nname='catalogue'\nreason='The catalogue depends on world data.'\nopcode=477\npath=['value']";
+    let text = scenario(&[477], rule);
+    let expected = golden(&text, &[packet(477, Field::Unsigned(1))], 1000);
+    let report =
+        compare_observations(&expected, &[packet(477, Field::Unsigned(2))], 1000, &[]).unwrap();
+    assert!(report.is_match());
+    assert_eq!(report.rule_difference_count(), 0);
+    assert_eq!(report.data_difference_count(), 1);
+    assert_eq!(
+        serde_json::to_value(&report).unwrap()["differences"][0],
+        serde_json::json!({
+            "classification": "data",
+            "checkpoint": "query",
+            "stream": {"kind":"reply", "id":"query"},
+            "packet_index": 0,
+            "opcode": 477,
+            "field_path": ["value"],
+            "rule": "catalogue",
+            "reason": "The catalogue depends on world data.",
+            "expected": {"type":"unsigned", "value":1},
+            "actual": {"type":"unsigned", "value":2},
+            "deviations": []
+        })
+    );
+    assert!(compare(&expected, expected.trace(), &[])
+        .unwrap()
+        .differences
+        .is_empty());
+    let malformed =
+        compare_observations(&expected, &[packet(477, Field::Signed(2))], 1000, &[]).unwrap();
+    assert!(!malformed.is_match());
+    assert_eq!(
+        malformed.differences[0].classification,
+        DifferenceClass::Rule
+    );
+}
+
+#[test]
+fn catalogue_containers_report_one_data_difference_and_keep_shape_errors_as_rules() {
+    let text = scenario(&[477], "[[rules.data_fields]]\nname='catalogue'\nreason='The catalogue depends on world data.'\nopcode=477\npath=['value']");
+    let item = |value| Field::Object(BTreeMap::from([("id".into(), value)]));
+    let expected = golden(
+        &text,
+        &[packet(477, Field::List(vec![item(Field::Unsigned(1))]))],
+        1000,
+    );
+    for value in [
+        Field::List(vec![]),
+        Field::List(vec![item(Field::Unsigned(2)), item(Field::Unsigned(3))]),
+    ] {
+        let report = compare_observations(&expected, &[packet(477, value)], 1000, &[]).unwrap();
+        assert!(report.is_match());
+        assert_eq!(report.data_difference_count(), 1);
+        assert_eq!(report.differences[0].field_path, ["value"]);
+    }
+    for value in [
+        item(Field::Guid(1)),
+        item(Field::TimeMs(1)),
+        item(Field::WallClockMs(1)),
+        item(Field::Signed(1)),
+        Field::Object(BTreeMap::new()),
+    ] {
+        let report = compare_observations(
+            &expected,
+            &[packet(477, Field::List(vec![value]))],
+            1000,
+            &[],
+        )
+        .unwrap();
+        assert!(!report.is_match());
+        assert_eq!(report.rule_difference_count(), 1);
+        assert_eq!(report.data_difference_count(), 0);
+    }
+}
+
+#[test]
+fn deliberate_deviations_do_not_annotate_data_records() {
+    let text = scenario(&[477], "[[rules.data_fields]]\nname='catalogue'\nreason='The catalogue depends on world data.'\nopcode=477\npath=['value']");
+    let expected = golden(&text, &[packet(477, Field::Unsigned(1))], 1000);
+    let deviation = DeliberateDeviation {
+        name: "different_catalogue".into(),
+        reason: "Another catalogue.".into(),
+        source: "test".into(),
+        difference: DeviationKind::FieldValue {
+            checkpoint: "query".into(),
+            opcode: 477,
+            path: vec!["value".into()],
+            expected: RecordedField::Unsigned(1),
+            actual: RecordedField::Unsigned(2),
+        },
+    };
+    let report = compare_observations(
+        &expected,
+        &[packet(477, Field::Unsigned(2))],
+        1000,
+        &[deviation],
+    )
+    .unwrap();
+    assert_eq!(report.data_difference_count(), 1);
+    assert_eq!(report.rule_difference_count(), 1);
+    assert_eq!(report.deviation_count(), 0);
+    assert!(report.differences[0].deviations.is_empty());
+    assert_eq!(report.differences[1].rule, "unused_deviation");
+}
+
+#[test]
+fn trace_json_preserves_float_precision() {
+    let values = vec![
+        Field::Float(f64::from(-10629.065_f32)),
+        Field::Float(f64::from(37.954_334_f32)),
+        Field::Float(1.2345678901234567),
+        Field::Float(51.248178375505404),
+        Field::Float(f64::MIN_POSITIVE),
+        Field::Float(f64::MAX),
+    ];
+    let expected = golden(
+        &scenario(&[477], ""),
+        &[packet(477, Field::List(values))],
+        1000,
+    );
+    let parsed = Trace::parse(&serde_json::to_vec(expected.trace()).unwrap()).unwrap();
+    assert_eq!(&parsed, expected.trace());
+    assert!(compare(&expected, &parsed, &[]).unwrap().is_match());
+}
+
+#[test]
+fn swapped_unmapped_subjects_establish_pairs_in_stream_order() {
+    let text = scenario(&[477], "");
+    let make = |subjects: [u64; 2]| {
+        let mut observed = vec![packet(477, Field::Unsigned(7))];
+        observed.extend(subjects.map(|guid| {
+            let mut observed = packet(507, Field::Unsigned(1));
+            observed
+                .packet
+                .fields
+                .insert("guid".into(), Field::Guid(guid));
+            observed
+        }));
+        observed
+    };
+    let expected = golden(&text, &make([10, 20]), 1000);
+    assert!(
+        compare_observations(&expected, &make([200, 100]), 1000, &[])
+            .unwrap()
+            .is_match()
+    );
+    let mut reference = make([10, 20]);
+    reference.push(reference[1].clone());
+    let expected = golden(&text, &reference, 1000);
+    let mut actual = make([200, 100]);
+    actual.push(actual[2].clone());
+    let report = compare_observations(&expected, &actual, 1000, &[]).unwrap();
+    assert_eq!(report.differences.len(), 1);
+    assert_eq!(report.differences[0].rule, "guid_bijection");
 }

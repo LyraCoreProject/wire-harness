@@ -25,8 +25,9 @@ pub fn compare_command() -> Result<bool> {
     println!("{}", serde_json::to_string_pretty(&comparison)?);
     if !comparison.is_match() {
         bail!(
-            "trace has {} differences, including {} Deliberate Deviations",
-            comparison.differences.len(),
+            "trace has {} rule differences and {} data differences, including {} Deliberate Deviations",
+            comparison.rule_difference_count(),
+            comparison.data_difference_count(),
             comparison.deviation_count()
         );
     }

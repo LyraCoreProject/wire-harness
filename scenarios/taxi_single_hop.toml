@@ -153,9 +153,10 @@ tolerance_ms = 1150
 
 [[rules.packet_timing]]
 name = "passenger_zone_flags_delivery"
-reason = "PLAYER_FLAGS changes when the passenger leaves the capital's resting area. The 1000 ms zone poll plus one 100 ms update tick and 50 ms local jitter gives 1150 ms. Its value remains exact; fare, mount and unit-flags updates keep their 150 ms bound. See docs/taxi.md."
+reason = "PLAYER_FLAGS VALUES updates follow the capital's resting area. The 1000 ms zone poll plus one 100 ms update tick and 50 ms local jitter gives 1150 ms. Its value remains exact; CREATE, fare, mount and unit-flags updates keep their 150 ms bound. See docs/taxi.md."
 opcode = 169
 path = ["objects", "0", "values", "field_190"]
+values_only = true
 tolerance_ms = 1150
 
 [[rules.data_fields]]
