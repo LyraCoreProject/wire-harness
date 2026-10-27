@@ -33,9 +33,8 @@ Build-5875 protocol and nothing else.
 
 Rules this half keeps:
 
-* **No dependency on any server crate.** Every dependency in `Cargo.toml` is an external protocol
-  crate (`wow_srp`, `wow_login_messages`, `wow_world_messages`, `wow_world_base` — gtker's, and
-  their `wow_` names are upstream's; never rename them). This is not a style preference: a path
+* **No dependency on any server crate.** Protocol dependencies are the independent gtker crates.
+  General-purpose libraries may handle serialization, hashing and errors. This is not a style preference: a path
   dependency on a server is exactly what makes a test client un-runnable against anything else.
 * **No shared decoder with the server.** `values_mask.rs` and `spatial.rs` were once re-exports of
   LyraCore's copies. A test tool that decodes with the encoder's own logic cannot catch an encoder
@@ -62,6 +61,16 @@ and assert server state. None of it is protocol.
 `adapter-env.sh` locates a Native Host checkout when setup needs one. See the
 [adapter instructions](adapters/lyracore/README.md) for endpoints and password input.
 The retired shell scenarios and playerbots observer have been removed.
+
+## Library
+
+`wire_client` exposes `WireClient`, `Endpoints`, independent `decode` packet fields,
+`values_mask` and `spatial`. `WireClient::login_at` takes explicit endpoints for callers that
+connect to two servers in one process. `decode::decode(opcode, body)` accepts plaintext bodies
+without a socket. Unsupported opcodes, truncated fields and trailing bytes fail.
+
+The conformance scenarios and comparator will use this boundary. Packet text stays in memory until
+the recorder hashes it. No server crate supplies a decoder or a fixture implementation.
 
 ## Commands
 
@@ -173,3 +182,7 @@ Dual-licensed under either of
 at your option. Unless you explicitly state otherwise, any contribution intentionally submitted for
 inclusion in this work by you shall be dual licensed as above, without any additional terms or
 conditions.
+
+Packet-layout references for the conformance decoder are vmangos
+[`Query.cpp`](https://github.com/vmangos/core/blob/d9173eca3ea08dd985c52dabbcc826898d1d0b77/src/game/Server/Packets/Query.cpp)
+and the independent gtker build-5875 definitions in `wow_world_messages` 0.3.0.

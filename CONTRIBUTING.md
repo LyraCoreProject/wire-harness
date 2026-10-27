@@ -9,7 +9,7 @@ section is the full statement of this; it is the reason the repository exists se
 
 Concretely, a patch to `src/` must not:
 
-* add a path dependency, or any dependency that is not a protocol crate;
+* add a dependency on a server crate, including a path dependency;
 * introduce a default account, password, character or target name;
 * accept a password anywhere but stdin, or log one;
 * re-export a decoder from a server so the two share an implementation. (An independent decoder is

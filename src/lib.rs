@@ -1,29 +1,9 @@
-//! Headless 1.12.1 (build 5875) wire client — a STANDALONE test client for any server that
-//! implements the vanilla protocol.
-//!
-//! Speaks the real WoW protocol — SRP6 logon (default port 3724) then the encrypted world session
-//! — so tests can drive CMSG and ASSERT on decoded SMSG, instead of QAing through the wine client.
-//! All blocking std I/O — no async.
-//!
-//! # The standalone boundary (#244)
-//!
-//! Everything in this crate is build-5875 protocol and nothing else: it must compile, run and be
-//! useful with no server-side code in the workspace at all. Concretely, it does not depend on any
-//! server crate, does not name a server's databases/reducers/constants, and takes every server
-//! fact — host, ports, account, character — from [`cli`]. Its own [`values_mask`] decoder and
-//! [`spatial`] helpers are deliberate independent implementations, not shared server code: a test
-//! tool that decodes with the encoder's own logic cannot catch an encoder bug.
-//!
-//! The project-specific half — fixtures, database orchestration, debug reducers — lives OUTSIDE
-//! the crate, in the shell adapters under `adapters/`, and reaches this client only through the
-//! documented CLI. See `README.md`.
+//! Read README.md for the independent codec and adapter boundary.
 
-// A handful of decode helpers hand back the whole decoded packet as a tuple (`char_enumerate`,
-// `who_request`). Naming a struct per SMSG would be more types than the assertions that consume
-// them are worth — the tuple IS the packet, positionally, and it is read once at the call site.
 #![allow(clippy::type_complexity)]
 
 pub mod cli;
+pub mod decode;
 pub mod metrics;
 pub mod spatial;
 pub mod values_mask;
@@ -129,12 +109,7 @@ struct DecodedFrame {
     actual_body_len: usize,
 }
 
-/// A frame this session is in the middle of assembling from the wire, spanning however many
-/// [`read_guarded_world_message`] calls it takes to get all the bytes (issue #209 fix): the header
-/// has already been read in full and decrypted EXACTLY ONCE (`header_raw`/`opcode`/`payload_len`),
-/// `parser_dec` is the pre-header-decrypt cipher clone the generated decoder needs, and `body` is
-/// however many of `payload_len` raw (still-encrypted) body bytes have been pulled off the socket
-/// so far. Kept on [`FrameLog`] so a read timeout mid-body doesn't lose it.
+/// A partially received frame; its header cipher advances once, even across timeouts.
 struct PendingFrame {
     opcode: u16,
     payload_len: usize,
@@ -143,22 +118,7 @@ struct PendingFrame {
     body: Vec<u8>,
 }
 
-/// Per-session crash-capture state (issue #209 probe, deliverable 1): a ring buffer of the last
-/// [`CRASH_RING_CAPACITY`] successfully-decoded frames, plus whatever [`read_guarded_world_message`]
-/// read of the CURRENT (possibly failing) frame's header/body before it gave up. [`WireClient::recv`]
-/// updates this on every attempt and — only at the point a decode failure actually ends the session
-/// (the panic path, the huge-alloc guard, or the accumulated-skip desync bailout) — dumps it under
-/// `crash_dump_dir()`, turning "it crashed" into the exact byte sequence that did it.
-///
-/// Also carries the #209 read-timeout fix's resumable-read state: `pending_header` (bytes of the
-/// 4-byte header collected so far, when a header read is in flight) and `pending_frame` (the rest,
-/// once the header is complete). Both survive across separate [`read_guarded_world_message`] calls
-/// — the shape a caller like `recv_for` produces when it swallows a socket-timeout `Err` and retries
-/// — so a timeout landing mid multi-byte read never drops already-consumed bytes onto the floor.
-/// Losing those bytes was issue #209's actual bug: the next call would resume reading from whatever
-/// stream position the partial read left off at, decrypt THOSE (wrong) 4 bytes as if they were a
-/// fresh header, and permanently desync the header-cipher's `index`/`previous_value` state from the
-/// real byte stream — every later frame decodes as garbage from that point on.
+/// Read buffers and diagnostics for the current world connection.
 struct FrameLog {
     label: String,
     ring: std::collections::VecDeque<DecodedFrame>,
@@ -384,36 +344,14 @@ fn fill_resumable<R: Read>(r: &mut R, acc: &mut Vec<u8>, target: usize) -> std::
     Ok(())
 }
 
-/// Read one full frame (header + body) off the wire and hand it to the generated decoder.
-///
-/// Issue #209 fix: the header and body are each assembled into a persistent buffer on `log`
-/// ([`FrameLog::pending_header`] / [`FrameLog::pending_frame`]) via [`fill_resumable`] rather than a
-/// stack-local `read_exact` — so if this call returns a socket-timeout error partway through either
-/// one, the bytes already read are NOT lost; the next call to this function resumes filling the same
-/// buffer instead of restarting at (and permanently desyncing from) the wrong stream position. The
-/// header is decrypted via `dec.decrypt_server_header` exactly once, only after all 4 raw bytes are
-/// in hand — never partially, never twice. Once the full body is buffered, decoding runs entirely
-/// in memory (a `Cursor`, not the live socket), so nothing past this point can time out or leave the
-/// frame half-consumed.
-///
-/// `log` records the attempt (issue #209 crash-capture, deliverable 1) regardless of outcome: the
-/// header/opcode/body-preview are stashed BEFORE the decode is attempted (so a header/payload read
-/// failure still leaves something in the dump), and a successful decode is appended to the ring
-/// buffer with its declared vs. actually-consumed body length.
-fn read_guarded_world_message<R: Read>(
+fn read_frame<R: Read>(
     r: &mut R,
     dec: &mut DecrypterHalf,
     log: &mut FrameLog,
-    mut observe_frame: impl FnMut(u16, &[u8]),
-) -> Result<WorldSmsg> {
+) -> Result<PendingFrame> {
     if log.pending_frame.is_none() {
-        // Header phase: resume (or start) filling the 4 raw header bytes. On error, whatever was
-        // read this call and any prior call is already in `log.pending_header` — nothing lost.
-        fill_resumable(r, &mut log.pending_header, 4)
-            .map_err(|e| anyhow!("world frame header: {e}"))?;
+        fill_resumable(r, &mut log.pending_header, 4).context("world frame header")?;
 
-        // Clone BEFORE the real `dec` advances — the generated decoder re-derives the header from
-        // this pre-advance clone as part of its own decode, exactly as the pre-#209-fix code did.
         let parser_dec = dec.clone();
         let mut header_raw = [0u8; 4];
         header_raw.copy_from_slice(&log.pending_header);
@@ -441,21 +379,26 @@ fn read_guarded_world_message<R: Read>(
         });
     }
 
-    // Body phase: resume (or start) filling `payload_len` raw body bytes. Left in `log.pending_frame`
-    // (not yet taken) so a timeout here keeps the header decrypt result AND the partial body.
     {
         let pf = log.pending_frame.as_mut().expect("just ensured Some above");
-        fill_resumable(r, &mut pf.body, pf.payload_len)
-            .map_err(|e| anyhow!("world frame payload: {e}"))?;
+        fill_resumable(r, &mut pf.body, pf.payload_len).context("world frame payload")?;
     }
-    // The full frame is in memory now — take ownership; a later call starts the NEXT frame fresh.
+    Ok(log.pending_frame.take().expect("complete pending frame"))
+}
+
+fn read_guarded_world_message<R: Read>(
+    r: &mut R,
+    dec: &mut DecrypterHalf,
+    log: &mut FrameLog,
+    mut observe_frame: impl FnMut(u16, &[u8]),
+) -> Result<WorldSmsg> {
     let PendingFrame {
         opcode,
         payload_len,
         header_raw,
         mut parser_dec,
         body,
-    } = log.pending_frame.take().expect("just ensured Some above");
+    } = read_frame(r, dec, log)?;
 
     let preview_len = payload_len.min(FRAME_DIAGNOSTIC_BYTES);
     let preview = body[..preview_len].to_vec();
@@ -509,18 +452,17 @@ fn read_guarded_world_message<R: Read>(
 }
 
 fn ns(s: &str) -> Result<NormalizedString> {
-    NormalizedString::new(s).map_err(|e| anyhow!("normalized string {s:?}: {e:?}"))
+    NormalizedString::new(s).map_err(|_| anyhow!("invalid SRP credential format"))
 }
 
 /// Complete SRP6 logon against THIS RUN'S configured logon tier ([`cli::set_endpoints`], i.e.
 /// `--host`/`--logon-port`), and return `(session key K, world server address)`.
 pub fn logon(account: &str, password: &str) -> Result<([u8; 40], String)> {
-    logon_at(&endpoints().logon_addr, account, password)
+    let (key, advertised) = logon_at(&endpoints().logon_addr, account, password)?;
+    Ok((key, endpoints().world_addr(&advertised)))
 }
 
-/// [`logon`] against an explicit `host:port` (a bare host defaults to the standard logon port).
-/// Added for the capacity benchmark, which must be re-runnable against an arbitrary shard's
-/// gateway (work-item #18 AC#4); every other caller goes through [`logon`].
+/// Returns the advertised world address without consulting process-global endpoints.
 pub fn logon_at(logon_addr: &str, account: &str, password: &str) -> Result<([u8; 40], String)> {
     let addr = if logon_addr.contains(':') {
         logon_addr.to_string()
@@ -562,7 +504,7 @@ pub fn logon_at(logon_addr: &str, account: &str, password: &str) -> Result<([u8;
     let challenge = SrpClientChallenge::new(
         ns(account)?,
         ns(password)?,
-        g[0],
+        *g.first().context("empty SRP generator")?,
         n,
         PublicKey::from_le_bytes(server_pubkey).map_err(|e| anyhow!("server pubkey: {e:?}"))?,
         salt,
@@ -598,9 +540,7 @@ pub fn logon_at(logon_addr: &str, account: &str, password: &str) -> Result<([u8;
             .unwrap_or_default(),
         other => bail!("realm list failed: {other:?}"),
     };
-    // `--world-port` (if given) overrides the realm-list answer: a server may advertise an address
-    // that is not routable from where the harness runs (container, port-forward, tunnel).
-    Ok((k, endpoints().world_addr(&realm_answer)))
+    Ok((k, realm_answer))
 }
 
 /// A live, authenticated world connection. Send CMSG via [`WireClient::send`], read SMSG
@@ -645,8 +585,6 @@ impl WireClient {
         Self::login_as_race(account, password, char_name, class, Race::Human)
     }
 
-    /// [`login_as`] with the race used when the character has to be CREATED spelled out — the
-    /// `--class`/`--race` path. The pair must be legal on build 5875 (no Human shaman).
     pub fn login_as_race(
         account: &str,
         password: &str,
@@ -654,11 +592,23 @@ impl WireClient {
         class: Class,
         race: Race,
     ) -> Result<Self> {
-        let (k, world_addr) = logon(account, password)?;
-        let mut c = Self::connect_world(&world_addr, account, k)?;
-        let guid = c.create_or_find_char_as(char_name, class, race)?;
-        c.player_login(guid)?;
-        Ok(c)
+        Self::login_at(endpoints(), account, password, char_name, class, race)
+    }
+
+    /// Uses only these endpoints, so independent library callers can connect to different servers.
+    pub fn login_at(
+        target: &Endpoints,
+        account: &str,
+        password: &str,
+        char_name: &str,
+        class: Class,
+        race: Race,
+    ) -> Result<Self> {
+        let (key, advertised) = logon_at(&target.logon_addr, account, password)?;
+        let mut client = Self::connect_world(&target.world_addr(&advertised), account, key)?;
+        let guid = client.create_or_find_char_as(char_name, class, race)?;
+        client.player_login(guid)?;
+        Ok(client)
     }
 
     /// The world handshake: plaintext SMSG_AUTH_CHALLENGE -> CMSG_AUTH_SESSION -> encrypted
@@ -806,7 +756,12 @@ impl WireClient {
     /// canonical user (`SendAddonMessage` on the real client; this fakes it byte-for-byte).
     pub fn send_raw(&mut self, opcode: u32, body: &[u8]) -> Result<()> {
         use std::io::Write;
-        let size = (body.len() + 4) as u16; // size counts the u32 opcode, not itself
+        let size = u16::try_from(
+            body.len()
+                .checked_add(4)
+                .context("client frame too large")?,
+        )
+        .context("client frame exceeds the u16 size field")?;
         self.enc
             .write_encrypted_client_header(&mut self.stream, size, opcode)
             .map_err(|e| anyhow!("send_raw header: {e}"))?;
@@ -816,36 +771,18 @@ impl WireClient {
         Ok(())
     }
 
-    /// Read the next raw encrypted frame without gtker-decoding the payload.
-    /// Returns `(opcode, payload_bytes)`. Advances the cipher state exactly like `recv()`,
-    /// so `recv()` and `recv_raw()` can be interleaved freely — one packet at a time.
-    /// Use this for packets gtker rejects (e.g. TYPE-less partial-VALUES updates).
-    /// Override the world socket's read timeout (default 10s). The soak/AOI harness modes drain on
-    /// a sub-second cadence between synthesized movement sends, so the default would stall them.
-    pub fn set_recv_timeout(&mut self, d: Duration) -> Result<()> {
-        self.stream.set_read_timeout(Some(d))?;
+    pub fn set_recv_timeout(&mut self, duration: Duration) -> Result<()> {
+        self.stream.set_read_timeout(Some(duration))?;
         Ok(())
     }
 
+    /// Resumes partial frames after timeouts; may alternate with `recv` at frame boundaries.
     pub fn recv_raw(&mut self) -> Result<(u16, Vec<u8>)> {
-        use std::io::Read;
-        let hdr = self
-            .dec
-            .read_and_decrypt_server_header(&mut self.stream)
-            .map_err(|e| anyhow!("recv_raw header: {e}"))?;
-        // `hdr.size` = opcode (2 bytes) + payload; subtract 2 to get payload-only length.
-        let payload_len = (hdr.size as usize).saturating_sub(2);
-        let mut payload = vec![0u8; payload_len];
-        self.stream
-            .read_exact(&mut payload)
-            .map_err(|e| anyhow!("recv_raw payload: {e}"))?;
-        Ok((hdr.opcode, payload))
+        let frame = read_frame(&mut self.stream, &mut self.dec, &mut self.frame_log)?;
+        Ok((frame.opcode, frame.body))
     }
 
-    /// Read the next *decodable* SMSG. Skips type-stripped partial VALUES packets that gtker cannot
-    /// parse after observing any own-Character health and ghost fields they carry. Their frame is
-    /// still consumed off the cipher stream so the keystream stays in lockstep.
-    /// Records any CREATE_OBJECT guids it passes for later targeting.
+    /// Skips unsupported generated decodes after observing partial VALUES; socket failures propagate.
     pub fn recv(&mut self) -> Result<WorldSmsg> {
         let mut skipped = 0u32;
         loop {
@@ -878,65 +815,26 @@ impl WireClient {
             ) {
                 Ok(m) => {
                     self.note_update(&m);
-                    // The real 5875 client answers a cross-map transfer (SMSG_NEW_WORLD after
-                    // TRANSFER_PENDING) with MSG_MOVE_WORLDPORT_ACK once its load screen ends —
-                    // without the ack the server never rebuilds the entity and the character is
-                    // limbo'd. Reflex lives HERE in the one decode point so EVERY mode survives
-                    // being ported (a held party leader entering an instance, 276).
                     if matches!(m, WorldSmsg::SMSG_NEW_WORLD(_)) {
                         let _ = self.send(&MSG_MOVE_WORLDPORT_ACK {});
                     }
                     return Ok(m);
                 }
                 Err(e) => {
-                    // An unsafe length prefix or a decoder panic is not an ordinary gtker gap.
-                    // Surface the diagnostic, close only this connection, and let a multi-session
-                    // harness keep every other player alive (issue #210).
                     if is_unsafe_server_frame(&e) {
                         eprintln!("[wire] {e}");
                         self.frame_log.dump(&e);
                         let _ = self.stream.shutdown(Shutdown::Both);
                         return Err(e);
                     }
-                    // Diagnostic: surface every skipped (undecodable) frame when asked — the gtker
-                    // wire gaps (danger-zones §2) are otherwise silent.
                     if std::env::var_os("WIRE_LOG_SKIPS").is_some() {
                         eprintln!("[wire-skip] {e}");
                     }
-                    // A SOCKET timeout is terminal, not a skip: the skip loop exists for packets
-                    // gtker can't decode (which fail instantly). Swallowing timeouts here made a
-                    // quiet-world recv() spin up to 64 × the 10s read timeout (scenario pads with
-                    // nothing moving nearby hit this as a ten-minute hang).
-                    let msg = e.to_string().to_lowercase();
-                    // Linux EAGAIN reads "resource temporarily unavailable" (os error 11).
-                    if msg.contains("timed out")
-                        || msg.contains("would block")
-                        || msg.contains("temporarily unavailable")
-                    {
-                        return Err(anyhow!("recv: socket read timeout: {e}"));
-                    }
-                    // A CLOSED connection ("connection closed mid-frame" — [`fill_resumable`] hitting
-                    // EOF) is also terminal, and for the same reason a timeout is: this is a "broken
-                    // stream", not a "nothing yet". Issue #209 fix, found live: without this, a
-                    // connection that ends for ANY reason (a graceful peer close, a session the
-                    // gateway shed under load — nothing to do with #209's decode-corruption at all)
-                    // fell into the `skipped`/dump path below. A closed socket's reads return
-                    // instantly (no blocking), so a caller that keeps calling `recv()` once per poll
-                    // tick for the rest of a benchmark's hold window hit the 64-skip threshold on
-                    // EVERY call and wrote a fresh crash dump EVERY time — one dead session produced
-                    // thousands of files, burying the (correctly now-absent) real corruption signal
-                    // under noise that has nothing to do with it. No dump here: an ended stream is
-                    // not decode evidence worth capturing.
-                    if msg.contains("connection closed") {
-                        return Err(anyhow!("recv: connection closed: {e}"));
+                    if e.chain().any(|cause| cause.is::<std::io::Error>()) {
+                        return Err(e);
                     }
                     skipped += 1;
                     if skipped > 64 {
-                        // 64 STRAIGHT ordinary `read_encrypted` errors (as opposed to the ONE-shot
-                        // panic/huge-alloc guard above) is the OTHER shape a real desync can take: no
-                        // single frame trips a guard, but nothing ever decodes cleanly again. Dump the
-                        // same diagnostic — this is exactly the "any read_encrypted error" case #209's
-                        // probe asks to capture, just detected after it accumulates instead of once.
                         let terminal = anyhow!("recv: stream desync/closed after 64 skips: {e}");
                         self.frame_log.dump(&terminal);
                         return Err(terminal);
@@ -947,8 +845,6 @@ impl WireClient {
         }
     }
 
-    /// Read until a message satisfies `pred`, returning it. Other (decodable) messages are
-    /// discarded (but their guids are still recorded).
     pub fn recv_until<F: Fn(&WorldSmsg) -> bool>(&mut self, pred: F) -> Result<WorldSmsg> {
         for _ in 0..256 {
             let m = self.recv()?;
@@ -1504,16 +1400,15 @@ pub fn create_object_guid(o: &wow_world_messages::vanilla::Object) -> Option<u64
     }
 }
 
-/// Is this `recv()` error just the socket read timeout — "nothing arrived in the last window" —
-/// rather than a broken stream?
-///
-/// A hand-rolled drain loop that reads on a WALL-CLOCK deadline must keep going through these, or
-/// the first quiet gap ends it early: `test-cast-interrupt.sh` failed under full-suite load for
-/// exactly that reason, breaking out of a 12s deadline within a second and reporting "no interrupt"
-/// for a packet that had not been sent yet. Deadline-based helpers (`recv_for`/`recv_raw_for`)
-/// already handle this internally; this is for the loops that don't.
-pub fn is_read_timeout(e: &anyhow::Error) -> bool {
-    e.to_string().contains("socket read timeout")
+pub fn is_read_timeout(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause.downcast_ref::<std::io::Error>().is_some_and(|io| {
+            matches!(
+                io.kind(),
+                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+            )
+        })
+    }) || error.to_string().contains("socket read timeout")
 }
 
 /// Did [`WireClient::recv`] reject a frame before an unbounded generated-decoder allocation, or
@@ -2141,11 +2036,6 @@ mod tests {
         cleanup_dumps_labeled(label);
     }
 
-    /// Mock [`Read`] for the #209 read-timeout-fix tests: a scripted sequence of "read steps" that
-    /// can deliver fewer bytes than requested (a legitimate short read, same as a real socket under
-    /// load) or fail with a `WouldBlock` error (what `TcpStream` read-timeout expiry actually
-    /// produces). Once the script is exhausted it falls back to delivering everything remaining in
-    /// one shot, so a test only has to script the interesting fragmentation points.
     struct ScriptedReader {
         data: Vec<u8>,
         pos: usize,
@@ -2208,11 +2098,7 @@ mod tests {
             match read_guarded_world_message(r, dec, log, |_, _| {}) {
                 Ok(m) => out.push(m),
                 Err(e) => {
-                    let msg = e.to_string().to_lowercase();
-                    assert!(
-                        msg.contains("would block"),
-                        "unexpected non-timeout error: {e}"
-                    );
+                    assert!(is_read_timeout(&e), "unexpected non-timeout error: {e}");
                     retries += 1;
                     assert!(
                         retries < 1000,
@@ -2224,12 +2110,6 @@ mod tests {
         out
     }
 
-    /// Issue #209's actual fix, pinned: fragmenting the exact same wire bytes with 1-byte dribbles
-    /// and timeouts landing mid-header and mid-body — then retrying exactly like a real caller does
-    /// — must decode to the IDENTICAL sequence of messages as reading the same bytes with no
-    /// fragmentation at all. Before the fix, a timeout mid multi-byte read silently dropped the bytes
-    /// already read and resumed at the wrong stream offset, permanently desyncing the header cipher;
-    /// this pins that it no longer does.
     #[test]
     fn resumable_read_survives_adversarial_fragmentation_and_matches_the_unfragmented_decode() {
         let (_, crypto) =
@@ -2301,10 +2181,42 @@ mod tests {
         }
     }
 
-    /// A single byte at a time, for EVERY byte in the frame (not just at a few chosen points) — the
-    /// most extreme legal fragmentation a real (if pathological) socket could produce, with no
-    /// timeouts involved at all. Guards the resumable-fill loop itself, independent of the
-    /// timeout-retry path the test above exercises.
+    #[test]
+    fn raw_frames_resume_timeouts_and_leave_the_next_decoded_frame_intact() {
+        let (_, crypto) =
+            ProofSeed::new().into_client_header_crypto(&ns("TEST").unwrap(), [7; 40], 0x1234_5678);
+        let (mut enc, mut dec) = crypto.split();
+        let mut reader = ScriptedReader {
+            data: fragmentation_test_wire(&mut enc),
+            pos: 0,
+            script: [
+                ReadStep::Bytes(4),
+                ReadStep::Bytes(2),
+                ReadStep::Timeout,
+                ReadStep::Bytes(2),
+                ReadStep::Bytes(3),
+                ReadStep::Timeout,
+            ]
+            .into(),
+        };
+        let mut log = FrameLog::new("RAW");
+        assert_eq!(
+            read_frame(&mut reader, &mut dec, &mut log).unwrap().opcode,
+            0x004d
+        );
+        for _ in 0..2 {
+            let error = read_frame(&mut reader, &mut dec, &mut log).err().unwrap();
+            assert!(is_read_timeout(&error));
+        }
+        let frame = read_frame(&mut reader, &mut dec, &mut log).unwrap();
+        assert_eq!(frame.opcode, 0x01cd);
+        assert_eq!(frame.body, [210, 4, 0, 0, 99, 0, 0, 0]);
+        assert!(matches!(
+            read_guarded_world_message(&mut reader, &mut dec, &mut log, |_, _| {}).unwrap(),
+            WorldSmsg::SMSG_LOGOUT_CANCEL_ACK
+        ));
+    }
+
     #[test]
     fn resumable_read_survives_single_byte_dribbles_with_no_timeouts() {
         let (_, crypto) =
@@ -2344,20 +2256,12 @@ mod tests {
         );
     }
 
-    /// Found live during the #209 repro (not in the original hunt list): a connection that's
-    /// genuinely CLOSED (the peer hung up — nothing to do with #209's decode-desync) used to fall
-    /// into the same `skipped`/64-strikes bucket as an ordinary undecodable frame. A closed socket's
-    /// reads return instantly (no blocking), so a caller that polls `recv()` once per tick for the
-    /// rest of a benchmark's hold window hit the 64-skip threshold on EVERY call and wrote a fresh
-    /// crash dump EVERY time — one dead session produced thousands of files (observed on the live
-    /// 150-mage repro), burying the real corruption signal (there wasn't any left) under noise. This
-    /// pins that a closed connection fails fast, every time, and is never mistaken for #209 evidence.
     #[test]
     fn a_closed_connection_is_terminal_and_does_not_flood_crash_dumps() {
         let label = "CRASHTEST-closed";
         cleanup_dumps_labeled(label);
 
-        let mut client = client_receiving_frames_labeled(&[(0x004D, &[])], label); // one clean frame, then the server drops
+        let mut client = client_receiving_frames_labeled(&[(0x004D, &[])], label);
         assert!(matches!(
             client.recv().unwrap(),
             WorldSmsg::SMSG_LOGOUT_COMPLETE
@@ -2372,7 +2276,9 @@ mod tests {
                 "a closed connection is not decode corruption: {err}"
             );
             assert!(
-                err.to_string().contains("connection closed"),
+                err.chain().any(|cause| cause
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|io| io.kind() == std::io::ErrorKind::UnexpectedEof)),
                 "unexpected error: {err}"
             );
         }
@@ -2393,8 +2299,6 @@ mod tests {
         );
     }
 
-    /// The ring buffer is BOUNDED (`CRASH_RING_CAPACITY`) — a long-lived session must not grow its
-    /// dump file without bound; only the frames closest to the crash matter for this probe.
     #[test]
     fn the_ring_buffer_keeps_only_the_last_32_frames() {
         let label = "CRASHTEST-ring-cap";
