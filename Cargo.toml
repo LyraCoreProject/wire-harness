@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "wire-client"
-version = "0.2.0-conformance.1"
+version = "0.2.0-conformance.2"
 edition = "2021"
 rust-version = "1.80"
 license = "MIT OR Apache-2.0"
@@ -40,3 +40,6 @@ serde_json = "1"
 toml = "0.8"
 sha2 = "0.10"
 flate2 = "1"
+
+[dev-dependencies]
+syn = { version = "2", features = ["full", "visit"] }

@@ -479,13 +479,14 @@ dependencies = [
 
 [[package]]
 name = "wire-client"
-version = "0.2.0-conformance.1"
+version = "0.2.0-conformance.2"
 dependencies = [
  "anyhow",
  "flate2",
  "serde",
  "serde_json",
  "sha2",
+ "syn 2.0.119",
  "toml",
  "wow_login_messages",
  "wow_srp",

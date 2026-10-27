@@ -1,16 +1,19 @@
 {
   "header": {
-    "schema_version": 1,
+    "schema_version": 2,
     "scenario": "connection_identity",
     "behavior": "connection_identity",
-    "scenario_sha256": "87ffa5973a38251903ebc9303ea1875f5c53bebd4cb4907e0d34710737b0d738",
-    "recorded_at_unix_ms": 1793084897265,
-    "provenance": {
-      "server": "vmangos",
-      "binary_release": "latest/dev-linux-amd64-d9173ec.tar.gz",
-      "binary_sha256": "6fadf9dd692fdffccec1ad75aea15ff3e8d75b92a162f750f6affc9da6fd7d88",
-      "source_commit": "d9173eca3ea08dd985c52dabbcc826898d1d0b77",
-      "database_commit": "464179081673cfd240f7ffe7f0daf96bca0b5a70"
+    "scenario_sha256": "3cf38c39c4b6a298cd68f8b5596e4253cbed7cf8afa7dd06a5b9ba5b5b90d4a6",
+    "recorded_at_unix_ms": 1793090091798,
+    "origin": {
+      "kind": "golden",
+      "provenance": {
+        "server": "vmangos",
+        "binary_release": "latest/dev-linux-amd64-d9173ec.tar.gz",
+        "binary_sha256": "6fadf9dd692fdffccec1ad75aea15ff3e8d75b92a162f750f6affc9da6fd7d88",
+        "source_commit": "d9173eca3ea08dd985c52dabbcc826898d1d0b77",
+        "database_commit": "464179081673cfd240f7ffe7f0daf96bca0b5a70"
+      }
     }
   },
   "packets": [
@@ -27,6 +30,14 @@
           "value": 7
         }
       }
+    },
+    {
+      "checkpoint": "ping",
+      "stream": {
+        "kind": "unexpected"
+      },
+      "opcode": 221,
+      "fields": {}
     },
     {
       "checkpoint": "name",
@@ -46,7 +57,7 @@
         },
         "guid": {
           "type": "guid",
-          "value": 7
+          "value": 10
         },
         "name": {
           "type": "text_sha256",

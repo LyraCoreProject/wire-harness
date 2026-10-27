@@ -3,7 +3,8 @@ use std::process::{Command, Stdio};
 
 use anyhow::{ensure, Context, Result};
 use wire_client::cli::Invocation;
-use wire_client::scenario::{FixtureAdapter, FixtureVerb};
+use wire_client::runner::FixtureAdapter;
+use wire_client::scenario::FixtureVerb;
 use wire_client::WireClient;
 
 pub struct Adapter<'a> {
