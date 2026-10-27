@@ -4,7 +4,7 @@
     "scenario": "connection_identity",
     "behavior": "connection_identity",
     "scenario_sha256": "3cf38c39c4b6a298cd68f8b5596e4253cbed7cf8afa7dd06a5b9ba5b5b90d4a6",
-    "recorded_at_unix_ms": 1793088980840,
+    "recorded_at_unix_ms": 1793090091798,
     "origin": {
       "kind": "golden",
       "provenance": {
@@ -40,22 +40,6 @@
       "fields": {}
     },
     {
-      "checkpoint": "ping",
-      "stream": {
-        "kind": "unexpected"
-      },
-      "opcode": 221,
-      "fields": {}
-    },
-    {
-      "checkpoint": "ping",
-      "stream": {
-        "kind": "unexpected"
-      },
-      "opcode": 221,
-      "fields": {}
-    },
-    {
       "checkpoint": "name",
       "stream": {
         "kind": "reply",
@@ -73,7 +57,7 @@
         },
         "guid": {
           "type": "guid",
-          "value": 11
+          "value": 10
         },
         "name": {
           "type": "text_sha256",

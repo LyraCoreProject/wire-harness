@@ -45,6 +45,9 @@ DOCKER
 The GM World Session applies `.levelup NAME DELTA`, `.go xyzo` and `.namego NAME`. Gameplay runs
 on the other Account throughout. The adapter reconnects the scenario Character and checks its
 name, race, class, level, position and orientation before capture.
+Teleport acknowledgements use a full-width GUID, matching the pinned server's
+[packet reader](https://github.com/vmangos/core/blob/d9173eca3ea08dd985c52dabbcc826898d1d0b77/src/game/Server/Packets/Movement.cpp#L16-L23).
+The shared client encoder uses a packed GUID, which this server rejects.
 
 ## Archive cache and re-pinning
 

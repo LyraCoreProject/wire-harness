@@ -7,8 +7,7 @@ use wire_client::runner::FixtureAdapter;
 use wire_client::scenario::FixtureVerb;
 use wire_client::{is_read_timeout, logon_at, LogonProofFailure, WireClient};
 use wow_world_messages::vanilla::{
-    opcodes::ServerOpcodeMessage as Smsg, CMSG_MESSAGECHAT_ChatType, Language,
-    MSG_MOVE_TELEPORT_ACK_Client, CMSG_MESSAGECHAT,
+    opcodes::ServerOpcodeMessage as Smsg, CMSG_MESSAGECHAT_ChatType, Language, CMSG_MESSAGECHAT,
 };
 
 pub struct Adapter<'a>(pub &'a Invocation);
@@ -107,11 +106,14 @@ fn drain_one(client: &mut WireClient, window: Duration) -> Result<()> {
             Ok(Smsg::MSG_MOVE_TELEPORT_ACK(teleport))
                 if teleport.guid.guid() == client.self_guid =>
             {
-                client.send(&MSG_MOVE_TELEPORT_ACK_Client {
-                    guid: teleport.guid,
-                    movement_counter: teleport.movement_counter,
-                    time: Duration::from_millis(u64::from(teleport.info.timestamp)),
-                })?;
+                client.send_raw(
+                    0x00c7,
+                    &teleport_ack(
+                        teleport.guid.guid(),
+                        teleport.movement_counter,
+                        teleport.info.timestamp,
+                    ),
+                )?;
             }
             Ok(_) => (),
             Err(error) if is_read_timeout(&error) => (),
@@ -119,6 +121,15 @@ fn drain_one(client: &mut WireClient, window: Duration) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn teleport_ack(guid: u64, counter: u32, timestamp: u32) -> [u8; 16] {
+    // VMangos's MoveTeleportAck reads a full GUID; the shared encoder packs it.
+    let mut body = [0; 16];
+    body[..8].copy_from_slice(&guid.to_le_bytes());
+    body[8..12].copy_from_slice(&counter.to_le_bytes());
+    body[12..].copy_from_slice(&timestamp.to_le_bytes());
+    body
 }
 
 fn command(client: &mut WireClient, message: String) -> Result<()> {
@@ -132,6 +143,14 @@ fn command(client: &mut WireClient, message: String) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn teleport_ack_keeps_the_full_guid_on_the_wire() {
+        assert_eq!(
+            teleport_ack(7, 2, 0x01020304),
+            [7, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 4, 3, 2, 1]
+        );
+    }
 
     #[test]
     fn proof_failure_gets_exactly_one_new_attempt() {
