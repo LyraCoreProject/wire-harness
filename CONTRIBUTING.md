@@ -21,7 +21,7 @@ Concretely, a patch to `src/` must not:
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
-python3 -B -m unittest discover -s tests -p '*_setup.py'
+python3 -B -m unittest discover -s tests -p 'test_*.py'
 shellcheck adapters/lyracore/*.sh adapters/vmangos/*.sh
 ```
 
