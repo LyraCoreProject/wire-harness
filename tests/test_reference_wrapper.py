@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 import socket
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -64,7 +65,7 @@ elif sys.argv[1] == 'compare':
 
     def test_failed_shutdown_rejects_and_removes_recording(self):
         env = dict(os.environ, HOME=str(self.home), WIRE_BIN=str(self.wire),
-                   PATH=f'{self.bin}:/usr/bin:/bin')
+                   PATH=f'{self.bin}:{Path(sys.executable).parent}:/usr/bin:/bin')
         result = subprocess.run(
             ['/bin/bash', str(ROOT / 'adapters/vmangos/reference.sh'), 'record-checked',
              str(self.scenario), str(self.output)],
