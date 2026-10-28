@@ -719,7 +719,7 @@ tolerance_ms = 100
         assert!(error.contains("has one sample"), "{error}");
         let scenario = wire_client::scenario::Scenario::parse(&invalid).unwrap();
         assert!(
-            wire_client::compare::check_character_observations(&scenario, &observed, 7).is_err()
+            wire_client::compare::check_character_observations(&scenario, &observed, 7).is_ok()
         );
     }
     let multi = text
@@ -738,6 +738,7 @@ tolerance_ms = 100
     assert!(compare(&expected, expected.trace(), &[])
         .unwrap()
         .is_match());
+    assert!(compare_character_observations(&expected, &observed[..2], 7, 1000, &[]).is_ok());
 }
 
 #[test]
@@ -749,9 +750,9 @@ fn opening_and_other_characters_do_not_supply_rule_samples() {
     opening.stream = Stream::Opening;
     observed.insert(0, opening);
     observed.push(movement(99, 2));
-    let scenario = wire_client::scenario::Scenario::parse(&text).unwrap();
-    let error =
-        wire_client::compare::check_character_observations(&scenario, &observed, 7).unwrap_err();
+    let mut header = golden(SCENARIO, &observed).trace().header.clone();
+    header.scenario_sha256 = Sha256Digest::of(text.as_bytes());
+    let error = GoldenTrace::new(&text, Trace::record(header, &observed).unwrap()).unwrap_err();
     assert!(error.to_string().contains("rule spline has one sample"));
 }
 
