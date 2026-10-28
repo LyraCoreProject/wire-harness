@@ -59,7 +59,7 @@ node_id = 4
 [[fixtures]]
 verb = "creature"
 id = "flight_master"
-entry = 352
+entry = 523
 offset = 2.0
 
 [[steps]]

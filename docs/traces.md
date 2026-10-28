@@ -279,3 +279,13 @@ Both use the same schema 3, provenance and respective scenario hashes as the Gol
 Opening packets and nearby entities account for count differences outside the compared scope.
 The comparator still checks
 every passenger field and every declared zone packet.
+
+## Recorded evidence for conformance.6
+
+The taxi scenario uses entry 523 so its fixture cannot be confused with the imported entry 352
+at Stormwind node 2. The Reference Server pins above did not change. The new taxi Golden Trace
+was recorded at Unix ms 1793172492046 with Character GUID 10, 236 scrubbed packets and scenario
+SHA-256 `264f82f2ae727eb2be18ca11e7d6b73aaad304c49ae31edcf8aadb072f1e095a`.
+An independent recording at Unix ms 1793172620049 used Character GUID 12 and contained 242
+packets. Comparing it with the Golden Trace returned `{"differences": []}`. The
+`connection_identity` trace remains the conformance.5 recording.
