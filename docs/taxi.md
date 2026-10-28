@@ -22,7 +22,9 @@ that difference. TaxiPath.dbc defines route 6, with a fare of 110 copper and 28 
 ## Fixtures and observations
 
 The scenario creates a level-1 human warrior, gives exactly 1,000 copper, learns nodes 2 and 4,
-and spawns flight-master entry 352 two yards forward of the Character at node 2. It asks for status,
+and spawns flight-master entry 523 two yards forward of the Character at node 2. The imported
+Stormwind entry 352 can arrive in a delayed CREATE update during setup, so using its entry makes
+the fixture binding ambiguous. It asks for status,
 then the node menu, then activates the flight. The menu must report node 2 and known-node bits 2
 and 4. The flight checkpoint lasts 80 seconds so it includes the Reference Server's 73,484 ms
 flight and landing. The recorded balance becomes 890 copper.
@@ -75,14 +77,14 @@ that interval. Fare and landing do not use the zone poll.
 
 ## Recording check
 
-The conformance.5 Golden Trace contains 232 scrubbed packets. Its independent repeat contains
-241; comparison returned `{"differences": []}`. Arrival times below are milliseconds from activation.
+The conformance.6 Golden Trace contains 236 scrubbed packets. Its independent repeat contains
+242; comparison returned `{"differences": []}`. Arrival times below are milliseconds from activation.
 
 | Event | Golden Trace | Repeat | Bound |
 | --- | --- | --- | --- |
-| Elwynn world states and weather | 10546 / 10546 | 10972 / 10972 | 1,150 ms |
-| Westfall world states and weather | 48105 / 48107 | 48136 / 48136 | 1,150 ms |
-| Landing correction | 73442 | 73470 | 150 ms |
+| Elwynn world states and weather | 10583 / 10583 | 10684 / 10684 | 1,150 ms |
+| Westfall world states and weather | 47692 / 47692 | 47287 / 47287 | 1,150 ms |
+| Landing correction | 73466 | 73433 | 150 ms |
 
 An earlier check of the new zone rules used an incorrect 150 ms bound and reported five timing
 differences, 185 through 285 ms. Reading the pinned zone poll established the 1,000 ms interval
