@@ -9,7 +9,7 @@ section is the full statement of this; it is the reason the repository exists se
 
 Concretely, a patch to `src/` must not:
 
-* add a path dependency, or any dependency that is not a protocol crate;
+* add a dependency on a server crate, including a path dependency;
 * introduce a default account, password, character or target name;
 * accept a password anywhere but stdin, or log one;
 * re-export a decoder from a server so the two share an implementation. (An independent decoder is
@@ -21,17 +21,24 @@ Concretely, a patch to `src/` must not:
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
+python3 -B -m unittest discover -s tests -p 'test_*.py'
+shellcheck adapters/lyracore/*.sh adapters/vmangos/*.sh
 ```
 
-All three are offline and hermetic — no server needed, no server checkout needed. CI runs exactly
-these on Linux and macOS, plus a coverage measurement.
+These checks are offline and hermetic — no server needed, no server checkout needed. CI runs the Rust checks on Linux and macOS, plus a coverage measurement.
 
 The toolchain is pinned in `rust-toolchain.toml`; rustup will fetch it. The crate's MSRV is the
 older `rust-version` in `Cargo.toml` — don't raise it casually.
 
 ## Adding a scenario
 
-A scenario is one function in `src/scenarios/`, reached by name through
+Conformance scenarios are TOML files under `scenarios/`. Follow [the format](docs/scenarios.md).
+Implement each Fixture Verb in both server adapters before adding a scenario that uses it.
+Keep Account credentials outside the scenario. Put Equivalence Rule parameters and the Character
+name in the scenario. Register each scenario and its recorded trace in `src/catalogue.rs`; the
+catalogue test checks filename ids and scenario hashes.
+
+The older protocol checks use one function in `src/scenarios/`, reached by name through
 `vanilla-wire scenario NAME`. Document its arguments in a `// Usage: vanilla-wire scenario …`
 comment directly above it, register it in its family's dispatcher, and keep every server-specific
 value (guids, entries, coordinates, account names) in the caller's hands as an argument.
@@ -40,9 +47,8 @@ value (guids, entries, coordinates, account names) in the caller's hands as an a
 
 Create `adapters/<server>/` alongside `adapters/lyracore/`. It needs its own seam script — the
 equivalent of `wire.sh`, translating that server's fixture identities into the client's CLI — and a
-README stating the external requirements its scripts assume. Nothing in `src/` should have to
-change; if it does, that is a sign the client is missing a flag rather than a sign the boundary
-should move.
+README stating the external requirements its scripts assume. Register Fixture Verb implementations in `adapters/mod.rs`. The binary imports that module;
+the library does not link it. Keep setup and server constants out of `src/`.
 
 ## Live tests
 

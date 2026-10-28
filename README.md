@@ -28,21 +28,23 @@ Build-5875 protocol and nothing else.
 | `src/cli.rs` | Endpoints (`--host`, `--logon-port`, `--world-port`) and identity (`--account`, `--character`, `--class`, `--race`, `--password-stdin`) |
 | `src/values_mask.rs` | `SMSG_UPDATE_OBJECT` VALUES decoder — the harness's OWN implementation |
 | `src/spatial.rs` | Map-coordinate and interest-grid math — the harness's OWN implementation |
+| `src/scenario.rs`, `src/runner.rs`, `scenarios/` | TOML scenario model, Fixture Verb trait and wire runner |
 | `src/main.rs`, `src/scenarios/` | The `smoke` command and the named protocol scenarios |
 | `src/bin/bench/` | `vanilla-wire-bench`, the synthetic-player capacity ramp |
 
 Rules this half keeps:
 
-* **No dependency on any server crate.** Every dependency in `Cargo.toml` is an external protocol
-  crate (`wow_srp`, `wow_login_messages`, `wow_world_messages`, `wow_world_base` — gtker's, and
-  their `wow_` names are upstream's; never rename them). This is not a style preference: a path
+* **No dependency on any server crate.** The transport client uses the independent gtker crates.
+  General-purpose libraries may handle serialization, hashing and errors. This is not a style preference: a path
   dependency on a server is exactly what makes a test client un-runnable against anything else.
 * **No shared decoder with the server.** `values_mask.rs` and `spatial.rs` were once re-exports of
   LyraCore's copies. A test tool that decodes with the encoder's own logic cannot catch an encoder
-  bug — the two errors cancel and a broken server reads green. Independent implementations, with
-  their own unit tests, are the point.
-* **No baked-in fixtures.** No default account, no default password, no default character, no
-  default target name. Every one of those is an argument.
+  bug. Independent implementations have their own unit tests. The conformance decoder and every
+  module the comparator uses may import neither gtker nor LyraCore code.
+  `tests/decoder_boundary.rs` checks that boundary and proves it detects forbidden imports.
+* **No implicit fixtures.** Accounts and passwords come from arguments and stdin. Data scenarios
+  declare their Character fixture, including its name. Other commands require explicit Character
+  and target names.
 * **No password on a command line.** `--password-stdin` is required and takes the password from
   stdin, where `ps`, shell history and CI logs cannot see it. Nothing ever logs it. Scenarios that
   open a second session read that account's password from stdin line 2.
@@ -58,52 +60,42 @@ The orchestration around the client: which accounts a particular dev stack provi
 passwords are, which characters and creature entries the scenarios expect, and the steps that stage
 and assert server state. None of it is protocol.
 
-`adapters/lyracore/` is the one adapter that ships here, because this harness grew inside LyraCore
-and its 47 orchestrators are the harness's own regression history. It is a worked example of what
-an adapter looks like; a second server would get a sibling directory and touch nothing in `src/`.
+`adapters/lyracore/wire.sh` connects to the Native Host with explicit Account credentials.
+`adapter-env.sh` locates a Native Host checkout when setup needs one. See the
+[adapter instructions](adapters/lyracore/README.md) for endpoints and password input.
+The retired shell scenarios and playerbots observer have been removed.
+The [Reference Server adapter](adapters/vmangos/README.md) prepares a pinned vmangos instance in Docker.
 
-| Piece | What it is |
-|---|---|
-| `adapters/lyracore/wire.sh` | **The seam.** Fixture credentials, endpoints and class default → the client's CLI |
-| `adapters/lyracore/adapter-env.sh` | Resolves the two roots (this repo, and a LyraCore checkout) |
-| `adapters/lyracore/scenario-lib.sh` | Shared orchestrator helpers (`spacetime sql`/`call`, fixtures, stay sessions) |
-| `adapters/lyracore/test-*.sh`, `wire-suite.sh` | The orchestrators and the regression suite |
+## Library
 
-Every orchestrator calls the client as `"$WC" <account> <character> [scenario [args…]]`, where
-`$WC` is `adapters/lyracore/wire.sh` (set once, in `scenario-lib.sh`). That is the only path from
-server-specific orchestration into the generic client. Nothing exec's the binary directly except
-`test-login-queue.sh`, which provisions its own throwaway accounts and passes its own password.
+`wire_client` exposes `WireClient`, `Endpoints`, independent `decode` packet fields,
+`values_mask`, `spatial`, `scenario`, `runner`, `catalogue`, `trace` and `compare`.
+`WireClient::login_at` takes explicit endpoints for callers that connect to two servers in one process. `decode::decode(opcode, body)` accepts plaintext bodies
+without a socket. Unsupported opcodes, truncated fields and trailing bytes fail decoding.
+The scenario runner records declared-packet decode failures as differences.
+`WireClient::recv` validates compressed streams and returns compressed object updates as
+`SMSG_UPDATE_OBJECT`; raw reads retain the original opcode and body. The independent VALUES
+parser observes partial masks before typed parsing, so Character fields still update when a
+partial packet lacks the object context that the typed decoder needs.
 
-Point `WIRE_BIN` at a different build — a downloaded release, say — and the entire suite runs
-against it unchanged.
+The conformance runner uses this boundary. See [the scenario format](docs/scenarios.md) for
+Fixture Verbs, checkpoints and in-process reuse. The binary links server setup from `adapters/`;
+the library has no server-specific implementation. Packet text stays in memory until
+the recorder hashes it. [Golden Traces and comparison](docs/traces.md) describes the file format,
+Equivalence Rules and reusable assertion report. No server crate supplies a decoder or a fixture implementation.
 
-The LyraCore adapter's **external requirements** (none of which apply to `cargo test`) are stated
-at the top of `adapters/lyracore/adapter-env.sh` and in
-[`adapters/lyracore/README.md`](adapters/lyracore/README.md): a LyraCore checkout
-(`$LYRACORE_DIR`), a running SpacetimeDB node and gateway, the `spacetime` CLI, a module published
-with `--features=debug_reducers`, and the fixture accounts.
-
-#### Adapter configuration
-
-| Variable | Meaning | Default |
-|---|---|---|
-| `LYRACORE_DIR` | Path to a LyraCore checkout | autodetected from `$PWD` |
-| `WIRE_BIN` | Path to the `vanilla-wire` binary | `<this repo>/target/debug/vanilla-wire` |
-| `WIRE_HOST` | Server host | `127.0.0.1` |
-| `WIRE_LOGON_PORT` | Logon tier port | `3724` |
-| `WIRE_WORLD_PORT` | World tier port override | unset (use the realm-list answer) |
-| `WIRE_CLASS` | Class for characters the harness creates | `warlock` (the suite's historical default) |
-| `WIRE_PASSWORD_<ACCOUNT>` | One account's password | see below |
-| `WIRE_FIXTURE_PASSWORD` | Password for the `TEST*` accounts | `test123` |
-
-Fixture credentials are **defaults of the adapter, never of the client**. They describe local
-throwaway accounts on a local dev server; the client itself refuses to run without being told an
-account and given a password.
+The schema-3 scenarios include an opening phase and `taxi_single_hop`; see
+[scenario contracts](docs/scenarios.md), [trace rules](docs/traces.md) and
+[the taxi evidence](docs/taxi.md). Golden Traces are embedded in `wire_client::catalogue`.
 
 ## Commands
 
 ```
 vanilla-wire smoke --host HOST --account USER --password-stdin --character NAME
+vanilla-wire compare SCENARIO GOLDEN CANDIDATE [DEVIATIONS_JSON]
+vanilla-wire record SCENARIO PROVENANCE_JSON OUTPUT --account USER --password-stdin
+vanilla-wire candidate SCENARIO OUTPUT --account USER --password-stdin
+vanilla-wire scenario-file PATH --account USER --password-stdin
 vanilla-wire scenario NAME [SCENARIO-ARGS…] --account USER --password-stdin [--character NAME]
 vanilla-wire-bench [OPTIONS]        # see --help
 ```
@@ -186,17 +178,6 @@ cipher-state continuity, oversized/corrupt compressed frames, the crash-dump rin
 The scripts under `adapters/` are **live** tests: they need a running server and that server's
 fixtures. They are not part of `cargo test` and CI never runs them.
 
-The LyraCore bank adapter is Operator-run because it changes a disposable Character's inventory
-and money. It takes the account, Character and banker template explicitly, reads the password from
-stdin, and checks open, deposit, relog persistence, withdrawal and bank bag purchase in order. See
-`adapters/lyracore/test-bank-flow.sh` for its exact command and prerequisites.
-
-The LyraCore dive adapter is also Operator-run. It requires explicit imported-liquid coordinates
-and a disposable Character whose name starts with `Dive`. It checks the imported terrain cell
-before changing the Character, then requires the Breath timer start, matching own Character
-drowning log and health drop, timer stop on surfacing, and durable health and position changes.
-See `adapters/lyracore/test-dive-flow.sh` for its command and prerequisites.
-
 ## Build support
 
 Build **5875** (WoW 1.12.1) only. The logon handshake, the world handshake, the opcode numbering
@@ -221,3 +202,7 @@ Dual-licensed under either of
 at your option. Unless you explicitly state otherwise, any contribution intentionally submitted for
 inclusion in this work by you shall be dual licensed as above, without any additional terms or
 conditions.
+
+Packet-layout references for the conformance decoder are vmangos
+[`Query.cpp`](https://github.com/vmangos/core/blob/d9173eca3ea08dd985c52dabbcc826898d1d0b77/src/game/Server/Packets/Query.cpp)
+and the independent gtker build-5875 definitions in `wow_world_messages` 0.3.0.
