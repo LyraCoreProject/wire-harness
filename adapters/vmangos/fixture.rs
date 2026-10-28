@@ -17,13 +17,19 @@ pub fn logon(inv: &Invocation) -> Result<([u8; 40], String)> {
 }
 
 fn retry_proof<T>(mut attempt: impl FnMut() -> Result<T>) -> Result<T> {
-    match attempt() {
-        Err(error) if error.downcast_ref::<LogonProofFailure>().is_some() => {
-            eprintln!("[vmangos] SRP proof failure; retrying logon once with a fresh challenge");
-            attempt()
+    for number in 1..=3 {
+        match attempt() {
+            Err(error) if error.downcast_ref::<LogonProofFailure>().is_some() => {
+                if number == 3 {
+                    eprintln!("[vmangos] SRP proof failed on all 3 logon handshakes");
+                    return Err(error);
+                }
+                eprintln!("[vmangos] SRP proof failed on handshake {number}/3; retrying with a fresh challenge");
+            }
+            result => return result,
         }
-        result => result,
     }
+    unreachable!()
 }
 
 impl FixtureAdapter for Adapter<'_> {
@@ -275,7 +281,7 @@ mod tests {
     }
 
     #[test]
-    fn proof_failure_gets_exactly_one_new_attempt() {
+    fn proof_failure_gets_at_most_two_new_attempts() {
         for failure in [
             LogonProofFailure::Rejected,
             LogonProofFailure::ServerMismatch,
@@ -289,7 +295,7 @@ mod tests {
             Err(LogonProofFailure::Rejected.into())
         })
         .is_err());
-        assert_eq!(attempts, 2);
+        assert_eq!(attempts, 3);
     }
 
     #[test]

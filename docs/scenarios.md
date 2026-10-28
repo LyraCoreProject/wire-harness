@@ -27,6 +27,13 @@ Both adapters apply Character state before spawning creatures and check each spa
 position. They reconnect after setup so the opening starts at the final login. Add other verbs
 only when a scenario needs them, with both adapters.
 
+To add a Fixture Verb for a new scenario, add one typed variant to `FixtureVerb` in
+`src/scenario.rs` and its bounds in `Scenario::validate`. Apply it in
+`adapters/lyracore/fixture.rs` and `adapters/vmangos/fixture.rs`; a verb is ready only when both
+adapters apply and verify its effect. Add a malformed-input test in `tests/scenario.rs` and a
+fixture test for each adapter. Record the scenario through `reference.sh record-checked`, then
+review the scrubbed trace. Keep the verb tied to the scenario that first needs it.
+
 The LyraCore adapter calls `debug_set_level`, `debug_teleport`, `debug_set_money`,
 `debug_learn_taxi_node(character_guid: u64, node_id: u32)` and `debug_spawn_at_feet` as the Operator.
 Set `WIRE_ADAPTER=lyracore`, `WIRE_REALM_URL=http://127.0.0.1:PORT`, `WIRE_SHARD` and

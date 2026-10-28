@@ -1258,7 +1258,7 @@ fn comparator(rules: &EquivalenceRules, recorded_at: (u64, u64)) -> Comparator<'
     }
 }
 
-/// Checks replies, received opcodes and single-sample disclosures without requiring a Golden Trace.
+/// Checks replies and received opcodes without requiring a Golden Trace.
 pub fn check_observations(scenario: &Scenario, observations: &[Observation]) -> Result<Comparison> {
     check_character_observations(scenario, observations, 0)
 }
@@ -1281,7 +1281,6 @@ pub fn check_character_observations(
         },
     };
     let trace = Trace::record(header, observations)?;
-    validate_rule_samples(scenario, &trace)?;
     let trace = scoped_trace(scenario, &trace)?;
     let mut comparator = comparator(&scenario.rules, (0, 0));
     comparator.packets(scenario, &trace, false, true);

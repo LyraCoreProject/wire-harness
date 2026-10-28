@@ -50,6 +50,8 @@ Missing, extra, reordered and malformed replies become `Difference`s. They do no
 checkpoints. A transport failure or a resource limit still fails the run. An empty candidate trace
 is valid input and reports all missing replies. The Golden Trace recorder checks the scenario's
 reply contract and refuses to write a recording with unexcused differences.
+Single-sample identity and clock disclosures are checked against the Golden Trace when it is
+loaded. A candidate's sample count cannot satisfy or invalidate that disclosure.
 
 ## Candidate recording and library use
 
