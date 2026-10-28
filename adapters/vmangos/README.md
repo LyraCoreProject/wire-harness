@@ -126,9 +126,10 @@ DOCKER
 ```
 
 Exit code 2 means the command arguments, scenario, output path, missing provenance, or binary need
-attention. Exit code 1 means server startup, fixture setup, recording, cleanup, or comparison
-failed; the last message names the failed step. A partial running server is left for inspection.
-Use a fresh output path for another attempt. Only move a checked trace into `traces/` after review.
+attention. Exit code 1 means server startup, fixture setup, recording, cleanup, shutdown, or
+comparison failed; the last message names the failed step. Any failure removes the output. A partial
+running server is left for inspection. Use a fresh output path for another attempt. Only move a
+checked trace into `traces/` after review.
 
 The output directory must exist, and the output file and scenario Character must be absent.
 Before a rerun, delete the previous disposable Character through the protocol and use a fresh
@@ -157,7 +158,7 @@ uses that form for BigNumber input, and
 [SRP6](https://github.com/vmangos/core/blob/d9173eca3ea08dd985c52dabbcc826898d1d0b77/src/shared/Crypto/Authentication/SRP6.cpp)
 hashes A, B and K through it. A zero most-significant byte therefore changes the proof input relative
 to this client's fixed-width hashing. The server proof also hashes M this way. The retry generates
-fresh ephemeral values; a second failure still aborts. The failure rate has not been measured.
+fresh ephemeral values; a third failure aborts. The failure rate has not been measured.
 Setup generates a full-width salt to avoid a persistent short-salt mismatch.
 
 ```sh

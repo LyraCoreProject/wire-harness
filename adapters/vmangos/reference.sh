@@ -54,11 +54,14 @@ PY
       if [[ $written == 1 ]]; then
         reset_character || echo "[reference] could not remove fixture Character $character" >&2
       fi
-      if [[ $status != 0 && -e $output ]]; then rm -f -- "$output"; fi
       if [[ $started == 1 ]]; then
         echo "[reference] stopping Reference Server started by this command" >&2
-        "$adapter/reference.sh" down || echo "[reference] stop failed; run reference.sh down" >&2
+        if ! "$adapter/reference.sh" down; then
+          echo "[reference] stop failed; run reference.sh down" >&2
+          [[ $status != 0 ]] || status=1
+        fi
       fi
+      if [[ $status != 0 && -e $output ]]; then rm -f -- "$output"; fi
       rm -rf -- "$scratch"
       exit "$status"
     }
