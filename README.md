@@ -65,6 +65,8 @@ and assert server state. None of it is protocol.
 [adapter instructions](adapters/lyracore/README.md) for endpoints and password input.
 The retired shell scenarios and playerbots observer have been removed.
 The [Reference Server adapter](adapters/vmangos/README.md) prepares a pinned vmangos instance in Docker.
+Its `reference.sh record-checked SCENARIO OUTPUT` command records two samples and accepts the
+Golden Trace only when the repeat matches under the scenario's Equivalence Rules.
 
 ## Library
 

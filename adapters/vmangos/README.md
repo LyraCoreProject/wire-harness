@@ -109,6 +109,27 @@ adapters/vmangos/reference.sh record traces/taxi_single_hop.json scenarios/taxi_
 DOCKER
 ```
 
+For a new Golden Trace, use the checked command. It starts the provisioned Reference Server if
+needed, or reuses all three running services. It resets only the scenario Character on the local
+`CONFORMANCE` Account, records twice, compares the second sample under the scenario's Equivalence
+Rules, and removes that Character. It stops the services only when it started them. The output
+must be a new path; it is removed if any step fails. Both samples are written by the recorder,
+and the second stays only in the local scratch directory until comparison finishes.
+
+```sh
+cargo build --locked --bin vanilla-wire
+newgrp docker <<'DOCKER'
+adapters/vmangos/reference.sh record-checked \
+  scenarios/connection_identity.toml \
+  "$HOME/.cache/lyracore-scratch/reference-server/recordings/identity-check.json"
+DOCKER
+```
+
+Exit code 2 means the command arguments, scenario, output path, missing provenance, or binary need
+attention. Exit code 1 means server startup, fixture setup, recording, cleanup, or comparison
+failed; the last message names the failed step. A partial running server is left for inspection.
+Use a fresh output path for another attempt. Only move a checked trace into `traces/` after review.
+
 The output directory must exist, and the output file and scenario Character must be absent.
 Before a rerun, delete the previous disposable Character through the protocol and use a fresh
 output path. For the local Reference Server only:
@@ -125,8 +146,9 @@ The recorder hashes packet text before writing. It retains opening and checkpoin
 ambient movement covered by named scenario rules. Review the scrubbed trace and its header before
 committing. [Trace rules](../../docs/traces.md) describes candidate recording and comparison.
 
-The vmangos adapter retries logon once after a typed client-proof rejection or server-proof
-mismatch and logs that retry without credentials or proof bytes. Other failures do not retry.
+The vmangos adapter retries at most twice after a typed client-proof rejection or server-proof
+mismatch and logs each handshake without credentials or proof bytes. A third failure aborts.
+Other failures do not retry.
 At source revision `d9173eca3ea08dd985c52dabbcc826898d1d0b77`,
 [BigNumber](https://github.com/vmangos/core/blob/d9173eca3ea08dd985c52dabbcc826898d1d0b77/src/shared/Crypto/BigNumber.cpp)
 serializes at minimal length when no minimum is specified.
