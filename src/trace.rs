@@ -429,11 +429,4 @@ impl GoldenTrace {
     pub fn trace(&self) -> &Trace {
         &self.trace
     }
-
-    pub(crate) fn with_trace(&self, trace: Trace) -> Self {
-        Self {
-            scenario: self.scenario.clone(),
-            trace,
-        }
-    }
 }

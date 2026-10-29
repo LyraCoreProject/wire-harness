@@ -1,0 +1,59 @@
+schema_version = 3
+id = "bank_slot_purchase"
+behavior = "bank_slot_purchase"
+
+[opening]
+window_ms = 1000
+
+[rules]
+time_tolerance_ms = 100
+wall_clock_tolerance_ms = 2000
+
+[[fixtures]]
+verb = "character"
+name = "Banktester"
+race = "human"
+class = "warrior"
+level = 1
+at = { map = 0, x = -8949.95, y = -132.493, z = 83.5312, orientation = 0.0 }
+
+[[fixtures]]
+verb = "money"
+copper = 10000
+
+[[fixtures]]
+verb = "creature"
+id = "banker"
+entry = 5099
+offset = 2.0
+
+[[steps]]
+id = "open"
+send = { opcode = "CMSG_BANKER_ACTIVATE", target = { fixture = "banker" } }
+[steps.checkpoint]
+window_ms = 500
+replies = [440]
+
+[[steps]]
+id = "buy_slot"
+send = { opcode = "CMSG_BUY_BANK_SLOT", target = { fixture = "banker" } }
+[steps.checkpoint]
+window_ms = 500
+replies = []
+broadcasts = [{ opcode = 169, stream = "values" }]
+expect = [
+  { opcode = 169, path = ["objects", "0", "values", "field_1176"], value = { type = "unsigned", value = 9000 }, count = 1 },
+  { opcode = 169, path = ["objects", "0", "values", "field_194"], value = { type = "unsigned", value = 33680896 }, count = 1 },
+]
+
+[[rules.unexpected_packets]]
+name = "ambient_movement_during_open"
+reason = "Nearby creature movement is independent of opening the bank."
+checkpoint = "open"
+opcode = 221
+
+[[rules.unexpected_packets]]
+name = "ambient_movement_during_buy_slot"
+reason = "Nearby creature movement is independent of buying the bank slot."
+checkpoint = "buy_slot"
+opcode = 221

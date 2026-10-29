@@ -9,12 +9,12 @@
     {
       "scenario": "bank_slot_purchase",
       "id": "packet_36/field_guid/unknown_subject",
-      "reason": "The comparator maps this reply GUID freely and the checkpoint does not bind it to the banker fixture."
+      "reason": "scenario defect: the bank-open reply GUID is not bound to the banker fixture; an unrelated GUID still matches."
     },
     {
       "scenario": "bank_slot_purchase",
       "id": "packet_36/field_guid/known_subject",
-      "reason": "The comparator maps this reply GUID freely and the checkpoint does not bind it to the banker fixture."
+      "reason": "scenario defect: the bank-open reply GUID is not bound to the banker fixture; another known GUID still matches."
     },
     {
       "scenario": "bank_slot_purchase",
@@ -25,6 +25,36 @@
       "scenario": "connection_identity",
       "id": "packet_32/swap_neighbour",
       "reason": "The packets are in different checkpoints; the comparator does not assert global trace order across checkpoints."
+    },
+    {
+      "scenario": "connection_identity",
+      "id": "inject_ping/221/single_original",
+      "reason": "The ambient movement rule has no subject GUID limit and this trace has no movement sample in that checkpoint; its intended subjects cannot be verified."
+    },
+    {
+      "scenario": "connection_identity",
+      "id": "inject_ping/221/single_character_subject",
+      "reason": "The ambient movement rule has no subject GUID limit and this trace has no movement sample in that checkpoint; its intended subjects cannot be verified."
+    },
+    {
+      "scenario": "connection_identity",
+      "id": "inject_ping/221/single_creature_subject",
+      "reason": "The ambient movement rule has no subject GUID limit and this trace has no movement sample in that checkpoint; its intended subjects cannot be verified."
+    },
+    {
+      "scenario": "connection_identity",
+      "id": "inject_name/221/single_original",
+      "reason": "The ambient movement rule has no subject GUID limit and this trace has no movement sample in that checkpoint; its intended subjects cannot be verified."
+    },
+    {
+      "scenario": "connection_identity",
+      "id": "inject_name/221/single_character_subject",
+      "reason": "The ambient movement rule has no subject GUID limit and this trace has no movement sample in that checkpoint; its intended subjects cannot be verified."
+    },
+    {
+      "scenario": "connection_identity",
+      "id": "inject_name/221/single_creature_subject",
+      "reason": "The ambient movement rule has no subject GUID limit and this trace has no movement sample in that checkpoint; its intended subjects cannot be verified."
     },
     {
       "scenario": "taxi_single_hop",
@@ -53,48 +83,43 @@
     },
     {
       "scenario": "taxi_single_hop",
-      "id": "packet_36/swap_neighbour",
-      "reason": "The adjacent packets use different streams; the comparator does not assert order across streams."
+      "id": "packet_65/swap_neighbour",
+      "reason": "The weather packet uses the zones stream and the adjacent Character update uses values; the comparator orders those streams separately."
     },
     {
       "scenario": "taxi_single_hop",
-      "id": "packet_38/swap_neighbour",
-      "reason": "The adjacent packets use different streams; the comparator does not assert order across streams."
+      "id": "packet_232/swap_neighbour",
+      "reason": "The landing reply and adjacent Character update use different streams; the comparator orders those streams separately."
     },
     {
       "scenario": "taxi_single_hop",
-      "id": "packet_39/swap_neighbour",
-      "reason": "The adjacent packets use different streams; the comparator does not assert order across streams."
-    },
-    {
-      "scenario": "taxi_single_hop",
-      "id": "packet_41/swap_neighbour",
-      "reason": "The adjacent packets use different streams; the comparator does not assert order across streams."
-    },
-    {
-      "scenario": "taxi_single_hop",
-      "id": "packet_44/swap_neighbour",
-      "reason": "The adjacent packets use different streams; the comparator does not assert order across streams."
-    },
-    {
-      "scenario": "taxi_single_hop",
-      "id": "packet_44/field_fall_time/plus_one",
-      "reason": "The scenario-wide 1 ms time tolerance accepts this movement time change; the scenario author should name or narrow that allowance."
-    },
-    {
-      "scenario": "two_character_visibility",
-      "id": "packet_81/swap_neighbour",
-      "reason": "The packets have different recipients; the comparator does not assert order across recipient streams."
-    },
-    {
-      "scenario": "two_character_visibility",
-      "id": "packet_81/field_objects.0.movement.fall_time/plus_one",
-      "reason": "The scenario-wide 100 ms time tolerance accepts this peer CREATE movement time change; the scenario author should name or narrow that allowance."
+      "id": "packet_232/field_fall_time/plus_one",
+      "reason": "The scenario-wide 1 ms time tolerance accepts this landing movement time change; the scenario author should name or narrow that allowance."
     },
     {
       "scenario": "two_character_visibility",
       "id": "packet_82/field_objects.0.movement.fall_time/plus_one",
       "reason": "The scenario-wide 100 ms time tolerance accepts this peer CREATE movement time change; the scenario author should name or narrow that allowance."
+    },
+    {
+      "scenario": "two_character_visibility",
+      "id": "packet_84/field_objects.32.movement.fall_time/plus_one",
+      "reason": "The scenario-wide 100 ms time tolerance accepts this peer CREATE movement time change; the scenario author should name or narrow that allowance."
+    },
+    {
+      "scenario": "two_character_visibility",
+      "id": "inject_arrival/306/watcher_original",
+      "reason": "The transport-notice rule excuses an undeclared GUID-bearing packet, but the recorded arrival notice has no decoded subject; this subject is outside its observed intent."
+    },
+    {
+      "scenario": "two_character_visibility",
+      "id": "inject_arrival/306/watcher_character_subject",
+      "reason": "The transport-notice rule excuses an undeclared GUID-bearing packet, but the recorded arrival notice has no decoded subject; this subject is outside its observed intent."
+    },
+    {
+      "scenario": "two_character_visibility",
+      "id": "inject_arrival/306/watcher_creature_subject",
+      "reason": "The transport-notice rule excuses an undeclared GUID-bearing packet, but the recorded arrival notice has no decoded subject; this subject is outside its observed intent."
     }
   ]
 }

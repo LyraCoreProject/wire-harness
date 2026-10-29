@@ -19,12 +19,6 @@ pub fn strictness_command() -> Result<bool> {
                 report.excused_by_rule.values().sum::<usize>(),
                 report.unexplained_survivors.len()
             );
-            for broad in &report.broad_rules {
-                println!(
-                    "  broad rule {}: {}% of mutations",
-                    broad.name, broad.share_percent
-                );
-            }
         }
         wire_client::strictness::check_allowlist(
             &reports,
@@ -49,16 +43,13 @@ pub fn strictness_command() -> Result<bool> {
             report.scenario, report.mutations, report.detected
         );
         for (name, count) in &report.excused_by_rule {
-            println!("  excused by {name}: {count}");
+            println!(
+                "  excused by {name}: {count} ({})",
+                report.rule_intents[name]
+            );
         }
         for survivor in &report.unexplained_survivors {
             println!("  unexplained {}: {}", survivor.id, survivor.description);
-        }
-        for broad in &report.broad_rules {
-            println!(
-                "  broad rule {}: {} of {} mutations ({}%)",
-                broad.name, broad.excused, report.mutations, broad.share_percent
-            );
         }
         println!(
             "  unexplained survivors: {}",
