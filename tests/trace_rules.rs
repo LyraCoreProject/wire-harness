@@ -440,6 +440,62 @@ fn unexpected_packets_count_even_when_both_traces_contain_them_unless_scenario_e
 }
 
 #[test]
+fn creature_movement_rule_keeps_character_and_malformed_moves_as_differences() {
+    let rules = "[[rules.unexpected_packets]]\nname='creature_move'\nreason='Ambient creature movement.'\ncheckpoint='query'\nopcode=221\nsubject_guid_high=61744";
+    let text = scenario(&[477], rules);
+    let parsed = Scenario::parse(&text).unwrap();
+    let mut body = vec![0xc1, 9, 0x30, 0xf1];
+    body.extend([0; 12]);
+    body.extend(0u32.to_le_bytes());
+    body.push(1);
+    let decoded = Observation::from_frame_with_rules(
+        &parsed.steps[0],
+        221,
+        &body,
+        &parsed.rules.unexpected_packets,
+    );
+    assert_eq!(
+        decoded.packet.fields["guid"],
+        Field::Guid(0xf130_0000_0000_0009)
+    );
+    let malformed = Observation::from_frame_with_rules(
+        &parsed.steps[0],
+        221,
+        &body[..2],
+        &parsed.rules.unexpected_packets,
+    );
+    assert_eq!(malformed.stream, Stream::Malformed);
+    let mut character_body = vec![1, 3];
+    character_body.extend(&body[4..]);
+    let character = Observation::from_frame_with_rules(
+        &parsed.steps[0],
+        221,
+        &character_body,
+        &parsed.rules.unexpected_packets,
+    );
+    assert_eq!(character.packet.fields["guid"], Field::Guid(3));
+    let expected_observations = observations(&[Field::Unsigned(7)]);
+    let expected = golden(&text, &expected_observations, 1000);
+    let mut actual = expected_observations.clone();
+    actual.push(decoded);
+    assert!(compare_observations(&expected, &actual, 1000, &[])
+        .unwrap()
+        .is_match());
+    actual.push(character);
+    let report = compare_observations(&expected, &actual, 1000, &[]).unwrap();
+    assert!(!report.is_match());
+    assert!(report
+        .differences
+        .iter()
+        .any(|d| d.rule == "unexpected_packet"));
+    actual.pop();
+    actual.push(malformed);
+    let report = compare_observations(&expected, &actual, 1000, &[]).unwrap();
+    assert!(!report.is_match());
+    assert!(report.differences.iter().any(|d| d.rule == "packet_decode"));
+}
+
+#[test]
 fn deliberate_deviations_are_named_counted_and_scoped_to_actual_differences() {
     let text = scenario(&[477], "");
     let expected = golden(&text, &observations(&[Field::Unsigned(7)]), 1000);

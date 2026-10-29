@@ -152,7 +152,12 @@ pub fn run_on(scenario: &Scenario, transport: &mut impl Transport) -> Result<Vec
             };
             frames += 1;
             ensure!(frames <= 4096, "checkpoint exceeded 4096 received frames");
-            let mut observation = Observation::from_frame(step, opcode, &body);
+            let mut observation = Observation::from_frame_with_rules(
+                step,
+                opcode,
+                &body,
+                &scenario.rules.unexpected_packets,
+            );
             let received_at = transport.now();
             ensure!(
                 received_at >= previous_sample,
@@ -445,8 +450,13 @@ fn collect_multi(
                 break;
             }
             if let Some((opcode, body)) = transport.receive(&character.id, remaining)? {
-                let mut observation =
-                    Observation::from_frame_for(step, Some(&character.id), opcode, &body);
+                let mut observation = Observation::from_frame_for_rules(
+                    step,
+                    Some(&character.id),
+                    opcode,
+                    &body,
+                    &scenario.rules.unexpected_packets,
+                );
                 let received_at = transport.now();
                 ensure!(
                     received_at >= before && received_at >= started,

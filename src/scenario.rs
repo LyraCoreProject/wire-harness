@@ -123,6 +123,10 @@ pub enum ClientPacket {
         source: u32,
         destination: u32,
     },
+    #[serde(rename = "CMSG_BANKER_ACTIVATE")]
+    BankerActivate { target: Target },
+    #[serde(rename = "CMSG_BUY_BANK_SLOT")]
+    BuyBankSlot { target: Target },
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -286,7 +290,7 @@ impl Scenario {
                 "checkpoint window must be 1 through 180000 ms"
             );
             ensure!(
-                !checkpoint.replies.is_empty() && checkpoint.replies.len() <= 256,
+                checkpoint.replies.len() <= 256,
                 "checkpoint needs bounded replies"
             );
             if let Some(Target::Fixture(id)) = send.target() {
@@ -299,29 +303,29 @@ impl Scenario {
                 !matches!(send.target(), Some(Target::NamedCharacter(_))),
                 "schema 3 cannot target a named Character"
             );
-            let expected = match send {
-                ClientPacket::Ping { .. } => 0x01dd,
-                ClientPacket::NameQuery { .. } => 0x0051,
-                ClientPacket::TaxiNodeStatusQuery { .. } => 0x01ab,
-                ClientPacket::TaxiQueryAvailableNodes { .. } => 0x01a9,
-                ClientPacket::ActivateTaxi {
-                    source,
-                    destination,
-                    ..
-                } => {
-                    ensure!(
-                        source != destination
-                            && nodes.contains(source)
-                            && nodes.contains(destination),
-                        "taxi endpoints must be distinct known-node fixtures"
-                    );
-                    0x01ae
-                }
-            };
-            ensure!(
-                checkpoint.replies.contains(&expected),
-                "checkpoint omits its request's reply opcode"
-            );
+            if let ClientPacket::ActivateTaxi {
+                source,
+                destination,
+                ..
+            } = send
+            {
+                ensure!(
+                    source != destination && nodes.contains(source) && nodes.contains(destination),
+                    "taxi endpoints must be distinct known-node fixtures"
+                );
+            }
+            let expected = send.reply_opcode();
+            if let Some(expected) = expected {
+                ensure!(
+                    checkpoint.replies.contains(&expected),
+                    "checkpoint omits its request's reply opcode"
+                );
+            } else {
+                ensure!(
+                    !checkpoint.expect.is_empty(),
+                    "request without a success reply needs a checkpoint assertion"
+                );
+            }
             ensure!(
                 checkpoint.expect.len() <= 256,
                 "too many checkpoint assertions"
@@ -547,15 +551,26 @@ impl Scenario {
                         "request names an unknown creature fixture"
                     );
                 }
-                let reply = send.reply_opcode()?;
-                ensure!(
-                    step.checkpoint
-                        .for_character(actor)
-                        .unwrap()
-                        .replies
-                        .contains(&reply),
-                    "actor checkpoint omits request reply"
-                );
+                if let Some(reply) = send.reply_opcode() {
+                    ensure!(
+                        step.checkpoint
+                            .for_character(actor)
+                            .unwrap()
+                            .replies
+                            .contains(&reply),
+                        "actor checkpoint omits request reply"
+                    );
+                } else {
+                    ensure!(
+                        !step
+                            .checkpoint
+                            .for_character(actor)
+                            .unwrap()
+                            .expect
+                            .is_empty(),
+                        "request without a success reply needs a checkpoint assertion"
+                    );
+                }
                 if let ClientPacket::ActivateTaxi {
                     source,
                     destination,
@@ -755,14 +770,16 @@ fn validate_fixtures(fixtures: &[FixtureVerb]) -> Result<(BTreeSet<String>, BTre
 }
 
 impl ClientPacket {
-    fn reply_opcode(&self) -> Result<u16> {
-        Ok(match self {
-            Self::Ping { .. } => 0x01dd,
-            Self::NameQuery { .. } => 0x0051,
-            Self::TaxiNodeStatusQuery { .. } => 0x01ab,
-            Self::TaxiQueryAvailableNodes { .. } => 0x01a9,
-            Self::ActivateTaxi { .. } => 0x01ae,
-        })
+    fn reply_opcode(&self) -> Option<u16> {
+        match self {
+            Self::Ping { .. } => Some(0x01dd),
+            Self::NameQuery { .. } => Some(0x0051),
+            Self::TaxiNodeStatusQuery { .. } => Some(0x01ab),
+            Self::TaxiQueryAvailableNodes { .. } => Some(0x01a9),
+            Self::ActivateTaxi { .. } => Some(0x01ae),
+            Self::BankerActivate { .. } => Some(0x01b8),
+            Self::BuyBankSlot { .. } => None,
+        }
     }
     fn target(&self) -> Option<&Target> {
         match self {
@@ -770,6 +787,8 @@ impl ClientPacket {
             Self::NameQuery { target }
             | Self::TaxiNodeStatusQuery { target }
             | Self::TaxiQueryAvailableNodes { target }
+            | Self::BankerActivate { target }
+            | Self::BuyBankSlot { target }
             | Self::ActivateTaxi { target, .. } => Some(target),
         }
     }
@@ -811,6 +830,8 @@ impl ClientPacket {
             Self::NameQuery { .. } => (0x0050, guid.to_le_bytes().to_vec()),
             Self::TaxiNodeStatusQuery { .. } => (0x01aa, guid.to_le_bytes().to_vec()),
             Self::TaxiQueryAvailableNodes { .. } => (0x01ac, guid.to_le_bytes().to_vec()),
+            Self::BankerActivate { .. } => (0x01b7, guid.to_le_bytes().to_vec()),
+            Self::BuyBankSlot { .. } => (0x01b9, guid.to_le_bytes().to_vec()),
             Self::ActivateTaxi {
                 source,
                 destination,
@@ -840,12 +861,32 @@ impl Observation {
         }
     }
 
-    /// Retains every opcode; undeclared bodies are discarded without decoding or storing packet text.
+    /// Retains every opcode and discards undeclared bodies.
     pub fn from_frame(step: &Step, opcode: u16, body: &[u8]) -> Self {
-        Self::from_frame_for(step, None, opcode, body)
+        Self::from_frame_with_rules(step, opcode, body, &[])
+    }
+
+    /// Decodes unexpected packets only when a rule filters their subject.
+    pub fn from_frame_with_rules(
+        step: &Step,
+        opcode: u16,
+        body: &[u8],
+        unexpected_rules: &[crate::compare::UnexpectedPacketRule],
+    ) -> Self {
+        Self::from_frame_for_rules(step, None, opcode, body, unexpected_rules)
     }
 
     pub fn from_frame_for(step: &Step, character: Option<&str>, opcode: u16, body: &[u8]) -> Self {
+        Self::from_frame_for_rules(step, character, opcode, body, &[])
+    }
+
+    pub fn from_frame_for_rules(
+        step: &Step,
+        character: Option<&str>,
+        opcode: u16,
+        body: &[u8],
+        unexpected_rules: &[crate::compare::UnexpectedPacketRule],
+    ) -> Self {
         let wire_opcode = opcode;
         let opcode = if opcode == 0x01f6 { 0x00a9 } else { opcode };
         let stream = character
@@ -864,7 +905,17 @@ impl Observation {
         } else {
             stream
         };
-        let (stream, packet) = if stream == Stream::Unexpected {
+        let decode_unexpected = stream == Stream::Unexpected
+            && unexpected_rules.iter().any(|rule| {
+                rule.checkpoint == step.id
+                    && rule.opcode == opcode
+                    && rule.subject_guid_high.is_some()
+                    && rule
+                        .character
+                        .as_deref()
+                        .is_none_or(|id| Some(id) == character)
+            });
+        let (stream, packet) = if stream == Stream::Unexpected && !decode_unexpected {
             (
                 stream,
                 Packet {

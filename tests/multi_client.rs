@@ -126,6 +126,39 @@ fn virtual_clock_captures_each_character_and_connects_during_a_scenario() {
 }
 
 #[test]
+fn reconnect_reopens_the_same_character_during_a_scenario() {
+    let scenario = Scenario::parse(
+        &ACTORS
+            .replace(
+                "action = { kind = \"disconnect\" }",
+                "action = { kind = \"reconnect\" }",
+            )
+            .replace(
+                "action = { kind = \"connect\" }",
+                "action = { kind = \"reconnect\" }",
+            ),
+    )
+    .unwrap();
+    let mut transport = ClockTransport {
+        ms: 0,
+        connected: BTreeMap::from([("first".into(), true), ("second".into(), true)]),
+        frames: VecDeque::new(),
+        calls: Vec::new(),
+        sent: Vec::new(),
+    };
+    run_multi_on(&scenario, &mut transport).unwrap();
+    assert_eq!(
+        transport.calls,
+        [
+            "disconnect second",
+            "connect second",
+            "disconnect second",
+            "connect second"
+        ]
+    );
+}
+
+#[test]
 fn named_steps_reject_missing_characters_and_invalid_session_order() {
     let mut scenario = Scenario::parse(ACTORS).unwrap();
     scenario.steps[0].character = Some("missing".into());
@@ -229,6 +262,14 @@ fn one_guid_mapping_spans_both_character_streams() {
     assert!(compare(&expected, &matching, &[]).unwrap().is_match());
     let wrong = trace(GUIDS, false, 100, 200, 200);
     assert!(!compare(&expected, &wrong, &[]).unwrap().is_match());
+}
+
+#[test]
+fn named_characters_cannot_share_a_guid() {
+    let mut candidate = trace(GUIDS, false, 100, 100, 100);
+    assert!(candidate.validate().is_err());
+    candidate.header.characters.insert("second".into(), 200);
+    assert!(candidate.validate().is_ok());
 }
 
 #[test]

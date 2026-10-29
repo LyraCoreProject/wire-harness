@@ -10,6 +10,11 @@ pub struct Entry {
 
 pub const ENTRIES: &[Entry] = &[
     Entry {
+        id: "bank_slot_purchase",
+        scenario: include_str!("../scenarios/bank_slot_purchase.toml"),
+        trace: include_str!("../traces/bank_slot_purchase.json"),
+    },
+    Entry {
         id: "connection_identity",
         scenario: include_str!("../scenarios/connection_identity.toml"),
         trace: include_str!("../traces/connection_identity.json"),

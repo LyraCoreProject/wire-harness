@@ -139,6 +139,49 @@ fn invalid_scenarios_fail_before_fixture_setup() {
 }
 
 #[test]
+fn bank_purchase_encodes_the_banker_and_requires_a_values_update() {
+    let text = include_str!("../scenarios/bank_slot_purchase.toml");
+    let scenario = Scenario::parse(text).unwrap();
+    let fixtures = std::collections::BTreeMap::from([("banker".to_owned(), 17)]);
+    assert_eq!(
+        scenario.steps[0]
+            .send
+            .as_ref()
+            .unwrap()
+            .encode(7, &fixtures)
+            .unwrap(),
+        (0x01b7, 17u64.to_le_bytes().to_vec())
+    );
+    assert_eq!(
+        scenario.steps[1]
+            .send
+            .as_ref()
+            .unwrap()
+            .encode(7, &fixtures)
+            .unwrap(),
+        (0x01b9, 17u64.to_le_bytes().to_vec())
+    );
+    assert!(Scenario::parse(&text.replace(
+        "broadcasts = [{ opcode = 169, stream = \"values\" }]",
+        "broadcasts = []"
+    ))
+    .is_err());
+    assert!(Scenario::parse(&text.replacen("replies = [440]", "replies = []", 1)).is_err());
+    assert_eq!(
+        wire_client::decode::decode(0x01b8, &17u64.to_le_bytes())
+            .unwrap()
+            .fields["guid"],
+        wire_client::decode::Field::Guid(17)
+    );
+    assert_eq!(
+        wire_client::decode::decode(0x01ba, &1u32.to_le_bytes())
+            .unwrap()
+            .fields["result"],
+        wire_client::decode::Field::Unsigned(1)
+    );
+}
+
+#[test]
 fn values_only_timing_requires_an_object_values_field_path() {
     let scenario = Scenario::parse(include_str!("../scenarios/taxi_single_hop.toml")).unwrap();
     for (opcode, path) in [

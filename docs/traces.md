@@ -79,10 +79,12 @@ Its scenario and trace are immutable through the comparison interface.
 In-process callers use `compare_observations(&golden, &observations, recorded_at_unix_ms, &deviations)`.
 For schema 3 Character-scoped rules use
 `compare_character_observations(&golden, &observations, character_guid, recorded_at_unix_ms, &deviations)`.
-A nonzero GUID is required for both traces in that case. Callers can build observations with `Observation::from_frame` to use the same independent decoder and
-opcode classification as the wire runner. This path needs no candidate server provenance.
-Schema 4 callers use `compare_multi_observations` with a map from each Character id to its GUID.
-They drive the shared-clock `runner::run_multi_on` through `MultiTransport`.
+A nonzero GUID is required for both traces in that case. Callers can build observations with
+`Observation::from_frame_with_rules`, passing the scenario's unexpected-packet rules, to use the
+same independent decoder and opcode classification as the wire runner. Schema 4 callers use
+`compare_multi_observations` with a map from each Character id to its GUID. They drive the shared
+clock through `runner::run_multi_on` and `MultiTransport`, then build observations with
+`Observation::from_frame_for_rules`. These paths need no candidate server provenance.
 
 ## Comparison
 
@@ -158,8 +160,10 @@ supply a replacement tolerance or random range to `compare`. General rule kinds 
   constrains alignment and makes a swap observable. Alignment snapshots the mappings before each
   stream or list; field comparison then checks every selected pair against the growing bijection.
 - Every undeclared opcode is an `unexpected_packet` difference, even if both traces contain it.
-  A named `rules.unexpected_packets` entry may excuse that opcode in one checkpoint. The packet
-  remains recorded, and the rule must not name a declared reply or broadcast. The connection
+  A named `rules.unexpected_packets` entry may excuse that opcode in one checkpoint. An optional
+  `subject_guid_high` restricts it to the decoded subject GUID's upper 16 bits; malformed packets
+  and packets without that subject remain differences. The packet remains recorded, and the rule
+  must not name a declared reply or broadcast. The connection
   scenario names ambient `SMSG_MONSTER_MOVE` as independent of its ping and name queries.
 - Random fields require a name, reason, opcode, path, numeric type and inclusive range. Both values
   must have that type and fall in the range. Random rules cannot override GUID or timestamp types.

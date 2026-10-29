@@ -276,6 +276,15 @@ impl Trace {
                     .all(|(id, guid)| identifier(id) && *guid != 0),
                 "invalid named Character GUID"
             );
+            ensure!(
+                self.header
+                    .characters
+                    .values()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len()
+                    == self.header.characters.len(),
+                "named Characters must have distinct GUIDs"
+            );
         }
         ensure!(
             identifier(&self.header.scenario) && identifier(&self.header.behavior),
@@ -331,12 +340,13 @@ impl Trace {
                     );
                 }
                 Stream::Broadcast(id) => ensure!(identifier(id), "invalid stream identifier"),
-                Stream::Unexpected | Stream::Malformed => {
+                Stream::Malformed => {
                     ensure!(
                         packet.fields.is_empty(),
                         "undecoded packets must not retain fields"
                     );
                 }
+                Stream::Unexpected => (),
             }
             validate_fields(&packet.fields, 0)?;
         }
