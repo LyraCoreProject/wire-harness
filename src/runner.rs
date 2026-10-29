@@ -408,7 +408,10 @@ fn collect_opening(
             if !transport.connected(&character.id) {
                 continue;
             }
-            if let Some((opcode, body)) = transport.receive_ready(&character.id)? {
+            let before = transport.now();
+            let frame = transport.receive_ready(&character.id)?;
+            ensure!(transport.now() >= before, "transport clock moved backwards");
+            if let Some((opcode, body)) = frame {
                 let mut observed = Observation::opening(opcode, &body);
                 observed.character = Some(character.id.clone());
                 observations.push(observed);
@@ -447,9 +450,15 @@ fn collect_opening(
             }
             let timeout = (remaining / remaining_characters as u32)
                 .min(Duration::from_millis(20))
-                .max(Duration::from_micros(1));
+                .max(Duration::from_millis(1));
             remaining_characters -= 1;
-            if let Some((opcode, body)) = transport.receive(&character.id, timeout)? {
+            let polled_at = transport.now();
+            let frame = transport.receive(&character.id, timeout)?;
+            ensure!(
+                transport.now() >= polled_at,
+                "transport clock moved backwards"
+            );
+            if let Some((opcode, body)) = frame {
                 let mut observed = Observation::opening(opcode, &body);
                 observed.character = Some(character.id.clone());
                 observations.push(observed);
@@ -480,7 +489,10 @@ fn collect_multi(
             if !transport.connected(&character.id) {
                 continue;
             }
-            if let Some(frame) = transport.receive_ready(&character.id)? {
+            let before = transport.now();
+            let frame = transport.receive_ready(&character.id)?;
+            ensure!(transport.now() >= before, "transport clock moved backwards");
+            if let Some(frame) = frame {
                 record_multi_frame(
                     scenario,
                     step,
@@ -526,9 +538,15 @@ fn collect_multi(
             }
             let timeout = (remaining / remaining_characters as u32)
                 .min(Duration::from_millis(20))
-                .max(Duration::from_micros(1));
+                .max(Duration::from_millis(1));
             remaining_characters -= 1;
-            if let Some(frame) = transport.receive(&character.id, timeout)? {
+            let polled_at = transport.now();
+            let frame = transport.receive(&character.id, timeout)?;
+            ensure!(
+                transport.now() >= polled_at,
+                "transport clock moved backwards"
+            );
+            if let Some(frame) = frame {
                 record_multi_frame(
                     scenario,
                     step,
