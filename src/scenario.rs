@@ -622,14 +622,14 @@ impl Scenario {
             ensure!(
                 rule.character
                     .as_ref()
-                    .is_none_or(|id| ids.contains(id.as_str())),
+                    .map_or(true, |id| ids.contains(id.as_str())),
                 "unexpected packet rule names an unknown Character"
             );
             ensure!(
                 step.checkpoint.characters.iter().any(|capture| rule
                     .character
                     .as_ref()
-                    .is_none_or(|id| *id == capture.character)
+                    .map_or(true, |id| *id == capture.character)
                     && capture.stream(&step.id, rule.opcode) == Stream::Unexpected),
                 "unexpected packet rule cannot excuse only declared packets"
             );
@@ -913,7 +913,7 @@ impl Observation {
                     && rule
                         .character
                         .as_deref()
-                        .is_none_or(|id| Some(id) == character)
+                        .map_or(true, |id| Some(id) == character)
             });
         let (stream, packet) = if stream == Stream::Unexpected && !decode_unexpected {
             (

@@ -162,7 +162,7 @@ impl EquivalenceRules {
                 "invalid rule path"
             );
             ensure!(
-                rule.character.as_deref().is_none_or(identifier),
+                rule.character.as_deref().map_or(true, identifier),
                 "invalid rule Character"
             );
             ensure!(
@@ -195,7 +195,7 @@ impl EquivalenceRules {
                 "invalid field rule path"
             );
             ensure!(
-                character.as_deref().is_none_or(identifier),
+                character.as_deref().map_or(true, identifier),
                 "invalid rule Character"
             );
             ensure!(
@@ -225,7 +225,7 @@ impl EquivalenceRules {
                 "invalid timing field path"
             );
             ensure!(
-                rule.character.as_deref().is_none_or(identifier),
+                rule.character.as_deref().map_or(true, identifier),
                 "invalid rule Character"
             );
             ensure!(
@@ -283,7 +283,7 @@ impl EquivalenceRules {
             );
             ensure!(identifier(&rule.checkpoint), "invalid rule checkpoint");
             ensure!(
-                rule.character.as_deref().is_none_or(identifier),
+                rule.character.as_deref().map_or(true, identifier),
                 "invalid rule Character"
             );
             ensure!(
@@ -549,7 +549,7 @@ impl Comparator<'_> {
             *candidate == opcode
                 && character
                     .as_ref()
-                    .is_none_or(|id| recipient.as_ref() == Some(id))
+                    .map_or(true, |id| recipient.as_ref() == Some(id))
         })
     }
 
@@ -561,7 +561,7 @@ impl Comparator<'_> {
                     && candidate_path == path
                     && character
                         .as_ref()
-                        .is_none_or(|id| recipient.as_ref() == Some(id))
+                        .map_or(true, |id| recipient.as_ref() == Some(id))
             })
     }
 
@@ -640,7 +640,7 @@ impl Comparator<'_> {
                 && rule
                     .character
                     .as_ref()
-                    .is_none_or(|id| location.character.as_ref() == Some(id))
+                    .map_or(true, |id| location.character.as_ref() == Some(id))
         }) {
             self.used_data_fields.insert(index);
             let valid_shape = data_shape_matches(expected, actual);
@@ -663,7 +663,7 @@ impl Comparator<'_> {
                 && r.path == location.path
                 && r.character
                     .as_ref()
-                    .is_none_or(|id| location.character.as_ref() == Some(id))
+                    .map_or(true, |id| location.character.as_ref() == Some(id))
         }) {
             self.used_random.insert(index);
             if !rule.range.contains(expected) || !rule.range.contains(actual) {
@@ -683,7 +683,7 @@ impl Comparator<'_> {
                 && rule
                     .character
                     .as_ref()
-                    .is_none_or(|id| location.character.as_ref() == Some(id))
+                    .map_or(true, |id| location.character.as_ref() == Some(id))
         }) {
             self.used_identities.insert(index);
             let matches = match (expected, actual) {
@@ -725,7 +725,7 @@ impl Comparator<'_> {
                 && rule
                     .character
                     .as_ref()
-                    .is_none_or(|id| location.character.as_ref() == Some(id))
+                    .map_or(true, |id| location.character.as_ref() == Some(id))
         }) {
             self.used_clocks.insert(index);
             let matches = if let (Field::Unsigned(e), Field::Unsigned(a)) = (expected, actual) {
@@ -1077,13 +1077,27 @@ fn field_at<'a>(fields: &'a BTreeMap<String, Field>, path: &[String]) -> Option<
     Some(value)
 }
 
+fn received_create(trace: &Trace, recipient: &str, checkpoint: &str, target_guid: u64) -> bool {
+    trace.packets.iter().any(|packet| {
+        packet.character.as_deref() == Some(recipient)
+            && packet.checkpoint == checkpoint
+            && packet.opcode == 0x00a9
+            && matches!(packet.stream, Stream::Broadcast(_))
+            && matches!(packet.fields.get("objects"), Some(Field::List(objects)) if objects.iter().any(|object| {
+                matches!(object, Field::Object(fields)
+                    if matches!(fields.get("kind"), Some(Field::Unsigned(2 | 3)))
+                        && fields.get("guid") == Some(&Field::Guid(target_guid)))
+            }))
+    })
+}
+
 impl PacketTimingRule {
     fn applies(&self, packet: &RecordedPacket) -> bool {
         self.opcode == packet.opcode
             && self
                 .character
                 .as_ref()
-                .is_none_or(|id| packet.character.as_ref() == Some(id))
+                .map_or(true, |id| packet.character.as_ref() == Some(id))
             && (self.path.is_empty() || field_at(&packet.fields, &self.path).is_some())
             && (!self.values_only
                 || field_at(
@@ -1127,7 +1141,7 @@ pub(crate) fn validate_rule_samples(scenario: &Scenario, trace: &Trace) -> Resul
                 packet.opcode == opcode
                     && character
                         .as_ref()
-                        .is_none_or(|id| packet.character.as_ref() == Some(id))
+                        .map_or(true, |id| packet.character.as_ref() == Some(id))
                     && scenario.steps.iter().any(|step| {
                         step.id == packet.checkpoint
                             && step
@@ -1238,7 +1252,7 @@ impl Comparator<'_> {
                             && r.opcode == packet.opcode
                             && r.character
                                 .as_ref()
-                                .is_none_or(|id| packet.character.as_ref() == Some(id))
+                                .map_or(true, |id| packet.character.as_ref() == Some(id))
                     })
                     .max_by_key(|rule| rule.character.is_some());
                 if packet.stream == Stream::Malformed {
@@ -1339,13 +1353,7 @@ impl Comparator<'_> {
                     {
                         for target in &capture.creates {
                             let target_guid = trace.header.characters[target];
-                            let found = trace.packets.iter().any(|packet| {
-                            packet.character.as_deref() == character
-                                && packet.checkpoint == step.id
-                                && packet.opcode == 0x00a9
-                                && matches!(packet.fields.get("objects"), Some(Field::List(objects)) if objects.iter().any(|object| matches!(object, Field::Object(fields) if matches!(fields.get("kind"), Some(Field::Unsigned(2 | 3))) && fields.get("guid") == Some(&Field::Guid(target_guid)))))
-                        });
-                            if !found {
+                            if !received_create(trace, character.unwrap(), &step.id, target_guid) {
                                 self.difference(
                                     &Location {
                                         character: character.map(str::to_owned),
@@ -1625,14 +1633,14 @@ pub fn compare(
                 comparator
                     .expected_guids
                     .insert(*expected_guid, actual_guid)
-                    .is_none_or(|guid| guid == actual_guid),
+                    .map_or(true, |guid| guid == actual_guid),
                 "conflicting Character GUID mapping"
             );
             ensure!(
                 comparator
                     .actual_guids
                     .insert(actual_guid, *expected_guid)
-                    .is_none_or(|guid| guid == *expected_guid),
+                    .map_or(true, |guid| guid == *expected_guid),
                 "conflicting Character GUID mapping"
             );
         }
