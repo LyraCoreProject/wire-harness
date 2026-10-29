@@ -7,7 +7,7 @@ on:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -105,3 +105,39 @@ jobs:
           path: target/coverage/
           if-no-files-found: error
           retention-days: 14
+
+  tag-conformance:
+    name: Tag conformance change
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [test, coverage]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: conformance-tag-main
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Tag the tested commit
+        env:
+          BEFORE: ${{ github.event.before }}
+          COMMIT: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet "$BEFORE" "$COMMIT" -- scenarios/ traces/ src/ adapters/ Cargo.toml Cargo.lock; then
+            echo 'No conformance inputs changed'
+            exit 0
+          fi
+          git fetch origin --tags
+          if [ -n "$(git tag --points-at "$COMMIT" -l 'v0.2.0-conformance.*')" ]; then
+            echo 'This commit already has a conformance tag'
+            exit 0
+          fi
+          latest=$(git tag -l 'v0.2.0-conformance.*' --sort=-version:refname | head -n 1)
+          [[ "$latest" =~ ^v0\.2\.0-conformance\.([0-9]+)$ ]]
+          next="v0.2.0-conformance.$((BASH_REMATCH[1] + 1))"
+          git tag "$next" "$COMMIT"
+          git push origin "refs/tags/$next"

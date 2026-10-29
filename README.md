@@ -166,6 +166,15 @@ and table counters, scraped from a Prometheus endpoint whose series names are Sp
 is the benchmark's server adapter — flagged as such in `--help`, switchable off with
 `--metrics none`, and separate from the load generation, which is pure protocol.
 
+## Conformance prerelease tags
+
+After CI passes on a push to `main`, the `tag-conformance` job creates the next
+`v0.2.0-conformance.N` tag on that commit when the push changes `scenarios/`, `traces/`, `src/`,
+`adapters/`, `Cargo.toml`, or `Cargo.lock`. It skips docs-only pushes and a commit that already has a
+conformance tag. The job uses the repository's `GITHUB_TOKEN` with `contents: write`; nobody needs
+to create a tag or release by hand. Core checks for new tags on a schedule and proposes a separate
+pin-bump PR. The tag job never changes core or merges a PR.
+
 ## Tests
 
 ```
