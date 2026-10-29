@@ -9,6 +9,9 @@ use wire_client::WireClient;
 use wow_world_messages::vanilla::opcodes::ServerOpcodeMessage as Smsg;
 
 fn main() -> Result<()> {
+    if trace_cli::strictness_command()? {
+        return Ok(());
+    }
     if trace_cli::compare_command()? {
         return Ok(());
     }

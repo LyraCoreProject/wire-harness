@@ -5,6 +5,39 @@ Equivalence Rules. TOML keeps ordered steps readable in diffs and matches the Fe
 format. Unknown fields fail, so a typo cannot silently change a recording. This is the format
 choice for LyraCore ADR 0005.
 
+## Check strictness before a PR
+
+After recording a Golden Trace and registering it in `src/catalogue.rs`, run
+`vanilla-wire strictness SCENARIO`. Add `--json` for machine-readable output. The command uses the
+committed scenario and raw decoded trace; it does not connect to a server. It changes decoded
+fields, packet presence and order, checkpoints, recipients, and arrival times at named timing
+bounds. It sends each candidate through the conformance comparator. It injects recorded opcodes with
+Character and creature subjects where the decoded packet has a GUID. It also injects declared
+packets labelled opening at connection checkpoints to check the opening exemption.
+
+The report counts each distinct candidate once, then lists detected mutations, survivors explained
+by a named Equivalence Rule, and unexplained survivors. In-process callers can use
+`wire_client::strictness::analyze(&GoldenTrace)`. Inspect each survivor and tighten the scenario or
+rule before opening a PR.
+New catalogue scenarios must have zero unexplained survivors. `vanilla-wire strictness-gate` checks
+the whole catalogue against `strictness_allowlist.json`. That file records existing gaps with a
+reason for each mutation id. CI checks that the entries match the current report exactly.
+For pull requests, CI also rejects entries absent from the allowlist at the merge base with main.
+The pull request introducing the file establishes the initial approved entries. Later additions
+need a maintainer to change the base allowlist in its own reviewed pull request.
+An excusal counts only when the mutation fits the rule's opcode, field, Character, checkpoint, and
+subject intent. For an unexpected-packet rule without `subject_guid_high`, the analyzer derives
+allowed subject GUID high bits from packets observed under that rule in the Golden Trace. It allows
+packets without a decoded subject only when the Golden Trace records one under that rule. The
+report marks mutations outside that intent unexplained.
+
+`--json` emits one object with `schema_version: 2`, `scenario`, `behavior`, `mutations`,
+`detected`, `detected_mutations` as ids, `excused_by_rule` as a name-to-count map,
+`excused_mutations` as name-to-id lists, `rule_intents` as concrete selector descriptions, and
+`unexplained_survivors` as objects with stable `id` and short `description`. Keys and arrays have
+deterministic order. Mutation ids use indices in the raw Golden Trace, so a trace revision can
+change them. The measure tests this finite set of wrong results, not every possible packet change.
+
 `schema_version = 3` requires an opening phase, 1 through 256 fixtures and 1 through 256 steps.
 Identifiers use lowercase letters, digits and underscores. The first fixture must be the only
 Character. Its name has 2 through 12 ASCII letters, with only the first capitalized. The adapter

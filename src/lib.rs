@@ -10,6 +10,7 @@ pub mod metrics;
 pub mod runner;
 pub mod scenario;
 pub mod spatial;
+pub mod strictness;
 pub mod trace;
 pub mod values_mask;
 

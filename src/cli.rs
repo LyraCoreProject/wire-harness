@@ -118,6 +118,8 @@ and assert on decoded SMSG. It is server-agnostic: anything that implements buil
 
 USAGE:
   vanilla-wire compare SCENARIO GOLDEN CANDIDATE [DEVIATIONS_JSON]
+  vanilla-wire strictness SCENARIO [--json]
+  vanilla-wire strictness-gate
   vanilla-wire record SCENARIO PROVENANCE_JSON OUTPUT --account USER --password-stdin
   vanilla-wire candidate SCENARIO OUTPUT --account USER --password-stdin
   vanilla-wire scenario-file PATH --account USER --password-stdin
