@@ -24,9 +24,9 @@ the whole catalogue against `strictness_allowlist.json`. That file records exist
 reason for each mutation id. CI checks that the entries match the current report exactly.
 An excusal counts only when the mutation fits the rule's opcode, field, Character, checkpoint, and
 subject intent. For an unexpected-packet rule without `subject_guid_high`, the analyzer derives
-allowed subject GUID high bits from packets observed under that rule in the Golden Trace. A packet
-without a decoded subject can still be excused by such a rule. The report marks mutations outside
-that intent unexplained.
+allowed subject GUID high bits from packets observed under that rule in the Golden Trace. It allows
+packets without a decoded subject only when the Golden Trace records one under that rule. The
+report marks mutations outside that intent unexplained.
 
 `--json` emits one object with `schema_version: 2`, `scenario`, `behavior`, `mutations`,
 `detected`, `detected_mutations` as ids, `excused_by_rule` as a name-to-count map,

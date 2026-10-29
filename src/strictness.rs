@@ -352,26 +352,29 @@ fn subject(packet: &RecordedPacket) -> Option<u64> {
     }
 }
 
-fn rule_subject_high(
+fn observed_rule_subjects(
     golden: &GoldenTrace,
     checkpoint: &str,
     character: &Option<String>,
     opcode: u16,
-) -> BTreeSet<u16> {
-    golden
-        .trace()
-        .packets
-        .iter()
-        .filter(|packet| {
-            packet.checkpoint == checkpoint
-                && character
-                    .as_ref()
-                    .map_or(true, |id| packet.character.as_ref() == Some(id))
-                && packet.opcode == opcode
-                && packet.stream == Stream::Unexpected
-        })
-        .filter_map(|packet| subject(packet).map(|guid| (guid >> 48) as u16))
-        .collect()
+) -> (BTreeSet<u16>, bool) {
+    let mut highs = BTreeSet::new();
+    let mut subjectless = false;
+    for packet in golden.trace().packets.iter().filter(|packet| {
+        packet.checkpoint == checkpoint
+            && character
+                .as_ref()
+                .map_or(true, |id| packet.character.as_ref() == Some(id))
+            && packet.opcode == opcode
+            && packet.stream == Stream::Unexpected
+    }) {
+        if let Some(guid) = subject(packet) {
+            highs.insert((guid >> 48) as u16);
+        } else {
+            subjectless = true;
+        }
+    }
+    (highs, subjectless)
 }
 
 fn scope_intends(golden: &GoldenTrace, packet: &RecordedPacket, change: &Change) -> bool {
@@ -508,18 +511,16 @@ fn candidate_rules(golden: &GoldenTrace, packet: &RecordedPacket, change: &Chang
                         continue;
                     }
                     let high = subject(packet).map(|guid| (guid >> 48) as u16);
-                    let allowed = rule.subject_guid_high.map_or_else(
-                        || {
-                            rule_subject_high(
-                                golden,
-                                &rule.checkpoint,
-                                &rule.character,
-                                rule.opcode,
-                            )
-                        },
-                        |high| BTreeSet::from([high]),
+                    let (observed, subjectless) = observed_rule_subjects(
+                        golden,
+                        &rule.checkpoint,
+                        &rule.character,
+                        rule.opcode,
                     );
-                    if high.map_or(rule.subject_guid_high.is_none(), |high| {
+                    let allowed = rule
+                        .subject_guid_high
+                        .map_or(observed, |high| BTreeSet::from([high]));
+                    if high.map_or(rule.subject_guid_high.is_none() && subjectless, |high| {
                         allowed.contains(&high)
                     }) {
                         names.push(rule.name.clone());
@@ -600,10 +601,11 @@ fn rule_intents(golden: &GoldenTrace) -> BTreeMap<String, String> {
         );
     }
     for rule in &rules.unexpected_packets {
-        let highs = rule.subject_guid_high.map_or_else(
-            || rule_subject_high(golden, &rule.checkpoint, &rule.character, rule.opcode),
-            |high| BTreeSet::from([high]),
-        );
+        let (observed, subjectless) =
+            observed_rule_subjects(golden, &rule.checkpoint, &rule.character, rule.opcode);
+        let highs = rule
+            .subject_guid_high
+            .map_or(observed, |high| BTreeSet::from([high]));
         intents.insert(
             rule.name.clone(),
             format!(
@@ -612,7 +614,7 @@ fn rule_intents(golden: &GoldenTrace) -> BTreeMap<String, String> {
                 rule.checkpoint,
                 rule.character.as_deref().unwrap_or("any"),
                 highs,
-                rule.subject_guid_high.is_none()
+                rule.subject_guid_high.is_none() && subjectless
             ),
         );
     }

@@ -16,7 +16,11 @@ fn has_id(report: &StrictnessReport, key: &str, id: &str) -> bool {
 #[test]
 fn report_is_byte_stable() {
     let golden = wire_client::catalogue::get("connection_identity").unwrap();
-    let first = serde_json::to_vec(&analyze(&golden).unwrap()).unwrap();
+    let report = analyze(&golden).unwrap();
+    assert!(
+        report.rule_intents["ambient_movement_during_ping"].contains("unsubjected packets false")
+    );
+    let first = serde_json::to_vec(&report).unwrap();
     let second = serde_json::to_vec(&analyze(&golden).unwrap()).unwrap();
     assert_eq!(first, second);
 }
@@ -81,6 +85,8 @@ fn pre37_bank_character_movement_is_unexplained() {
         .unexplained_survivors
         .iter()
         .any(|item| item.id == "inject_open/221/single_character_subject"));
+    assert!(report.rule_intents["ambient_movement_during_open"]
+        .contains("subject GUID high bits {}, unsubjected packets true"));
 }
 
 #[test]
