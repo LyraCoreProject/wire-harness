@@ -91,7 +91,7 @@ elif sys.argv[1] == 'compare':
             )
 
         self.assertEqual(result.returncode, 3, result.stderr)
-        self.assertIn('another checked recording holds the Reference Server lock', result.stderr)
+        self.assertIn('another recording or audit holds the lock', result.stderr)
         self.assertFalse(self.output.exists())
 
 

@@ -32,7 +32,14 @@ case ${1:-} in
     }
     [[ -f $REFERENCE_ROOT/provenance.json ]] || { echo "Reference Server is not provisioned; run setup.py" >&2; exit 2; }
     exec 9> "$REFERENCE_ROOT/.audit.lock"
-    if ! flock -n 9; then
+    if ! python3 - <<'PY'
+import fcntl
+try:
+    fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    raise SystemExit(1)
+PY
+    then
       echo "[reference] Reference Server is in use; another recording or audit holds the lock" >&2
       exit 3
     fi
