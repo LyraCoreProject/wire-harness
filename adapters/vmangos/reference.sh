@@ -82,7 +82,10 @@ else:
     print(f"CONFORMANCE\t{fixtures[0]['name']}\tplayer")
 PY
     ) || exit 2
-    mapfile -t character_accounts <<< "$characters"
+    character_accounts=()
+    while IFS= read -r entry; do
+      if [[ -n $entry ]]; then character_accounts+=("$entry"); fi
+    done <<< "$characters"
     mkdir -p "$REFERENCE_ROOT/recordings"
     scratch=$(mktemp -d "$REFERENCE_ROOT/recordings/checked.XXXXXXXX")
     started=0
