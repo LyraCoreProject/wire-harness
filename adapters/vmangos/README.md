@@ -26,6 +26,12 @@ loads all four MySQL dumps into the Reference Server's MariaDB and creates two A
 | `CONFORMANCE` | 0 | Scenario gameplay | `player-password` |
 | `CONFORMANCEGM` | 5 | Fixture setup in a separate World Session | `gm-password` |
 
+For a schema 4 scenario, `reference.sh record-checked` provisions one more gameplay Account per
+additional Character, named `CONFORMANCE2` through `CONFORMANCE16`. Their password files are
+`peer2-password` through `peer16-password`. It resets every named Character before each sample
+and after recording. The wrapper supplies all gameplay passwords, followed by the GM password,
+on stdin. It starts and stops the Reference Server only when it was down before the command.
+
 Passwords are generated locally, stored with mode 0600 and passed through stdin. Setup writes both
 `account.gmlevel` and realm 1's `account_access` entry, removes older grants for these Accounts,
 and checks them. An older single-Account runtime retains its gameplay password when migrating.

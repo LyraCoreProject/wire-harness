@@ -1,0 +1,57 @@
+schema_version = 4
+id = "two_character_visibility"
+behavior = "character_visibility"
+
+[opening]
+window_ms = 1000
+
+[rules]
+time_tolerance_ms = 100
+wall_clock_tolerance_ms = 2000
+
+[rules.character_scope]
+name = "scenario_characters"
+reason = "This scenario checks visibility of both Characters. Their equipment and stats are outside its scope."
+all_characters = true
+creates_only = true
+packets = []
+
+[[rules.unexpected_packets]]
+name = "ambient_creature_movement"
+reason = "Nearby creature movement varies between recordings. Retain its opcode only."
+checkpoint = "arrival"
+opcode = 221
+
+[[rules.unexpected_packets]]
+name = "ambient_transport_notice"
+reason = "A nearby transport notice can arrive while another Character connects."
+checkpoint = "arrival"
+character = "watcher"
+opcode = 306
+
+[[characters]]
+id = "watcher"
+fixtures = [{ verb = "character", name = "Watchera", race = "human", class = "warrior", level = 1, at = { map = 0, x = -8840.56, y = 489.7, z = 109.61, orientation = 0.0 } }]
+
+[[characters]]
+id = "arriving"
+initially_connected = false
+fixtures = [{ verb = "character", name = "Arrivera", race = "human", class = "warrior", level = 1, at = { map = 0, x = -8842.0, y = 489.7, z = 109.61, orientation = 0.0 } }]
+
+[[steps]]
+id = "arrival"
+character = "arriving"
+action = { kind = "connect" }
+
+[steps.checkpoint]
+window_ms = 3000
+
+[[steps.checkpoint.characters]]
+character = "watcher"
+creates = ["arriving"]
+broadcasts = [{ opcode = 169, stream = "objects" }]
+
+[[steps.checkpoint.characters]]
+character = "arriving"
+creates = ["watcher"]
+broadcasts = [{ opcode = 169, stream = "objects" }]

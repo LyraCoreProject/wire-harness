@@ -1,7 +1,9 @@
 use anyhow::{bail, ensure, Result};
+use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 use wire_client::cli::Invocation;
-use wire_client::runner::{FixtureAdapter, PreparedClient};
-use wire_client::scenario::FixtureVerb;
+use wire_client::runner::{FixtureAdapter, MultiTransport, PreparedClient, Transport};
+use wire_client::scenario::{FixtureVerb, Observation, Scenario};
 use wire_client::{logon_at, WireClient};
 use wow_world_messages::vanilla::{opcodes::ServerOpcodeMessage as Smsg, CMSG_CHAR_ENUM};
 
@@ -10,16 +12,203 @@ mod lyracore_fixture_impl;
 #[path = "vmangos/fixture.rs"]
 mod vmangos_fixture_impl;
 
-pub fn select(invocation: &Invocation) -> Result<Box<dyn FixtureAdapter + '_>> {
+pub fn select(invocation: &Invocation) -> Result<Box<dyn FixtureAdapter>> {
     match std::env::var("WIRE_ADAPTER").as_deref() {
         Ok("lyracore") => Ok(Box::new(lyracore_fixture_impl::Adapter::new(invocation)?)),
         Ok("vmangos") => Ok(Box::new(vmangos_fixture_impl::Adapter(
-            invocation,
+            invocation.clone(),
             Vec::new(),
             None,
         ))),
         _ => bail!("set WIRE_ADAPTER to lyracore or vmangos"),
     }
+}
+
+struct MultiEntry {
+    adapter: Box<dyn FixtureAdapter>,
+    fixture: FixtureVerb,
+    client: Option<PreparedClient>,
+    guid: u64,
+    fixtures: BTreeMap<String, u64>,
+}
+
+struct WireMulti {
+    started: Instant,
+    entries: BTreeMap<String, MultiEntry>,
+}
+
+impl WireMulti {
+    fn prepare(scenario: &Scenario, invocation: &Invocation) -> Result<Self> {
+        let peers = std::env::var("WIRE_PEER_ACCOUNTS").unwrap_or_default();
+        let accounts: Vec<_> = peers
+            .split(',')
+            .filter(|account| !account.is_empty())
+            .collect();
+        ensure!(
+            accounts.len() + 1 == scenario.characters.len(),
+            "WIRE_PEER_ACCOUNTS must name each additional Account"
+        );
+        let mut unique = std::collections::BTreeSet::new();
+        ensure!(
+            unique.insert(invocation.account.clone())
+                && accounts
+                    .iter()
+                    .all(|account| unique.insert((*account).to_owned())),
+            "Characters need distinct Accounts"
+        );
+        let gm_password = if std::env::var("WIRE_ADAPTER").as_deref() == Ok("vmangos") {
+            Some(invocation.peer_password(accounts.len())?.to_owned())
+        } else {
+            None
+        };
+        let mut entries = BTreeMap::new();
+        for (index, character) in scenario.characters.iter().enumerate() {
+            let mut own = invocation.clone();
+            own.character.clear();
+            if index > 0 {
+                own.account = accounts[index - 1].to_owned();
+                own.password = invocation.peer_password(index - 1)?.to_owned();
+            }
+            if let Some(password) = &gm_password {
+                own.peer_passwords = vec![password.clone()];
+            }
+            let mut adapter = select(&own)?;
+            let prepared = adapter.prepare(&character.fixtures)?;
+            let guid = prepared.client.self_guid;
+            let fixtures = prepared.fixtures.clone();
+            let client = if character.initially_connected {
+                Some(prepared)
+            } else {
+                None
+            };
+            entries.insert(
+                character.id.clone(),
+                MultiEntry {
+                    adapter,
+                    fixture: character.fixtures[0].clone(),
+                    client,
+                    guid,
+                    fixtures,
+                },
+            );
+        }
+        Ok(Self {
+            started: Instant::now(),
+            entries,
+        })
+    }
+
+    fn guids(&self) -> BTreeMap<String, u64> {
+        self.entries
+            .iter()
+            .map(|(id, entry)| (id.clone(), entry.guid))
+            .collect()
+    }
+
+    fn cleanup(&mut self) -> Result<()> {
+        for entry in self.entries.values_mut() {
+            entry.client = None;
+            entry.adapter.cleanup()?;
+        }
+        Ok(())
+    }
+}
+
+impl MultiTransport for WireMulti {
+    fn now(&self) -> Duration {
+        self.started.elapsed()
+    }
+    fn character_guid(&self, character: &str) -> Result<u64> {
+        Ok(self
+            .entries
+            .get(character)
+            .ok_or_else(|| anyhow::anyhow!("unknown Character"))?
+            .guid)
+    }
+    fn fixture_guids(&self, character: &str) -> Result<BTreeMap<String, u64>> {
+        Ok(self
+            .entries
+            .get(character)
+            .ok_or_else(|| anyhow::anyhow!("unknown Character"))?
+            .fixtures
+            .clone())
+    }
+    fn take_opening(&mut self, character: &str) -> Result<Vec<Observation>> {
+        Ok(self
+            .entries
+            .get_mut(character)
+            .ok_or_else(|| anyhow::anyhow!("unknown Character"))?
+            .client
+            .as_mut()
+            .map(Transport::take_opening)
+            .unwrap_or_default())
+    }
+    fn connected(&self, character: &str) -> bool {
+        self.entries
+            .get(character)
+            .is_some_and(|entry| entry.client.is_some())
+    }
+    fn connect(&mut self, character: &str) -> Result<()> {
+        let entry = self
+            .entries
+            .get_mut(character)
+            .ok_or_else(|| anyhow::anyhow!("unknown Character"))?;
+        ensure!(entry.client.is_none(), "Character is already connected");
+        let mut client = entry.adapter.reconnect(&entry.fixture)?;
+        ensure!(
+            client.client.self_guid == entry.guid,
+            "reconnect selected a different Character"
+        );
+        client.fixtures = entry.fixtures.clone();
+        entry.client = Some(client);
+        Ok(())
+    }
+    fn disconnect(&mut self, character: &str) -> Result<()> {
+        let entry = self
+            .entries
+            .get_mut(character)
+            .ok_or_else(|| anyhow::anyhow!("unknown Character"))?;
+        ensure!(entry.client.take().is_some(), "Character is disconnected");
+        Ok(())
+    }
+    fn send(&mut self, character: &str, opcode: u32, body: &[u8]) -> Result<()> {
+        Transport::send(
+            self.entries
+                .get_mut(character)
+                .and_then(|e| e.client.as_mut())
+                .ok_or_else(|| anyhow::anyhow!("Character is disconnected"))?,
+            opcode,
+            body,
+        )
+    }
+    fn receive(&mut self, character: &str, timeout: Duration) -> Result<Option<(u16, Vec<u8>)>> {
+        Transport::receive(
+            self.entries
+                .get_mut(character)
+                .and_then(|e| e.client.as_mut())
+                .ok_or_else(|| anyhow::anyhow!("Character is disconnected"))?,
+            timeout,
+        )
+    }
+}
+
+pub fn run_multi_file(invocation: &Invocation, scenario: &Scenario) -> Result<()> {
+    let mut clients = WireMulti::prepare(scenario, invocation)?;
+    let characters = clients.guids();
+    let result = wire_client::runner::run_multi_on(scenario, &mut clients);
+    let cleanup = clients.cleanup();
+    let observations = result?;
+    cleanup?;
+    let report =
+        wire_client::compare::check_multi_observations(scenario, &observations, &characters)?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    ensure!(
+        report.is_match(),
+        "scenario {} has {} differences",
+        scenario.id,
+        report.differences.len()
+    );
+    Ok(())
 }
 
 fn connect(inv: &Invocation) -> Result<WireClient> {
@@ -60,6 +249,18 @@ fn create(inv: &Invocation, fixture: &FixtureVerb) -> Result<WireClient> {
 }
 
 fn reconnect_checked(inv: &Invocation, fixture: &FixtureVerb) -> Result<PreparedClient> {
+    connect_character(inv, fixture, true)
+}
+
+fn reconnect_existing(inv: &Invocation, fixture: &FixtureVerb) -> Result<PreparedClient> {
+    connect_character(inv, fixture, false)
+}
+
+fn connect_character(
+    inv: &Invocation,
+    fixture: &FixtureVerb,
+    check_position: bool,
+) -> Result<PreparedClient> {
     let FixtureVerb::Character {
         name,
         race,
@@ -87,13 +288,15 @@ fn reconnect_checked(inv: &Invocation, fixture: &FixtureVerb) -> Result<Prepared
             && character.level.as_int() == *level,
         "fixture race, class or level did not apply"
     );
-    ensure!(
-        character.map.as_int() == at.map
-            && (character.position.x - at.x).abs() < 0.1
-            && (character.position.y - at.y).abs() < 0.1
-            && (character.position.z - at.z).abs() < 0.1,
-        "fixture position did not apply"
-    );
+    if check_position {
+        ensure!(
+            character.map.as_int() == at.map
+                && (character.position.x - at.x).abs() < 0.1
+                && (character.position.y - at.y).abs() < 0.1
+                && (character.position.z - at.z).abs() < 0.1,
+            "fixture position did not apply"
+        );
+    }
     let guid = character.guid.guid();
     client.start_player_login(guid)?;
     let mut opening = Vec::new();
@@ -103,20 +306,22 @@ fn reconnect_checked(inv: &Invocation, fixture: &FixtureVerb) -> Result<Prepared
         if opcode == 0x0236 {
             use wire_client::decode::Field;
             let fields = &observed.packet.fields;
-            ensure!(
-                fields.get("map") == Some(&Field::Unsigned(u64::from(at.map))),
-                "fixture login map did not apply"
-            );
-            for (name, expected, tolerance) in [
-                ("x", at.x, 0.1),
-                ("y", at.y, 0.1),
-                ("z", at.z, 0.1),
-                ("orientation", at.orientation, 0.01),
-            ] {
+            if check_position {
                 ensure!(
-                    matches!(fields.get(name), Some(Field::Float(value)) if (value - f64::from(expected)).abs() < tolerance),
-                    "fixture login {name} did not apply"
+                    fields.get("map") == Some(&Field::Unsigned(u64::from(at.map))),
+                    "fixture login map did not apply"
                 );
+                for (name, expected, tolerance) in [
+                    ("x", at.x, 0.1),
+                    ("y", at.y, 0.1),
+                    ("z", at.z, 0.1),
+                    ("orientation", at.orientation, 0.01),
+                ] {
+                    ensure!(
+                        matches!(fields.get(name), Some(Field::Float(value)) if (value - f64::from(expected)).abs() < tolerance),
+                        "fixture login {name} did not apply"
+                    );
+                }
             }
             opening.push(observed);
             break;
@@ -224,8 +429,6 @@ pub fn record(invocation: &Invocation, path: &str, golden: bool) -> Result<()> {
     );
     let scenario_text = std::fs::read_to_string(path)?;
     let scenario = wire_client::scenario::Scenario::parse(&scenario_text)?;
-    let mut adapter = select(invocation)?;
-    let mut client = adapter.prepare(&scenario.fixtures)?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_millis()
@@ -234,12 +437,25 @@ pub fn record(invocation: &Invocation, path: &str, golden: bool) -> Result<()> {
         Some(provenance) => Header::golden(&scenario_text, provenance, now)?,
         None => Header::candidate(&scenario_text, adapter_name, now)?,
     };
-    header.character_guid = client.client.self_guid;
-    let result = wire_client::runner::run_on(&scenario, &mut client);
-    drop(client);
-    let cleanup = adapter.cleanup();
-    let observed = result?;
-    cleanup?;
+    let observed = if scenario.schema_version == 4 {
+        let mut clients = WireMulti::prepare(&scenario, invocation)?;
+        header.characters = clients.guids();
+        let result = wire_client::runner::run_multi_on(&scenario, &mut clients);
+        let cleanup = clients.cleanup();
+        let observed = result?;
+        cleanup?;
+        observed
+    } else {
+        let mut adapter = select(invocation)?;
+        let mut client = adapter.prepare(&scenario.fixtures)?;
+        header.character_guid = client.client.self_guid;
+        let result = wire_client::runner::run_on(&scenario, &mut client);
+        drop(client);
+        let cleanup = adapter.cleanup();
+        let observed = result?;
+        cleanup?;
+        observed
+    };
     let trace = Trace::record(header, &observed)?;
     if golden {
         let expected = wire_client::trace::GoldenTrace::new(&scenario_text, trace.clone())?;

@@ -86,7 +86,9 @@ the library has no server-specific implementation. Packet text stays in memory u
 the recorder hashes it. [Golden Traces and comparison](docs/traces.md) describes the file format,
 Equivalence Rules and reusable assertion report. No server crate supplies a decoder or a fixture implementation.
 
-The schema-3 scenarios include an opening phase and `taxi_single_hop`; see
+Schema 4 adds named Characters, per-recipient checkpoints and a shared-clock runner.
+`two_character_visibility` records both Characters receiving the other's CREATE at Stormwind's
+flight master. The schema-3 scenarios still include `taxi_single_hop`; see
 [scenario contracts](docs/scenarios.md), [trace rules](docs/traces.md) and
 [the taxi evidence](docs/taxi.md). Golden Traces are embedded in `wire_client::catalogue`.
 

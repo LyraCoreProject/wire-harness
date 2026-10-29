@@ -16,8 +16,25 @@ case ${1:-} in
     wire_bin=${WIRE_BIN:-$repo/target/debug/vanilla-wire}
     [[ -x $wire_bin ]] || { echo "build vanilla-wire or set WIRE_BIN" >&2; exit 2; }
     export WIRE_GM_ACCOUNT=CONFORMANCEGM WIRE_GM_CHARACTER=Conformsetup
-    cat "$REFERENCE_ROOT/credentials/player-password" "$REFERENCE_ROOT/credentials/gm-password" |
-      env WIRE_ADAPTER=vmangos "$wire_bin" record "${3:-$repo/scenarios/connection_identity.toml}" \
+    scenario=${3:-$repo/scenarios/connection_identity.toml}
+    count=$(python3 - "$scenario" <<'PY'
+import sys
+import tomllib
+with open(sys.argv[1], 'rb') as source:
+    scenario = tomllib.load(source)
+print(len(scenario.get('characters', [])) if scenario.get('schema_version') == 4 else 1)
+PY
+    ) || exit 2
+    passwords=("$REFERENCE_ROOT/credentials/player-password")
+    peers=()
+    for ((peer=2; peer<=count; peer++)); do
+      passwords+=("$REFERENCE_ROOT/credentials/peer${peer}-password")
+      peers+=("CONFORMANCE${peer}")
+    done
+    passwords+=("$REFERENCE_ROOT/credentials/gm-password")
+    peer_accounts=$(IFS=,; echo "${peers[*]}")
+    cat "${passwords[@]}" |
+      env WIRE_ADAPTER=vmangos WIRE_PEER_ACCOUNTS="$peer_accounts" "$wire_bin" record "$scenario" \
       "$REFERENCE_ROOT/provenance.json" "$2" \
       --host 127.0.0.1 --logon-port 13724 --world-port 18085 \
       --account CONFORMANCE --password-stdin
@@ -33,17 +50,27 @@ case ${1:-} in
     [[ -f $REFERENCE_ROOT/provenance.json ]] || { echo "Reference Server is not provisioned; run setup.py" >&2; exit 2; }
     wire_bin=${WIRE_BIN:-$repo/target/debug/vanilla-wire}
     [[ -x $wire_bin ]] || { echo "build vanilla-wire or set WIRE_BIN" >&2; exit 2; }
-    character=$(python3 - "$scenario" <<'PY'
+    characters=$(python3 - "$scenario" <<'PY'
 import sys
 import tomllib
 with open(sys.argv[1], 'rb') as source:
     scenario = tomllib.load(source)
-fixtures = scenario.get('fixtures', [])
-if not fixtures or fixtures[0].get('verb') != 'character':
-    raise SystemExit('first fixture must be a Character')
-print(fixtures[0]['name'])
+if scenario.get('schema_version') == 4:
+    for index, character in enumerate(scenario['characters'], 1):
+        fixture = character['fixtures'][0]
+        if fixture.get('verb') != 'character':
+            raise SystemExit('named Character must start with a Character fixture')
+        account = 'CONFORMANCE' if index == 1 else f'CONFORMANCE{index}'
+        password = 'player' if index == 1 else f'peer{index}'
+        print(f"{account}\t{fixture['name']}\t{password}")
+else:
+    fixtures = scenario.get('fixtures', [])
+    if not fixtures or fixtures[0].get('verb') != 'character':
+        raise SystemExit('first fixture must be a Character')
+    print(f"CONFORMANCE\t{fixtures[0]['name']}\tplayer")
 PY
     ) || exit 2
+    mapfile -t character_accounts <<< "$characters"
     mkdir -p "$REFERENCE_ROOT/recordings"
     scratch=$(mktemp -d "$REFERENCE_ROOT/recordings/checked.XXXXXXXX")
     started=0
@@ -52,7 +79,7 @@ PY
       status=$?
       trap - EXIT
       if [[ $written == 1 ]]; then
-        reset_character || echo "[reference] could not remove fixture Character $character" >&2
+        reset_characters || echo "[reference] could not remove all fixture Characters" >&2
       fi
       if [[ $started == 1 ]]; then
         echo "[reference] stopping Reference Server started by this command" >&2
@@ -66,11 +93,12 @@ PY
       exit "$status"
     }
     reset_character() {
+      local account=$1 character=$2 password=$3
       local proof_attempt=1 startup_attempt=0
       while true; do
         if "$wire_bin" scenario char-delete --host 127.0.0.1 --logon-port 13724 \
-            --world-port 18085 --account CONFORMANCE --character "$character" \
-            --password-stdin < "$REFERENCE_ROOT/credentials/player-password" \
+            --world-port 18085 --account "$account" --character "$character" \
+            --password-stdin < "$REFERENCE_ROOT/credentials/${password}-password" \
             > "$scratch/reset.log" 2>&1; then
           return 0
         fi
@@ -79,7 +107,7 @@ PY
           ((proof_attempt+=1))
           continue
         fi
-        if [[ ${1:-0} == 1 && $startup_attempt -lt 30 ]] && \
+        if [[ ${4:-0} == 1 && $startup_attempt -lt 30 ]] && \
             grep -Eq 'failed to fill whole buffer|Connection refused|timed out' "$scratch/reset.log"; then
           ((startup_attempt+=1))
           echo "[reference] waiting for Reference Server login ($startup_attempt/30)" >&2
@@ -89,6 +117,14 @@ PY
         cat "$scratch/reset.log" >&2
         return 1
       done
+    }
+    reset_characters() {
+      local startup=${1:-0} account character password failed=0
+      for entry in "${character_accounts[@]}"; do
+        IFS=$'\t' read -r account character password <<< "$entry"
+        reset_character "$account" "$character" "$password" "$startup" || failed=1
+      done
+      return "$failed"
     }
     trap finish EXIT
     trap 'exit 129' HUP
@@ -111,11 +147,14 @@ PY
       if [[ $attempt == 120 ]]; then echo "[reference] server ports did not open; inspect reference.sh logs" >&2; exit 1; fi
       sleep 1
     done
-    reset_character 1 || exit 1
+    if [[ ${#character_accounts[@]} -gt 1 ]]; then
+      python3 "$adapter/setup.py" --ensure-peers "$((${#character_accounts[@]} - 1))" || exit 1
+    fi
+    reset_characters 1 || exit 1
     written=1
     echo "[reference] recording first sample" >&2
     "$adapter/reference.sh" record "$output" "$scenario" || exit 1
-    reset_character || exit 1
+    reset_characters || exit 1
     echo "[reference] recording repeat sample" >&2
     "$adapter/reference.sh" record "$scratch/repeat.json" "$scenario" || exit 1
     echo "[reference] comparing repeat with first sample" >&2
@@ -125,7 +164,7 @@ PY
       exit 1
     }
     echo "[reference] repeat matches; Golden Trace written to $output" >&2
-    reset_character || exit 1
+    reset_characters || exit 1
     written=0
     ;;
   *)

@@ -37,6 +37,7 @@ fn packet(opcode: u16, value: Field) -> Observation {
         _ => Stream::Reply("query".into()),
     };
     Observation {
+        character: None,
         received_after_ms: None,
         checkpoint: "query".into(),
         stream,
@@ -417,6 +418,7 @@ fn unexpected_packets_count_even_when_both_traces_contain_them_unless_scenario_e
         let text = scenario(&[477], rules);
         let mut observed = observations(&[Field::Unsigned(7)]);
         observed.push(Observation {
+            character: None,
             received_after_ms: None,
             checkpoint: "query".into(),
             stream: Stream::Unexpected,
@@ -491,6 +493,7 @@ fn unexpected_packet_deviations_report_every_occurrence() {
     let mut actual = observed;
     for _ in 0..2 {
         actual.push(Observation {
+            character: None,
             received_after_ms: None,
             checkpoint: "query".into(),
             stream: Stream::Unexpected,

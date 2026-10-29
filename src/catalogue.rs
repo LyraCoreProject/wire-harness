@@ -19,6 +19,11 @@ pub const ENTRIES: &[Entry] = &[
         scenario: include_str!("../scenarios/taxi_single_hop.toml"),
         trace: include_str!("../traces/taxi_single_hop.json"),
     },
+    Entry {
+        id: "two_character_visibility",
+        scenario: include_str!("../scenarios/two_character_visibility.toml"),
+        trace: include_str!("../traces/two_character_visibility.json"),
+    },
 ];
 
 pub fn get(id: &str) -> Result<GoldenTrace> {

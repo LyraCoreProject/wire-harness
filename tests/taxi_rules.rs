@@ -37,6 +37,7 @@ checkpoint = { window_ms=1, replies=[477], broadcasts=[{opcode=221,stream="movem
 
 fn packet(opcode: u16, fields: BTreeMap<String, Field>) -> Observation {
     Observation {
+        character: None,
         received_after_ms: None,
         checkpoint: "flight".into(),
         stream: match opcode {

@@ -6,15 +6,15 @@ use wire_client::cli::Invocation;
 use wire_client::runner::{FixtureAdapter, PreparedClient};
 use wire_client::scenario::FixtureVerb;
 
-pub struct Adapter<'a> {
-    invocation: &'a Invocation,
+pub struct Adapter {
+    invocation: Invocation,
     endpoint: String,
     token: String,
     shard: String,
 }
 
-impl<'a> Adapter<'a> {
-    pub fn new(invocation: &'a Invocation) -> Result<Self> {
+impl Adapter {
+    pub fn new(invocation: &Invocation) -> Result<Self> {
         let endpoint = std::env::var("WIRE_REALM_URL").context("WIRE_REALM_URL is required")?;
         let port = endpoint
             .strip_prefix("http://127.0.0.1:")
@@ -41,7 +41,7 @@ impl<'a> Adapter<'a> {
             "invalid Shard name"
         );
         Ok(Self {
-            invocation,
+            invocation: invocation.clone(),
             endpoint,
             token,
             shard,
@@ -104,13 +104,13 @@ fn reducer_calls(guid: u64, fixtures: &[FixtureVerb]) -> Vec<(&'static str, serd
         .collect()
 }
 
-impl FixtureAdapter for Adapter<'_> {
+impl FixtureAdapter for Adapter {
     fn prepare(&mut self, fixtures: &[FixtureVerb]) -> Result<PreparedClient> {
         let fixture = fixtures.first().context("Character fixture is required")?;
         let FixtureVerb::Character { at, .. } = fixture else {
             anyhow::bail!("Character must be the first fixture")
         };
-        let client = super::create(self.invocation, fixture)?;
+        let client = super::create(&self.invocation, fixture)?;
         let guid = client.self_guid;
         for verb in fixtures
             .iter()
@@ -121,7 +121,7 @@ impl FixtureAdapter for Adapter<'_> {
             }
         }
         drop(client);
-        let mut client = super::connect(self.invocation)?;
+        let mut client = super::connect(&self.invocation)?;
         client.player_login(guid)?;
         let mut bindings = std::collections::BTreeMap::new();
         for verb in fixtures {
@@ -137,9 +137,13 @@ impl FixtureAdapter for Adapter<'_> {
             }
         }
         drop(client);
-        let mut prepared = super::reconnect_checked(self.invocation, fixture)?;
+        let mut prepared = super::reconnect_checked(&self.invocation, fixture)?;
         prepared.fixtures = bindings;
         Ok(prepared)
+    }
+
+    fn reconnect(&mut self, fixture: &FixtureVerb) -> Result<PreparedClient> {
+        super::reconnect_existing(&self.invocation, fixture)
     }
 }
 

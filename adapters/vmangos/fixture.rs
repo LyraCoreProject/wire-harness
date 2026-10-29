@@ -10,7 +10,7 @@ use wow_world_messages::vanilla::{
     opcodes::ServerOpcodeMessage as Smsg, CMSG_MESSAGECHAT_ChatType, Language, CMSG_MESSAGECHAT,
 };
 
-pub struct Adapter<'a>(pub &'a Invocation, pub Vec<u64>, pub Option<WireClient>);
+pub struct Adapter(pub Invocation, pub Vec<u64>, pub Option<WireClient>);
 
 pub fn logon(inv: &Invocation) -> Result<([u8; 40], String)> {
     retry_proof(|| logon_at(&inv.endpoints.logon_addr, &inv.account, &inv.password))
@@ -32,7 +32,7 @@ fn retry_proof<T>(mut attempt: impl FnMut() -> Result<T>) -> Result<T> {
     unreachable!()
 }
 
-impl FixtureAdapter for Adapter<'_> {
+impl FixtureAdapter for Adapter {
     fn prepare(&mut self, fixtures: &[FixtureVerb]) -> Result<PreparedClient> {
         ensure!(!fixtures.is_empty(), "Character fixture is required");
         ensure!(
@@ -80,7 +80,7 @@ impl FixtureAdapter for Adapter<'_> {
             )
             .context("create GM setup Character")?;
         gm.player_login(gm_guid)?;
-        let mut client = super::create(self.0, fixture)?;
+        let mut client = super::create(&self.0, fixture)?;
         client.send(&wow_world_messages::vanilla::CMSG_COMPLETE_CINEMATIC {})?;
         gm.send(&wow_world_messages::vanilla::CMSG_COMPLETE_CINEMATIC {})?;
         drain(gm, &mut client)?;
@@ -144,20 +144,36 @@ impl FixtureAdapter for Adapter<'_> {
         }
         drop(client);
 
-        let mut prepared = super::reconnect_checked(self.0, fixture)?;
+        let mut prepared = super::reconnect_checked(&self.0, fixture)?;
         prepared.fixtures = bindings;
         Ok(prepared)
     }
 
+    fn reconnect(&mut self, fixture: &FixtureVerb) -> Result<PreparedClient> {
+        super::reconnect_existing(&self.0, fixture)
+    }
+
     fn cleanup(&mut self) -> Result<()> {
-        if let Some(gm) = &mut self.2 {
+        self.2 = None;
+        if !self.1.is_empty() {
+            let mut gm_inv = self.0.clone();
+            gm_inv.account =
+                std::env::var("WIRE_GM_ACCOUNT").context("WIRE_GM_ACCOUNT is required")?;
+            gm_inv.character =
+                std::env::var("WIRE_GM_CHARACTER").context("WIRE_GM_CHARACTER is required")?;
+            gm_inv.password = self.0.peer_password(0)?.to_owned();
+            let mut gm = super::connect(&gm_inv)?;
+            let guid = gm.create_or_find_char(
+                &gm_inv.character,
+                wow_world_messages::vanilla::Class::Warrior,
+            )?;
+            gm.player_login(guid)?;
             for guid in &self.1 {
-                command(gm, format!(".npc spawn delete {}", guid & 0x00ff_ffff))?;
-                drain_one(gm, Duration::from_millis(250))?;
+                command(&mut gm, format!(".npc spawn delete {}", guid & 0x00ff_ffff))?;
+                drain_one(&mut gm, Duration::from_millis(250))?;
             }
         }
         self.1.clear();
-        self.2 = None;
         Ok(())
     }
 }
@@ -260,7 +276,7 @@ fn command(client: &mut WireClient, message: String) -> Result<()> {
     })
 }
 
-impl Drop for Adapter<'_> {
+impl Drop for Adapter {
     fn drop(&mut self) {
         if let Err(error) = self.cleanup() {
             eprintln!("Reference Server fixture cleanup failed: {error}");
