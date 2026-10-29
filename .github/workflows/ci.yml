@@ -51,6 +51,31 @@ jobs:
       - name: Build release binaries
         run: cargo build --release --locked --bins
 
+      - name: Check scenario strictness
+        run: target/release/vanilla-wire strictness-gate
+
+      - name: Keep the strictness allowlist shrink-only
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          if git cat-file -e "$BASE_SHA:strictness_allowlist.json" 2>/dev/null; then
+            python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+
+          before = json.loads(subprocess.check_output(['git', 'show', os.environ['BASE_SHA'] + ':strictness_allowlist.json']))
+          after = json.load(open('strictness_allowlist.json', encoding='utf-8'))
+          old = {(entry['scenario'], entry['id']) for entry in before['entries']}
+          new = {(entry['scenario'], entry['id']) for entry in after['entries']}
+          added = sorted(new - old)
+          if added:
+              raise SystemExit(f'strictness allowlist can only shrink; added: {added}')
+          PY
+          fi
+
       - name: Test adapter arguments
         run: python3 -m unittest discover -s tests -p "test_*.py"
 

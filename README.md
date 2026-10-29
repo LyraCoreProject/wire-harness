@@ -97,6 +97,8 @@ flight master. The schema-3 scenarios still include `taxi_single_hop`; see
 ```
 vanilla-wire smoke --host HOST --account USER --password-stdin --character NAME
 vanilla-wire compare SCENARIO GOLDEN CANDIDATE [DEVIATIONS_JSON]
+vanilla-wire strictness SCENARIO [--json]
+vanilla-wire strictness-gate
 vanilla-wire record SCENARIO PROVENANCE_JSON OUTPUT --account USER --password-stdin
 vanilla-wire candidate SCENARIO OUTPUT --account USER --password-stdin
 vanilla-wire scenario-file PATH --account USER --password-stdin

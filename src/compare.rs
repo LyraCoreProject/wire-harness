@@ -917,8 +917,12 @@ fn contains_guid(field: &Field, guid: u64) -> bool {
     }
 }
 
-fn scoped_trace(scenario: &Scenario, trace: &Trace) -> Result<Trace> {
-    let Some(scope) = &scenario.rules.character_scope else {
+pub(crate) fn scoped_trace(
+    scenario: &Scenario,
+    trace: &Trace,
+    rules: &EquivalenceRules,
+) -> Result<Trace> {
+    let Some(scope) = &rules.character_scope else {
         return Ok(trace.clone());
     };
     ensure!(
@@ -1107,7 +1111,7 @@ impl PacketTimingRule {
 }
 
 pub(crate) fn validate_rule_samples(scenario: &Scenario, trace: &Trace) -> Result<()> {
-    let trace = scoped_trace(scenario, trace)?;
+    let trace = scoped_trace(scenario, trace, &scenario.rules)?;
     for (name, reason, character, opcode, path, unchecked) in scenario
         .rules
         .identities
@@ -1331,8 +1335,7 @@ impl Comparator<'_> {
                     packet.checkpoint.clone(),
                     packet.character.clone(),
                     stream,
-                    scenario
-                        .rules
+                    self.rules
                         .character_scope
                         .as_ref()
                         .and_then(|_| update_field(packet)),
@@ -1548,7 +1551,7 @@ pub fn check_character_observations(
         },
     };
     let trace = Trace::record(header, observations)?;
-    let trace = scoped_trace(scenario, &trace)?;
+    let trace = scoped_trace(scenario, &trace, &scenario.rules)?;
     let mut comparator = comparator(&scenario.rules, (0, 0));
     comparator.packets(scenario, &trace, false, true);
     comparator.finish(&[])
@@ -1576,7 +1579,11 @@ pub fn check_multi_observations(
             adapter: "observations".into(),
         },
     };
-    let trace = scoped_trace(scenario, &Trace::record(header, observations)?)?;
+    let trace = scoped_trace(
+        scenario,
+        &Trace::record(header, observations)?,
+        &scenario.rules,
+    )?;
     let mut comparator = comparator(&scenario.rules, (0, 0));
     comparator.packets(scenario, &trace, false, true);
     comparator.finish(&[])
@@ -1588,10 +1595,18 @@ pub fn compare(
     actual: &Trace,
     deviations: &[DeliberateDeviation],
 ) -> Result<Comparison> {
+    compare_with_rules(expected, actual, &expected.scenario().rules, deviations)
+}
+
+pub(crate) fn compare_with_rules(
+    expected: &GoldenTrace,
+    actual: &Trace,
+    rules: &EquivalenceRules,
+    deviations: &[DeliberateDeviation],
+) -> Result<Comparison> {
     actual.validate()?;
     let scenario = expected.scenario();
     let expected = expected.trace();
-    let rules = &scenario.rules;
     let mut comparator = comparator(
         rules,
         (
@@ -1620,8 +1635,8 @@ pub fn compare(
         );
         return comparator.finish(deviations);
     }
-    let expected = scoped_trace(scenario, expected)?;
-    let actual = scoped_trace(scenario, actual)?;
+    let expected = scoped_trace(scenario, expected, rules)?;
+    let actual = scoped_trace(scenario, actual, rules)?;
     let expected_streams = comparator.packets(scenario, &expected, true, true);
     let actual_streams = comparator.packets(scenario, &actual, false, false);
     if expected.header.character_guid != 0 && actual.header.character_guid != 0 {

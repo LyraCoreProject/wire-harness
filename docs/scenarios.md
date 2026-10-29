@@ -5,6 +5,33 @@ Equivalence Rules. TOML keeps ordered steps readable in diffs and matches the Fe
 format. Unknown fields fail, so a typo cannot silently change a recording. This is the format
 choice for LyraCore ADR 0005.
 
+## Check strictness before a PR
+
+After recording a Golden Trace and registering it in `src/catalogue.rs`, run
+`vanilla-wire strictness SCENARIO`. Add `--json` for machine-readable output. The command uses the
+committed scenario and trace; it does not connect to a server. It changes decoded fields, packet
+presence and order, checkpoints, and recipients, then sends each candidate through the same
+comparator used for conformance. It also injects each recorded opcode with Character and creature
+subjects where the decoded packet has a GUID. An opening relabel checks whether a declared packet
+can disappear into the opening phase.
+
+The report counts each distinct candidate once, then lists detected mutations, survivors explained
+by a named Equivalence Rule, and unexplained survivors. In-process callers can use
+`wire_client::strictness::analyze(&GoldenTrace)`. Inspect each survivor and tighten the scenario or
+rule before opening a PR.
+New catalogue scenarios must have zero unexplained survivors. `vanilla-wire strictness-gate` checks
+the whole catalogue against `strictness_allowlist.json`. That file records existing gaps with a
+reason for each mutation id. CI checks that its entries only disappear after the initial baseline.
+The gate also reports a rule when it excuses at least 10 mutations and at least 25% of the total.
+Treat that flag as a prompt to inspect the rule's scope; it does not fail CI by itself.
+
+`--json` emits one object with `schema_version: 1`, `scenario`, `behavior`, `mutations`,
+`detected`, `excused_by_rule` as a name-to-count map, `unexplained_survivors` as objects with
+stable `id` and short `description`, and `broad_rules` as objects with `name`, `excused` and
+integer `share_percent`. Keys and arrays have deterministic order. Mutation ids use indices in
+the scoped Golden Trace, so a trace revision can change them. The measure tests this finite set of
+wrong results, not every possible packet change.
+
 `schema_version = 3` requires an opening phase, 1 through 256 fixtures and 1 through 256 steps.
 Identifiers use lowercase letters, digits and underscores. The first fixture must be the only
 Character. Its name has 2 through 12 ASCII letters, with only the first capitalized. The adapter
