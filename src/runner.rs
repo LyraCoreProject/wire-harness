@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 
 use crate::scenario::{FixtureVerb, Observation, Scenario};
 use crate::{is_read_timeout, WireClient};
@@ -22,6 +22,7 @@ pub struct PreparedClient {
 }
 
 pub trait Transport {
+    /// Monotonic time; receive must advance it when no packet arrives.
     fn now(&self) -> Duration {
         static START: OnceLock<Instant> = OnceLock::new();
         START.get_or_init(Instant::now).elapsed()
@@ -139,7 +140,8 @@ pub fn run_on(scenario: &Scenario, transport: &mut impl Transport) -> Result<Vec
             observation.received_after_ms = Some(
                 transport
                     .now()
-                    .saturating_sub(sent_at)
+                    .checked_sub(sent_at)
+                    .context("transport clock moved backwards")?
                     .as_millis()
                     .try_into()?,
             );
