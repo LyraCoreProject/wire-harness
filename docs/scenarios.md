@@ -89,7 +89,9 @@ field, the rule keeps its existing opcode-wide meaning and undeclared packet bod
 provides the Character GUID, creature bindings and any buffered opening observations.
 `runner::run_on` takes an existing transport after setup; `runner::run` also calls the fixture
 adapter and returns a `Run` with the Character GUID and observations. In-process callers use the
-same typed packets, `Observation::from_frame` and independent decoder. Use `Observation::opening`
+same typed packets and independent decoder through `Observation::from_frame_with_rules`, passing
+the scenario's unexpected-packet rules so subject-filtered exceptions can see the packet's subject.
+`Observation::from_frame` passes no rules and suits only scenarios without subject filters. Use `Observation::opening`
 for buffered world-entry frames, and fill `received_after_ms` for timing rules.
 
 `compare::check_character_observations` checks checkpoint contracts for a scoped scenario.

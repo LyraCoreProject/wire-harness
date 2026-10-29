@@ -76,8 +76,9 @@ Its scenario and trace are immutable through the comparison interface.
 In-process callers use `compare_observations(&golden, &observations, recorded_at_unix_ms, &deviations)`.
 For Character-scoped rules use
 `compare_character_observations(&golden, &observations, character_guid, recorded_at_unix_ms, &deviations)`.
-A nonzero GUID is required for both traces in that case. Callers can build observations with `Observation::from_frame` to use the same independent decoder and
-opcode classification as the wire runner. This path needs no candidate server provenance.
+A nonzero GUID is required for both traces in that case. Callers can build observations with `Observation::from_frame_with_rules`, passing the scenario's
+unexpected-packet rules, to use the same independent decoder and opcode classification as the wire
+runner. This path needs no candidate server provenance.
 
 ## Comparison
 
