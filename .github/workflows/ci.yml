@@ -24,7 +24,14 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          fetch-depth: 0
           persist-credentials: false
+
+      - name: Check strictness allowlist additions
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: python3 scripts/check_strictness_allowlist.py
 
       - name: Show the pinned toolchain
         run: rustup show active-toolchain && cargo --version
@@ -52,7 +59,7 @@ jobs:
         run: cargo build --release --locked --bins
 
       - name: Check scenario strictness
-        run: target/release/vanilla-wire strictness-gate
+        run: /usr/bin/time -p target/release/vanilla-wire strictness-gate
 
       - name: Test adapter arguments
         run: python3 -m unittest discover -s tests -p "test_*.py"

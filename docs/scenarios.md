@@ -22,6 +22,9 @@ rule before opening a PR.
 New catalogue scenarios must have zero unexplained survivors. `vanilla-wire strictness-gate` checks
 the whole catalogue against `strictness_allowlist.json`. That file records existing gaps with a
 reason for each mutation id. CI checks that the entries match the current report exactly.
+For pull requests, CI also rejects entries absent from the allowlist at the merge base with main.
+The pull request introducing the file establishes the initial approved entries. Later additions
+need a maintainer to change the base allowlist in its own reviewed pull request.
 An excusal counts only when the mutation fits the rule's opcode, field, Character, checkpoint, and
 subject intent. For an unexpected-packet rule without `subject_guid_high`, the analyzer derives
 allowed subject GUID high bits from packets observed under that rule in the Golden Trace. It allows

@@ -90,16 +90,19 @@ fn pre37_bank_character_movement_is_unexplained() {
 }
 
 #[test]
-fn pre39_visibility_accounts_for_discarded_create_fields() {
+fn pre39_visibility_detects_peer_create_max_health() {
     let golden = historical(
         include_str!("fixtures/strictness/visibility_pre39.toml"),
         include_str!("fixtures/strictness/visibility_pre39.json"),
     );
     let report = analyze(&golden).unwrap();
-    let excused = serde_json::to_value(&report).unwrap();
-    let mut checked = 0;
+    let peer_guid = golden.trace().header.characters["arriving"];
+    let mut peer_create = None;
     for (index, packet) in golden.trace().packets.iter().enumerate() {
-        if packet.checkpoint != "arrival" || packet.opcode != 169 {
+        if packet.checkpoint != "arrival"
+            || packet.opcode != 169
+            || packet.character.as_deref() != Some("watcher")
+        {
             continue;
         }
         let Some(RecordedField::List(objects)) = packet.fields.get("objects") else {
@@ -109,34 +112,26 @@ fn pre39_visibility_accounts_for_discarded_create_fields() {
             let RecordedField::Object(fields) = object else {
                 continue;
             };
+            if fields.get("guid") != Some(&RecordedField::Guid(peer_guid))
+                || fields.get("kind") != Some(&RecordedField::Unsigned(2))
+            {
+                continue;
+            }
             let Some(RecordedField::Object(values)) = fields.get("values") else {
                 continue;
             };
-            if !values.contains_key("field_24") {
-                continue;
+            if values.contains_key("field_28") {
+                peer_create = Some(format!(
+                    "packet_{index}/field_objects.{object_index}.values.field_28/plus_one"
+                ));
             }
-            let id =
-                format!("packet_{index}/field_objects.{object_index}.values.field_24/plus_one");
-            assert!(
-                report
-                    .unexplained_survivors
-                    .iter()
-                    .any(|item| item.id == id)
-                    || excused["excused_mutations"]
-                        .as_object()
-                        .unwrap()
-                        .values()
-                        .any(|items| items
-                            .as_array()
-                            .unwrap()
-                            .iter()
-                            .any(|item| item.as_str() == Some(&id))),
-                "missing {id}"
-            );
-            checked += 1;
         }
     }
-    assert!(checked >= 22);
+    let id = peer_create.expect("peer CREATE has max health");
+    assert!(
+        has_id(&report, "detected_mutations", &id),
+        "peer max health mutation must be detected: {id}"
+    );
 }
 
 #[test]
