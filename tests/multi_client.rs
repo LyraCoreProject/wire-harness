@@ -45,6 +45,7 @@ struct ClockTransport {
     ms: u64,
     connected: BTreeMap<String, bool>,
     frames: VecDeque<(String, u16, Vec<u8>)>,
+    pong_recipient: &'static str,
     calls: Vec<String>,
     sent: Vec<(String, u32, Vec<u8>)>,
 }
@@ -83,7 +84,7 @@ impl MultiTransport for ClockTransport {
                 "wrong packet"
             );
             self.frames
-                .push_back((character.into(), 477, vec![7, 0, 0, 0]));
+                .push_back((self.pong_recipient.into(), 477, vec![7, 0, 0, 0]));
         }
         Ok(())
     }
@@ -108,6 +109,7 @@ fn virtual_clock_captures_each_character_and_connects_during_a_scenario() {
         ms: 0,
         connected: BTreeMap::from([("first".into(), true), ("second".into(), true)]),
         frames: VecDeque::new(),
+        pong_recipient: "first",
         calls: Vec::new(),
         sent: Vec::new(),
     };
@@ -131,13 +133,16 @@ fn a_ready_second_character_is_captured_before_the_checkpoint_deadline() {
     let mut transport = ClockTransport {
         ms: 0,
         connected: BTreeMap::from([("first".into(), true), ("second".into(), true)]),
-        frames: VecDeque::from([("second".into(), 477, vec![7, 0, 0, 0])]),
+        frames: VecDeque::new(),
+        pong_recipient: "second",
         calls: Vec::new(),
         sent: Vec::new(),
     };
     let observed = run_multi_on(&scenario, &mut transport).unwrap();
     assert!(observed.iter().any(|packet| {
-        packet.character.as_deref() == Some("second") && packet.packet.opcode == 477
+        packet.character.as_deref() == Some("second")
+            && packet.checkpoint == "ping"
+            && packet.packet.opcode == 477
     }));
 }
 
@@ -148,6 +153,7 @@ fn a_ready_second_character_is_captured_during_opening() {
         ms: 0,
         connected: BTreeMap::from([("first".into(), true), ("second".into(), true)]),
         frames: VecDeque::from([("second".into(), 0xffff, Vec::new())]),
+        pong_recipient: "first",
         calls: Vec::new(),
         sent: Vec::new(),
     };
@@ -177,6 +183,7 @@ fn reconnect_reopens_the_same_character_during_a_scenario() {
         ms: 0,
         connected: BTreeMap::from([("first".into(), true), ("second".into(), true)]),
         frames: VecDeque::new(),
+        pong_recipient: "first",
         calls: Vec::new(),
         sent: Vec::new(),
     };
@@ -215,6 +222,7 @@ fn walking_uses_the_shared_virtual_clock_and_sends_start_heartbeat_stop() {
         ms: 0,
         connected: BTreeMap::from([("first".into(), true), ("second".into(), true)]),
         frames: VecDeque::new(),
+        pong_recipient: "first",
         calls: Vec::new(),
         sent: Vec::new(),
     };
