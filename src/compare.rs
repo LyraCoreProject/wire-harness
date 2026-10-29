@@ -1080,7 +1080,7 @@ impl Comparator<'_> {
                         a,
                     );
                 } else if !rule.is_some_and(|rule| {
-                    rule.subject_guid_high.is_none_or(|high| {
+                    rule.subject_guid_high.map_or(true, |high| {
                         subject(&packet.fields).is_some_and(|guid| guid >> 48 == u64::from(high))
                     })
                 }) {
