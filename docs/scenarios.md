@@ -68,6 +68,9 @@ Each step sends a typed packet, then receives for `window_ms`, at most 180,000 m
 numeric reply opcodes in order, including repeated replies. A broadcast has an opcode and a named
 stream. `expect` can require an exact decoded field value and occurrence count; its path is evaluated
 after scenario scoping. The recorder checks these assertions before accepting a Golden Trace.
+`replies` may be empty when a successful request has no reply. Such a step must assert a declared
+broadcast field. vmangos sends a Character VALUES update, without `SMSG_BUY_BANK_SLOT_RESULT`,
+when it sells a bank bag slot. It sends that result opcode for refusals.
 
 Every received opcode is recorded. Undeclared packets retain no body and become `unexpected_packet`
 differences unless a named scenario rule excuses them. Undecodable declared packets become

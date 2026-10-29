@@ -93,6 +93,10 @@ pub enum ClientPacket {
         source: u32,
         destination: u32,
     },
+    #[serde(rename = "CMSG_BANKER_ACTIVATE")]
+    BankerActivate { target: Target },
+    #[serde(rename = "CMSG_BUY_BANK_SLOT")]
+    BuyBankSlot { target: Target },
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -285,7 +289,7 @@ impl Scenario {
                 "checkpoint window must be 1 through 180000 ms"
             );
             ensure!(
-                !checkpoint.replies.is_empty() && checkpoint.replies.len() <= 256,
+                checkpoint.replies.len() <= 256,
                 "checkpoint needs bounded replies"
             );
             if let Some(Target::Fixture(id)) = step.send.target() {
@@ -295,10 +299,12 @@ impl Scenario {
                 );
             }
             let expected = match step.send {
-                ClientPacket::Ping { .. } => 0x01dd,
-                ClientPacket::NameQuery { .. } => 0x0051,
-                ClientPacket::TaxiNodeStatusQuery { .. } => 0x01ab,
-                ClientPacket::TaxiQueryAvailableNodes { .. } => 0x01a9,
+                ClientPacket::Ping { .. } => Some(0x01dd),
+                ClientPacket::NameQuery { .. } => Some(0x0051),
+                ClientPacket::TaxiNodeStatusQuery { .. } => Some(0x01ab),
+                ClientPacket::TaxiQueryAvailableNodes { .. } => Some(0x01a9),
+                ClientPacket::BankerActivate { .. } => Some(0x01b8),
+                ClientPacket::BuyBankSlot { .. } => None,
                 ClientPacket::ActivateTaxi {
                     source,
                     destination,
@@ -310,13 +316,20 @@ impl Scenario {
                             && nodes.contains(&destination),
                         "taxi endpoints must be distinct known-node fixtures"
                     );
-                    0x01ae
+                    Some(0x01ae)
                 }
             };
-            ensure!(
-                checkpoint.replies.contains(&expected),
-                "checkpoint omits its request's reply opcode"
-            );
+            if let Some(expected) = expected {
+                ensure!(
+                    checkpoint.replies.contains(&expected),
+                    "checkpoint omits its request's reply opcode"
+                );
+            } else {
+                ensure!(
+                    !checkpoint.expect.is_empty(),
+                    "request without a success reply needs a checkpoint assertion"
+                );
+            }
             ensure!(
                 checkpoint.expect.len() <= 256,
                 "too many checkpoint assertions"
@@ -367,6 +380,8 @@ impl ClientPacket {
             Self::NameQuery { target }
             | Self::TaxiNodeStatusQuery { target }
             | Self::TaxiQueryAvailableNodes { target }
+            | Self::BankerActivate { target }
+            | Self::BuyBankSlot { target }
             | Self::ActivateTaxi { target, .. } => Some(target),
         }
     }
@@ -396,6 +411,8 @@ impl ClientPacket {
             Self::NameQuery { .. } => (0x0050, guid.to_le_bytes().to_vec()),
             Self::TaxiNodeStatusQuery { .. } => (0x01aa, guid.to_le_bytes().to_vec()),
             Self::TaxiQueryAvailableNodes { .. } => (0x01ac, guid.to_le_bytes().to_vec()),
+            Self::BankerActivate { .. } => (0x01b7, guid.to_le_bytes().to_vec()),
+            Self::BuyBankSlot { .. } => (0x01b9, guid.to_le_bytes().to_vec()),
             Self::ActivateTaxi {
                 source,
                 destination,

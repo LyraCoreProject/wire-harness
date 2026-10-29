@@ -492,6 +492,15 @@ pub fn decode(opcode: u16, body: &[u8]) -> Result<Packet> {
                 Field::Guid(u64::from_le_bytes(body.bytes()?)),
             );
         }
+        0x01b8 => {
+            fields.insert(
+                "guid".into(),
+                Field::Guid(u64::from_le_bytes(body.bytes()?)),
+            );
+        }
+        0x01ba => {
+            fields.insert("result".into(), Field::Unsigned(body.u32()?.into()));
+        }
 
         0x01dd => {
             fields.insert("sequence".into(), Field::Unsigned(body.u32()?.into()));
