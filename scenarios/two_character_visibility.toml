@@ -23,8 +23,8 @@ path = ["objects", "0", "movement", "timestamp"]
 tolerance_ms = 100
 
 [[rules.data_fields]]
-name = "arrival_max_health"
-reason = "The Reference Server may update a fresh Character's max health during fixture setup; this scenario checks peer visibility."
+name = "arrival_power4"
+reason = "The Reference Server may update a fresh Character's UNIT_FIELD_POWER4 during fixture setup; this scenario checks peer visibility."
 opcode = 169
 path = ["objects", "0", "values", "field_26"]
 
