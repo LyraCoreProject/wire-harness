@@ -25,11 +25,10 @@ def main():
     ).strip()
     current = json.loads(Path(ALLOWLIST).read_text())
     baseline_file = f"{base_commit}:{ALLOWLIST}"
-    if subprocess.run(
-        ["git", "cat-file", "-e", baseline_file],
-        check=False,
-        stderr=subprocess.DEVNULL,
-    ).returncode:
+    base_path = subprocess.check_output(
+        ["git", "ls-tree", "--name-only", base_commit, "--", ALLOWLIST], text=True
+    ).strip()
+    if not base_path:
         print("No base allowlist; this PR establishes the initial approved entries")
         return
     base = json.loads(subprocess.check_output(["git", "show", baseline_file], text=True))

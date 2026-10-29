@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use wire_client::compare::compare;
 use wire_client::strictness::{analyze, check_allowlist, StrictnessReport, Survivor};
 use wire_client::trace::{GoldenTrace, RecordedField, Sha256Digest, Trace};
 
@@ -121,16 +122,31 @@ fn pre39_visibility_detects_peer_create_max_health() {
                 continue;
             };
             if values.contains_key("field_28") {
-                peer_create = Some(format!(
-                    "packet_{index}/field_objects.{object_index}.values.field_28/plus_one"
-                ));
+                peer_create = Some((index, object_index));
             }
         }
     }
-    let id = peer_create.expect("peer CREATE has max health");
+    let (index, object_index) = peer_create.expect("peer CREATE has max health");
+    let id = format!("packet_{index}/field_objects.{object_index}.values.field_28/plus_one");
+    let mut candidate = golden.trace().clone();
+    let RecordedField::List(objects) = candidate.packets[index].fields.get_mut("objects").unwrap()
+    else {
+        panic!("peer CREATE has objects");
+    };
+    let RecordedField::Object(fields) = &mut objects[object_index] else {
+        panic!("peer CREATE has an object");
+    };
+    let Some(RecordedField::Object(values)) = fields.get_mut("values") else {
+        panic!("peer CREATE has values");
+    };
+    let Some(RecordedField::Unsigned(max_health)) = values.get_mut("field_28") else {
+        panic!("peer CREATE has max health");
+    };
+    *max_health += 1;
+    assert!(!compare(&golden, &candidate, &[]).unwrap().is_match());
     assert!(
         has_id(&report, "detected_mutations", &id),
-        "peer max health mutation must be detected: {id}"
+        "a faulty peer CREATE projection would leave {id} unexplained"
     );
 }
 
