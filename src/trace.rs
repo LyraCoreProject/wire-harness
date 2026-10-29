@@ -290,12 +290,13 @@ impl Trace {
                     );
                 }
                 Stream::Broadcast(id) => ensure!(identifier(id), "invalid stream identifier"),
-                Stream::Unexpected | Stream::Malformed => {
+                Stream::Malformed => {
                     ensure!(
                         packet.fields.is_empty(),
                         "undecoded packets must not retain fields"
                     );
                 }
+                Stream::Unexpected => (),
             }
             validate_fields(&packet.fields, 0)?;
         }

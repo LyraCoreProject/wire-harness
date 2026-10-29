@@ -1,3 +1,4 @@
+import fcntl
 import os
 from pathlib import Path
 import socket
@@ -50,13 +51,14 @@ elif sys.argv[1] == 'compare':
     print('{}')
 """,
         )
-        self.listeners = []
+    def _listen_for_reference(self):
+        listeners = []
         for port in (13724, 18085):
             listener = socket.socket()
             listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             listener.bind(('127.0.0.1', port))
             listener.listen()
-            self.listeners.append(listener)
+            listeners.append(listener)
             self.addCleanup(listener.close)
 
     def _write_executable(self, path, source):
@@ -64,6 +66,7 @@ elif sys.argv[1] == 'compare':
         path.chmod(0o700)
 
     def test_failed_shutdown_rejects_and_removes_recording(self):
+        self._listen_for_reference()
         env = dict(os.environ, HOME=str(self.home), WIRE_BIN=str(self.wire),
                    PATH=f'{self.bin}:{Path(sys.executable).parent}:/usr/bin:/bin')
         result = subprocess.run(
@@ -74,6 +77,21 @@ elif sys.argv[1] == 'compare':
 
         self.assertNotEqual(result.returncode, 0, result.stderr)
         self.assertIn('stop failed; run reference.sh down', result.stderr)
+        self.assertFalse(self.output.exists())
+
+    def test_checked_recording_rejects_held_reference_lock(self):
+        env = dict(os.environ, HOME=str(self.home), WIRE_BIN=str(self.wire),
+                   PATH=f'{self.bin}:{Path(sys.executable).parent}:/usr/bin:/bin')
+        with (self.reference / '.audit.lock').open('w') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            result = subprocess.run(
+                ['/bin/bash', str(ROOT / 'adapters/vmangos/reference.sh'), 'record-checked',
+                 str(self.scenario), str(self.output)],
+                env=env, capture_output=True, text=True,
+            )
+
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertIn('another recording or audit holds the lock', result.stderr)
         self.assertFalse(self.output.exists())
 
 

@@ -58,6 +58,8 @@ pub struct UnexpectedPacketRule {
     pub reason: String,
     pub checkpoint: String,
     pub opcode: u16,
+    #[serde(default)]
+    pub subject_guid_high: Option<u16>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1064,12 +1066,24 @@ impl Comparator<'_> {
             };
             let stream = step.checkpoint.stream(&step.id, packet.opcode);
             if stream == Stream::Unexpected {
-                if !self
+                let rule = self
                     .rules
                     .unexpected_packets
                     .iter()
-                    .any(|r| r.checkpoint == packet.checkpoint && r.opcode == packet.opcode)
-                {
+                    .find(|r| r.checkpoint == packet.checkpoint && r.opcode == packet.opcode);
+                if packet.stream == Stream::Malformed {
+                    self.difference(
+                        &location,
+                        "packet_decode",
+                        "packet could not be decoded",
+                        e,
+                        a,
+                    );
+                } else if !rule.is_some_and(|rule| {
+                    rule.subject_guid_high.map_or(true, |high| {
+                        subject(&packet.fields).is_some_and(|guid| guid >> 48 == u64::from(high))
+                    })
+                }) {
                     self.difference(
                         &location,
                         "unexpected_packet",

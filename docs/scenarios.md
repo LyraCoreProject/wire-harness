@@ -68,13 +68,22 @@ Each step sends a typed packet, then receives for `window_ms`, at most 180,000 m
 numeric reply opcodes in order, including repeated replies. A broadcast has an opcode and a named
 stream. `expect` can require an exact decoded field value and occurrence count; its path is evaluated
 after scenario scoping. The recorder checks these assertions before accepting a Golden Trace.
+`replies` may be empty when a successful request has no reply. Such a step must assert a declared
+broadcast field. vmangos sends a Character VALUES update, without `SMSG_BUY_BANK_SLOT_RESULT`,
+when it sells a bank bag slot. It sends that result opcode for refusals.
 
-Every received opcode is recorded. Undeclared packets retain no body and become `unexpected_packet`
+Every received opcode is recorded. Undeclared packets normally retain no body and become `unexpected_packet`
 differences unless a named scenario rule excuses them. Undecodable declared packets become
 `packet_decode` differences. Compressed object updates decode to the same opcode and fields as
 uncompressed updates. Missing, extra and reordered replies are reported after capture. Transport
 failures and resource limits fail the run. The runner records each packet's elapsed milliseconds
 since its step was sent and acknowledges valid teleport corrections for the Character.
+
+An `[[rules.unexpected_packets]]` entry names a checkpoint and opcode. Set
+`subject_guid_high = 61744` to excuse only packets whose decoded subject GUID has `0xF130` in
+its upper 16 bits, the creature GUID type. A filtered rule decodes and records the packet fields;
+missing subject GUIDs, other GUID types and malformed packets remain differences. Without this
+field, the rule keeps its existing opcode-wide meaning and undeclared packet bodies stay discarded.
 
 `runner::FixtureAdapter` owns setup and cleanup. `runner::Transport` owns the wire boundary and
 provides the Character GUID, creature bindings and any buffered opening observations.
