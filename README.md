@@ -169,9 +169,11 @@ is the benchmark's server adapter — flagged as such in `--help`, switchable of
 ## Conformance prerelease tags
 
 After CI passes on a push to `main`, the `tag-conformance` job creates the next
-`v0.2.0-conformance.N` tag on that commit when the push changes `scenarios/`, `traces/`, `src/`,
-`adapters/`, `Cargo.toml`, or `Cargo.lock`. It skips docs-only pushes and a commit that already has a
-conformance tag. The job uses the repository's `GITHUB_TOKEN` with `contents: write`; nobody needs
+`v0.2.0-conformance.N` tag on that commit when the changes since the latest conformance tag touch
+`scenarios/`, `traces/`, `src/`, `adapters/`, `Cargo.toml`, or `Cargo.lock`. It skips a commit that
+already has a conformance tag or does not descend from the latest tag. This also catches a scenario
+change whose pending run was replaced by a later docs-only push. The job uses the repository's
+`GITHUB_TOKEN` with `contents: write`; nobody needs
 to create a tag or release by hand. Core checks for new tags on a schedule and proposes a separate
 pin-bump PR. The tag job never changes core or merges a PR.
 

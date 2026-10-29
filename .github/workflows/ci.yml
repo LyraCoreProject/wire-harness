@@ -22,13 +22,15 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
 
       - name: Show the pinned toolchain
         run: rustup show active-toolchain && cargo --version
 
       - name: Cache cargo registry + target
-        uses: actions/cache@v4
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: |
             ~/.cargo/registry
@@ -63,13 +65,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
 
       - name: Show the pinned toolchain
         run: rustup show active-toolchain && cargo --version
 
       - name: Cache cargo registry + coverage target dir
-        uses: actions/cache@v4
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: |
             ~/.cargo/registry
@@ -99,7 +103,7 @@ jobs:
 
       - name: Upload coverage artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: coverage-${{ github.sha }}
           path: target/coverage/
@@ -117,20 +121,17 @@ jobs:
       group: conformance-tag-main
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
+          persist-credentials: false
       - name: Tag the tested commit
         env:
-          BEFORE: ${{ github.event.before }}
+          GH_TOKEN: ${{ github.token }}
           COMMIT: ${{ github.sha }}
         shell: bash
         run: |
           set -euo pipefail
-          if git diff --quiet "$BEFORE" "$COMMIT" -- scenarios/ traces/ src/ adapters/ Cargo.toml Cargo.lock; then
-            echo 'No conformance inputs changed'
-            exit 0
-          fi
           git fetch origin --tags
           if [ -n "$(git tag --points-at "$COMMIT" -l 'v0.2.0-conformance.*')" ]; then
             echo 'This commit already has a conformance tag'
@@ -138,6 +139,13 @@ jobs:
           fi
           latest=$(git tag -l 'v0.2.0-conformance.*' --sort=-version:refname | head -n 1)
           [[ "$latest" =~ ^v0\.2\.0-conformance\.([0-9]+)$ ]]
+          if ! git merge-base --is-ancestor "$latest^{commit}" "$COMMIT"; then
+            echo "$COMMIT does not descend from $latest; skipping older run"
+            exit 0
+          fi
+          if git diff --quiet "$latest^{commit}" "$COMMIT" -- scenarios/ traces/ src/ adapters/ Cargo.toml Cargo.lock; then
+            echo "No conformance inputs changed since $latest"
+            exit 0
+          fi
           next="v0.2.0-conformance.$((BASH_REMATCH[1] + 1))"
-          git tag "$next" "$COMMIT"
-          git push origin "refs/tags/$next"
+          gh api "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/tags/$next" -f "sha=$COMMIT"
