@@ -127,30 +127,29 @@ impl Analyzer<'_> {
             return Ok(());
         }
         let change = Change::Field(path);
-        if scope_intends(self.golden, packet, &change) {
-            if scoped_packet(self.golden, changed.clone())?
+        if scope_intends(self.golden, packet, &change)
+            && scoped_packet(self.golden, changed.clone())?
                 == scoped_packet(self.golden, packet.clone())?
-            {
-                let mut hash = Sha256::new();
-                hash.update(b"packet\0");
-                hash.update(index.to_le_bytes());
-                hash.update(serde_json::to_vec(&changed)?);
-                if self.seen.insert(hash.finalize().into()) {
-                    self.report.mutations += 1;
-                    self.excuse(
-                        self.golden
-                            .scenario()
-                            .rules
-                            .character_scope
-                            .as_ref()
-                            .unwrap()
-                            .name
-                            .clone(),
-                        id,
-                    );
-                }
-                return Ok(());
+        {
+            let mut hash = Sha256::new();
+            hash.update(b"packet\0");
+            hash.update(index.to_le_bytes());
+            hash.update(serde_json::to_vec(&changed)?);
+            if self.seen.insert(hash.finalize().into()) {
+                self.report.mutations += 1;
+                self.excuse(
+                    self.golden
+                        .scenario()
+                        .rules
+                        .character_scope
+                        .as_ref()
+                        .unwrap()
+                        .name
+                        .clone(),
+                    id,
+                );
             }
+            return Ok(());
         }
         let mut candidate = self.golden.trace().clone();
         candidate.packets[index] = changed;
@@ -330,21 +329,27 @@ fn timing_applies(rule: &PacketTimingRule, packet: &RecordedPacket) -> bool {
     matches!(rule.path.get(1).and_then(|index| index.parse::<usize>().ok()).and_then(|index| objects.get(index)), Some(Field::Object(fields)) if fields.get("kind") == Some(&Field::Unsigned(0)))
 }
 
-fn subject(packet: &RecordedPacket) -> Option<u64> {
-    fn fields_subject(fields: &BTreeMap<String, Field>) -> Option<u64> {
-        for name in ["guid", "caster", "attacker"] {
-            if let Some(Field::Guid(guid)) = fields.get(name) {
-                return Some(*guid);
-            }
+fn subject_path(fields: &BTreeMap<String, Field>) -> Option<Vec<String>> {
+    for name in ["guid", "caster", "attacker"] {
+        if matches!(fields.get(name), Some(Field::Guid(_))) {
+            return Some(vec![name.into()]);
         }
-        if let Some(Field::List(objects)) = fields.get("objects") {
-            if let [Field::Object(object)] = objects.as_slice() {
-                return fields_subject(object);
-            }
-        }
-        None
     }
-    fields_subject(&packet.fields)
+    if let Some(Field::List(objects)) = fields.get("objects") {
+        if let [Field::Object(object)] = objects.as_slice() {
+            let mut path = vec!["objects".into(), "0".into()];
+            path.extend(subject_path(object)?);
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn subject(packet: &RecordedPacket) -> Option<u64> {
+    match at(&packet.fields, &subject_path(&packet.fields)?) {
+        Some(Field::Guid(guid)) => Some(*guid),
+        _ => None,
+    }
 }
 
 fn rule_subject_high(
@@ -836,11 +841,10 @@ fn stream_for(
 
 fn with_subject(packet: &RecordedPacket, guid: u64) -> Option<RecordedPacket> {
     let mut packet = packet.clone();
-    for path in paths(&packet.fields) {
-        if let Some(Field::Guid(value)) = at_mut(&mut packet.fields, &path) {
-            *value = guid;
-            return Some(packet);
-        }
+    let path = subject_path(&packet.fields)?;
+    if let Some(Field::Guid(value)) = at_mut(&mut packet.fields, &path) {
+        *value = guid;
+        return Some(packet);
     }
     None
 }
@@ -989,33 +993,32 @@ pub fn analyze(golden: &GoldenTrace) -> Result<StrictnessReport> {
             packet,
             Change::Packet,
         )?;
-        if packet.received_after_ms.is_some() {
-            if let Some(rule) = scenario
+        if let (Some(recorded), Some(rule)) = (
+            packet.received_after_ms,
+            scenario
                 .rules
                 .packet_timing
                 .iter()
                 .filter(|rule| timing_applies(rule, packet))
-                .max_by_key(|rule| rule.path.len())
-            {
-                let recorded = packet.received_after_ms.unwrap();
-                for (name, offset) in [
-                    ("at_bound", rule.tolerance_ms),
-                    ("past_bound", rule.tolerance_ms.saturating_add(1)),
-                ] {
-                    let arrival = recorded
-                        .checked_add(offset)
-                        .or_else(|| recorded.checked_sub(offset));
-                    if let Some(arrival) = arrival {
-                        let mut candidate = trace.clone();
-                        candidate.packets[index].received_after_ms = Some(arrival);
-                        analyzer.run(
-                            format!("{base}/received_after_ms/{name}"),
-                            describe(&format!("change arrival by {offset} ms")),
-                            candidate,
-                            packet,
-                            Change::Timing,
-                        )?;
-                    }
+                .max_by_key(|rule| rule.path.len()),
+        ) {
+            for (name, offset) in [
+                ("at_bound", rule.tolerance_ms),
+                ("past_bound", rule.tolerance_ms.saturating_add(1)),
+            ] {
+                let arrival = recorded
+                    .checked_add(offset)
+                    .or_else(|| recorded.checked_sub(offset));
+                if let Some(arrival) = arrival {
+                    let mut candidate = trace.clone();
+                    candidate.packets[index].received_after_ms = Some(arrival);
+                    analyzer.run(
+                        format!("{base}/received_after_ms/{name}"),
+                        describe(&format!("change arrival by {offset} ms")),
+                        candidate,
+                        packet,
+                        Change::Timing,
+                    )?;
                 }
             }
         }
