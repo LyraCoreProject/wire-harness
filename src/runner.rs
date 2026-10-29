@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use anyhow::{ensure, Result};
@@ -21,6 +22,11 @@ pub struct PreparedClient {
 }
 
 pub trait Transport {
+    fn now(&self) -> Duration {
+        static START: OnceLock<Instant> = OnceLock::new();
+        START.get_or_init(Instant::now).elapsed()
+    }
+
     fn fixture_guids(&self) -> BTreeMap<String, u64> {
         BTreeMap::new()
     }
@@ -99,8 +105,8 @@ pub fn run_on(scenario: &Scenario, transport: &mut impl Transport) -> Result<Vec
         observations.len() <= 4096,
         "opening exceeded 4096 received frames"
     );
-    let deadline = Instant::now() + Duration::from_millis(scenario.opening.window_ms);
-    while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+    let deadline = transport.now() + Duration::from_millis(scenario.opening.window_ms);
+    while let Some(remaining) = deadline.checked_sub(transport.now()) {
         if remaining.is_zero() {
             break;
         }
@@ -116,11 +122,11 @@ pub fn run_on(scenario: &Scenario, transport: &mut impl Transport) -> Result<Vec
     let fixtures = transport.fixture_guids();
     for step in &scenario.steps {
         let (opcode, body) = step.send.encode(transport.character_guid(), &fixtures)?;
-        let sent_at = Instant::now();
+        let sent_at = transport.now();
         transport.send(opcode, &body)?;
-        let deadline = Instant::now() + Duration::from_millis(step.checkpoint.window_ms);
+        let deadline = transport.now() + Duration::from_millis(step.checkpoint.window_ms);
         let mut frames = 0;
-        while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+        while let Some(remaining) = deadline.checked_sub(transport.now()) {
             if remaining.is_zero() {
                 break;
             }
@@ -130,7 +136,13 @@ pub fn run_on(scenario: &Scenario, transport: &mut impl Transport) -> Result<Vec
             frames += 1;
             ensure!(frames <= 4096, "checkpoint exceeded 4096 received frames");
             let mut observation = Observation::from_frame(step, opcode, &body);
-            observation.received_after_ms = Some(sent_at.elapsed().as_millis().try_into()?);
+            observation.received_after_ms = Some(
+                transport
+                    .now()
+                    .saturating_sub(sent_at)
+                    .as_millis()
+                    .try_into()?,
+            );
             if opcode == 0x00c7 {
                 use crate::decode::Field;
                 let fields = &observation.packet.fields;
