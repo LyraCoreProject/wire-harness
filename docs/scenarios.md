@@ -64,10 +64,9 @@ recipient sees it. Unlisted opcodes remain errors. During `connect` and `reconne
 packets from the connecting Character are recorded as opening packets and excluded from comparison;
 declared opcodes in that checkpoint still compare. `rules.character_scope` may set
 `all_characters = true` to retain object updates for every named Character. The
-`creates_only = true` option keeps CREATE kind and GUID for those Characters and excludes other
-object updates from comparison. Use it when a scenario checks visibility rather than stats or
-equipment. The raw scrubbed packets remain in the trace. Schema 3 files and traces keep their
-existing bytes and hashes.
+`creates_only = true` option keeps full CREATE updates for peer Characters and excludes own login
+and other object updates from comparison. Use it when a scenario checks peer visibility. The raw
+scrubbed packets remain in the trace. Schema 3 files and traces keep their existing bytes and hashes.
 
 Random, identity, clock, data-field, packet-timing and unexpected-packet rules may name one
 `character`. With no selector, a rule applies to every Character. Identity and clock origins

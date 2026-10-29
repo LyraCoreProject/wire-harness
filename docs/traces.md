@@ -24,8 +24,9 @@ Reference Server's binary release, archive SHA-256, full source SHA and full dat
 `origin.provenance`. A candidate carries its adapter name and requires no vmangos provenance.
 The header also has the scenario id, Behavior, SHA-256 of the exact scenario file, schema version,
 `character_guid` and `recorded_at_unix_ms`. Schema 4 uses `header.characters` instead of one
-`character_guid`, and each packet names its receiving Character. The recorder stamps this time after fixture setup,
-immediately before running the scenario. A moving release label alone does not identify a recording.
+`character_guid`, and each packet names its receiving Character. The recorder stamps this time
+after fixture setup, immediately before running the scenario. A moving release label alone does
+not identify a recording.
 Older schemas must be recorded again; do not convert their headers by hand.
 
 `decode::Field` holds text in memory and cannot serialize. `Trace::record` recursively replaces
@@ -145,8 +146,9 @@ supply a replacement tolerance or random range to `compare`. General rule kinds 
 - `wall_clock_ms` fields, including `SMSG_QUERY_TIME_RESPONSE`, must be within the scenario's
   `wall_clock_tolerance_ms` of their own trace's `recorded_at_unix_ms`. Recordings on different days
   can match. The tolerance must cover timestamp rounding and the scenario's capture duration.
-- Replies keep order and multiplicity within a checkpoint. Each broadcast stream keeps its own
-  order; unrelated streams can interleave. An LCS aligns packets by opcode and mapped subject GUID.
+- Replies keep order and multiplicity within each recipient stream and checkpoint. Each broadcast
+  stream keeps its own order for its recipient; there is no global arrival order across recipients.
+  Unrelated streams can interleave. An LCS aligns packets by opcode and mapped subject GUID.
   Subject fields are `guid`, `caster`, `attacker`, or the GUID of a scoped object update.
   Unmapped subjects can establish a bijection on their first aligned pair. Equal fields break ties
   between repeated keys, then a fixed index preference breaks remaining ties. Fields compare only
@@ -198,7 +200,8 @@ supply a replacement tolerance or random range to `compare`. General rule kinds 
   field multiplicity and any `packet_timing` bound still apply. A delayed fare therefore fails even
   when the final balance matches. Other updates naming the Character remain strict.
   Opening, malformed, unknown-checkpoint and mislabeled packets cannot bypass their normal checks.
-  Every original packet remains in the trace. This scopes a Behavior's outcome when nearby entities
+  CREATE updates for selected Characters retain all decoded fields for comparison. Every original
+  packet remains in the trace. This scopes a Behavior's outcome when nearby entities
   differ with world data.
 - Named `data_fields` rules classify changed values as data only at their declared opcode and field
   path. Each needs a reason. Presence, scalar types and object keys still compare; catalogue lists may differ in

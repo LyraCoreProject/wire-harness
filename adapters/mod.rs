@@ -190,6 +190,14 @@ impl MultiTransport for WireMulti {
             timeout,
         )
     }
+    fn receive_ready(&mut self, character: &str) -> Result<Option<(u16, Vec<u8>)>> {
+        self.entries
+            .get_mut(character)
+            .and_then(|entry| entry.client.as_mut())
+            .ok_or_else(|| anyhow::anyhow!("Character is disconnected"))?
+            .client
+            .recv_raw_ready()
+    }
 }
 
 pub fn run_multi_file(invocation: &Invocation, scenario: &Scenario) -> Result<()> {
@@ -399,8 +407,27 @@ fn new_creature(
     bail!("fixture creature did not appear")
 }
 
+fn prepare_recording<T>(
+    scenario_text: &str,
+    provenance: Option<wire_client::trace::Provenance>,
+    adapter_name: String,
+    prepare: impl FnOnce() -> Result<T>,
+) -> Result<(T, wire_client::trace::Header)> {
+    use wire_client::trace::Header;
+    let mut header = match provenance {
+        Some(provenance) => Header::golden(scenario_text, provenance, 0)?,
+        None => Header::candidate(scenario_text, adapter_name, 0)?,
+    };
+    let prepared = prepare()?;
+    header.recorded_at_unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_millis()
+        .try_into()?;
+    Ok((prepared, header))
+}
+
 pub fn record(invocation: &Invocation, path: &str, golden: bool) -> Result<()> {
-    use wire_client::trace::{Header, Trace};
+    use wire_client::trace::Trace;
     let adapter_name = std::env::var("WIRE_ADAPTER")?;
     let (provenance, output) = if golden {
         ensure!(
@@ -429,32 +456,31 @@ pub fn record(invocation: &Invocation, path: &str, golden: bool) -> Result<()> {
     );
     let scenario_text = std::fs::read_to_string(path)?;
     let scenario = wire_client::scenario::Scenario::parse(&scenario_text)?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_millis()
-        .try_into()?;
-    let mut header = match provenance {
-        Some(provenance) => Header::golden(&scenario_text, provenance, now)?,
-        None => Header::candidate(&scenario_text, adapter_name, now)?,
-    };
-    let observed = if scenario.schema_version == 4 {
-        let mut clients = WireMulti::prepare(&scenario, invocation)?;
+    let (header, observed) = if scenario.schema_version == 4 {
+        let (mut clients, mut header) =
+            prepare_recording(&scenario_text, provenance, adapter_name, || {
+                WireMulti::prepare(&scenario, invocation)
+            })?;
         header.characters = clients.guids();
         let result = wire_client::runner::run_multi_on(&scenario, &mut clients);
         let cleanup = clients.cleanup();
         let observed = result?;
         cleanup?;
-        observed
+        (header, observed)
     } else {
-        let mut adapter = select(invocation)?;
-        let mut client = adapter.prepare(&scenario.fixtures)?;
+        let ((mut adapter, mut client), mut header) =
+            prepare_recording(&scenario_text, provenance, adapter_name, || {
+                let mut adapter = select(invocation)?;
+                let client = adapter.prepare(&scenario.fixtures)?;
+                Ok((adapter, client))
+            })?;
         header.character_guid = client.client.self_guid;
         let result = wire_client::runner::run_on(&scenario, &mut client);
         drop(client);
         let cleanup = adapter.cleanup();
         let observed = result?;
         cleanup?;
-        observed
+        (header, observed)
     };
     let trace = Trace::record(header, &observed)?;
     if golden {
@@ -473,4 +499,27 @@ pub fn record(invocation: &Invocation, path: &str, golden: bool) -> Result<()> {
         trace.packets.len()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::prepare_recording;
+
+    #[test]
+    fn recording_time_follows_fixture_setup_for_each_schema() {
+        for scenario in [
+            include_str!("../scenarios/connection_identity.toml"),
+            include_str!("../scenarios/two_character_visibility.toml"),
+        ] {
+            let (setup_finished_at, header) =
+                prepare_recording(scenario, None, "test".into(), || {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    Ok(std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)?
+                        .as_millis() as u64)
+                })
+                .unwrap();
+            assert!(header.recorded_at_unix_ms >= setup_finished_at);
+        }
+    }
 }

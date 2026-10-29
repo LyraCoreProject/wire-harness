@@ -126,6 +126,40 @@ fn virtual_clock_captures_each_character_and_connects_during_a_scenario() {
 }
 
 #[test]
+fn a_ready_second_character_is_captured_before_the_checkpoint_deadline() {
+    let scenario = Scenario::parse(ACTORS).unwrap();
+    let mut transport = ClockTransport {
+        ms: 0,
+        connected: BTreeMap::from([("first".into(), true), ("second".into(), true)]),
+        frames: VecDeque::from([("second".into(), 477, vec![7, 0, 0, 0])]),
+        calls: Vec::new(),
+        sent: Vec::new(),
+    };
+    let observed = run_multi_on(&scenario, &mut transport).unwrap();
+    assert!(observed.iter().any(|packet| {
+        packet.character.as_deref() == Some("second") && packet.packet.opcode == 477
+    }));
+}
+
+#[test]
+fn a_ready_second_character_is_captured_during_opening() {
+    let scenario = Scenario::parse(ACTORS).unwrap();
+    let mut transport = ClockTransport {
+        ms: 0,
+        connected: BTreeMap::from([("first".into(), true), ("second".into(), true)]),
+        frames: VecDeque::from([("second".into(), 0xffff, Vec::new())]),
+        calls: Vec::new(),
+        sent: Vec::new(),
+    };
+    let observed = run_multi_on(&scenario, &mut transport).unwrap();
+    assert!(observed.iter().any(|packet| {
+        packet.character.as_deref() == Some("second")
+            && packet.checkpoint == "opening"
+            && packet.packet.opcode == 0xffff
+    }));
+}
+
+#[test]
 fn reconnect_reopens_the_same_character_during_a_scenario() {
     let scenario = Scenario::parse(
         &ACTORS
@@ -299,4 +333,88 @@ fn clock_rules_use_each_character_stream_as_their_origin() {
     }
     let golden = GoldenTrace::new(&source, expected).unwrap();
     assert!(compare(&golden, &actual, &[]).unwrap().is_match());
+}
+
+#[test]
+fn shared_rules_disclose_one_sample_per_character() {
+    for declaration in [
+        "[[rules.clocks]]\nname = 'movement_clock'\nreason = 'Each Character has its own movement clock.'\nopcode = 221\npath = ['sample']\ntolerance_ms = 0\n",
+        "[[rules.identities]]\nname = 'movement_identity'\nreason = 'Each Character has its own movement identity.'\nopcode = 221\npath = ['sample']\n",
+    ] {
+        let source = GUIDS.replacen("[[characters]]", &format!("{declaration}[[characters]]"), 1);
+        let mut expected = trace(&source, true, 10, 20, 10);
+        expected.packets[0]
+            .fields
+            .insert("sample".into(), RecordedField::Unsigned(100));
+        expected.packets[1]
+            .fields
+            .insert("sample".into(), RecordedField::Unsigned(500));
+        let error = GoldenTrace::new(&source, expected).unwrap_err();
+        assert!(error.to_string().contains("one sample"), "{error}");
+    }
+}
+
+#[test]
+fn create_fields_remain_compared_in_the_visibility_scenario() {
+    let golden = wire_client::catalogue::get("two_character_visibility").unwrap();
+    for removed in ["movement", "object_type", "values"] {
+        let mut candidate = golden.trace().clone();
+        candidate.header.origin = wire_client::trace::Origin::Candidate {
+            adapter: "test".into(),
+        };
+        let packet = candidate
+            .packets
+            .iter_mut()
+            .find(|packet| {
+                packet.checkpoint == "arrival"
+                    && packet.character.as_deref() == Some("watcher")
+                    && packet.opcode == 169
+                    && packet.fields.contains_key("objects")
+            })
+            .unwrap();
+        let RecordedField::List(objects) = packet.fields.get_mut("objects").unwrap() else {
+            panic!()
+        };
+        let RecordedField::Object(fields) = objects
+            .iter_mut()
+            .find(|object| {
+                matches!(object, RecordedField::Object(fields)
+                    if fields.get("guid") == Some(&RecordedField::Guid(golden.trace().header.characters["arriving"])))
+            })
+            .unwrap()
+        else {
+            panic!()
+        };
+        fields.remove(removed);
+        let report = compare(&golden, &candidate, &[]).unwrap();
+        assert!(!report.is_match(), "CREATE {removed} was ignored");
+    }
+}
+
+#[test]
+fn a_declared_create_cannot_be_relabelled_as_opening() {
+    let golden = wire_client::catalogue::get("two_character_visibility").unwrap();
+    let mut candidate = golden.trace().clone();
+    candidate.header.origin = wire_client::trace::Origin::Candidate {
+        adapter: "test".into(),
+    };
+    let create = candidate
+        .packets
+        .iter()
+        .find(|packet| {
+            packet.checkpoint == "arrival"
+                && packet.character.as_deref() == Some("arriving")
+                && packet.opcode == 169
+                && packet.stream == Stream::Broadcast("objects".into())
+        })
+        .unwrap()
+        .clone();
+    let mut extra = create;
+    extra.stream = Stream::Opening;
+    candidate.packets.push(extra);
+    let report = compare(&golden, &candidate, &[]).unwrap();
+    assert!(report.differences.iter().any(|difference| {
+        difference.rule == "unexpected_opening"
+            && difference.character.as_deref() == Some("arriving")
+    }));
 }

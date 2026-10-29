@@ -9,18 +9,38 @@ window_ms = 1000
 time_tolerance_ms = 100
 wall_clock_tolerance_ms = 2000
 
+[[rules.identities]]
+name = "create_guid_word"
+reason = "The CREATE values field_0 repeats the server-assigned Character GUID word. Identity consistency is unchecked: single sample."
+opcode = 169
+path = ["objects", "0", "values", "field_0"]
+
+[[rules.clocks]]
+name = "create_movement_clock"
+reason = "The CREATE movement timestamp uses the Reference Server's monotonic clock. Clock consistency is unchecked: single sample."
+opcode = 169
+path = ["objects", "0", "movement", "timestamp"]
+tolerance_ms = 100
+
+[[rules.data_fields]]
+name = "arrival_max_health"
+reason = "The Reference Server may update a fresh Character's max health during fixture setup; this scenario checks peer visibility."
+opcode = 169
+path = ["objects", "0", "values", "field_26"]
+
 [rules.character_scope]
 name = "scenario_characters"
-reason = "This scenario checks visibility of both Characters. Their equipment and stats are outside its scope."
+reason = "Each Character must see the other Character's CREATE fields. Own login and nearby entities are outside this check."
 all_characters = true
 creates_only = true
 packets = []
 
 [[rules.unexpected_packets]]
 name = "ambient_creature_movement"
-reason = "Nearby creature movement varies between recordings. Retain its opcode only."
+reason = "Nearby creature movement varies between recordings."
 checkpoint = "arrival"
 opcode = 221
+subject_guid_high = 61744
 
 [[rules.unexpected_packets]]
 name = "ambient_transport_notice"

@@ -987,7 +987,7 @@ fn scoped_trace(scenario: &Scenario, trace: &Trace) -> Result<Trace> {
                     let mut object = object.clone();
                     if let Field::Object(fields) = &mut object {
                         if let Some(Field::Guid(guid)) = fields.get("guid") {
-                            if !in_scope(*guid) {
+                            if !in_scope(*guid) || (scope.creates_only && *guid == character_guid) {
                                 continue;
                             }
                         } else if let Some(Field::List(guids)) = fields.get_mut("guids") {
@@ -1002,7 +1002,6 @@ fn scoped_trace(scenario: &Scenario, trace: &Trace) -> Result<Trace> {
                             if !matches!(fields.get("kind"), Some(Field::Unsigned(2 | 3))) {
                                 continue;
                             }
-                            fields.retain(|name, _| name == "guid" || name == "kind");
                             result.packets.push(object_packet(packet, object));
                             continue;
                         }
@@ -1134,37 +1133,46 @@ pub(crate) fn validate_rule_samples(scenario: &Scenario, trace: &Trace) -> Resul
             )
         }))
     {
-        let samples = trace
-            .packets
-            .iter()
-            .filter(|packet| {
-                packet.opcode == opcode
-                    && character
-                        .as_ref()
-                        .map_or(true, |id| packet.character.as_ref() == Some(id))
-                    && scenario.steps.iter().any(|step| {
-                        step.id == packet.checkpoint
-                            && step
-                                .checkpoint
-                                .for_character(packet.character.as_deref().unwrap_or(""))
-                                .map_or_else(
-                                    || step.checkpoint.stream(&step.id, opcode),
-                                    |capture| capture.stream(&step.id, opcode),
+        let recipients: Vec<_> = if scenario.schema_version == 4 {
+            scenario.characters.iter().map(|c| Some(&c.id)).collect()
+        } else {
+            vec![None]
+        };
+        for recipient in recipients {
+            if character.as_ref().is_some_and(|id| Some(id) != recipient) {
+                continue;
+            }
+            let samples = trace
+                .packets
+                .iter()
+                .filter(|packet| {
+                    packet.opcode == opcode
+                        && recipient.map_or(true, |id| packet.character.as_ref() == Some(id))
+                        && scenario.steps.iter().any(|step| {
+                            step.id == packet.checkpoint
+                                && step
+                                    .checkpoint
+                                    .for_character(packet.character.as_deref().unwrap_or(""))
+                                    .map_or_else(
+                                        || step.checkpoint.stream(&step.id, opcode),
+                                        |capture| capture.stream(&step.id, opcode),
+                                    )
+                                    == packet.stream
+                                && !matches!(
+                                    packet.stream,
+                                    Stream::Opening | Stream::Unexpected | Stream::Malformed
                                 )
-                                == packet.stream
-                            && !matches!(
-                                packet.stream,
-                                Stream::Opening | Stream::Unexpected | Stream::Malformed
-                            )
-                    })
-                    && field_at(&packet.fields, path).is_some()
-            })
-            .take(2)
-            .count();
-        ensure!(
-            samples != 1 || reason.to_ascii_lowercase().contains(unchecked),
-            "rule {name} has one sample; its reason must state '{unchecked}'"
-        );
+                        })
+                        && field_at(&packet.fields, path).is_some()
+                })
+                .take(2)
+                .count();
+            ensure!(
+                samples != 1 || reason.to_ascii_lowercase().contains(unchecked),
+                "rule {name} has one sample for Character {}; its reason must state '{unchecked}'",
+                recipient.map_or("single", String::as_str)
+            );
+        }
     }
     Ok(())
 }
@@ -1191,6 +1199,12 @@ impl Comparator<'_> {
                                 step.action.as_ref(),
                                 Some(SessionAction::Connect | SessionAction::Reconnect)
                             )
+                            && step
+                                .checkpoint
+                                .for_character(packet.character.as_deref().unwrap_or(""))
+                                .is_some_and(|capture| {
+                                    capture.stream(&step.id, packet.opcode) == Stream::Unexpected
+                                })
                     });
                     if !allowed {
                         self.difference(
@@ -1203,7 +1217,7 @@ impl Comparator<'_> {
                                 opcode: Some(packet.opcode),
                             },
                             "unexpected_opening",
-                            "only a Character connection can have opening packets during a step",
+                            "only undeclared packets during a Character connection can be opening packets",
                             None,
                             Some(&Field::Unsigned(packet.opcode.into())),
                         );

@@ -209,6 +209,10 @@ pub trait MultiTransport {
     fn disconnect(&mut self, character: &str) -> Result<()>;
     fn send(&mut self, character: &str, opcode: u32, body: &[u8]) -> Result<()>;
     fn receive(&mut self, character: &str, timeout: Duration) -> Result<Option<(u16, Vec<u8>)>>;
+    /// Returns a ready frame without advancing the shared clock to wait for one.
+    fn receive_ready(&mut self, character: &str) -> Result<Option<(u16, Vec<u8>)>> {
+        self.receive(character, Duration::ZERO)
+    }
 }
 
 pub fn run_multi_on(
@@ -398,32 +402,65 @@ fn collect_opening(
     deadline: Duration,
     observations: &mut Vec<Observation>,
 ) -> Result<()> {
-    while transport.now() < deadline {
-        let mut any = false;
+    loop {
+        let mut ready = false;
         for character in &scenario.characters {
             if !transport.connected(&character.id) {
                 continue;
             }
-            let remaining = deadline
-                .saturating_sub(transport.now())
-                .min(Duration::from_millis(20));
-            if remaining.is_zero() {
-                break;
-            }
-            if let Some((opcode, body)) = transport.receive(&character.id, remaining)? {
+            if let Some((opcode, body)) = transport.receive_ready(&character.id)? {
                 let mut observed = Observation::opening(opcode, &body);
                 observed.character = Some(character.id.clone());
                 observations.push(observed);
-                any = true;
+                ready = true;
             }
         }
         ensure!(
             observations.len() <= 4096 * scenario.characters.len(),
             "opening exceeded frame limit"
         );
-        if !any && transport.now() >= deadline {
+        if ready {
+            continue;
+        }
+        if transport.now() >= deadline {
             break;
         }
+        let connected = scenario
+            .characters
+            .iter()
+            .filter(|character| transport.connected(&character.id))
+            .count();
+        ensure!(
+            connected > 0,
+            "no connected Character can advance the clock"
+        );
+        let before = transport.now();
+        let mut remaining_characters = connected;
+        let mut received = false;
+        for character in &scenario.characters {
+            if !transport.connected(&character.id) {
+                continue;
+            }
+            let remaining = deadline.saturating_sub(transport.now());
+            if remaining.is_zero() {
+                break;
+            }
+            let timeout = (remaining / remaining_characters as u32)
+                .min(Duration::from_millis(20))
+                .max(Duration::from_micros(1));
+            remaining_characters -= 1;
+            if let Some((opcode, body)) = transport.receive(&character.id, timeout)? {
+                let mut observed = Observation::opening(opcode, &body);
+                observed.character = Some(character.id.clone());
+                observations.push(observed);
+                received = true;
+                break;
+            }
+        }
+        ensure!(
+            transport.now() > before || received,
+            "transport clock did not advance"
+        );
     }
     Ok(())
 }
@@ -437,74 +474,132 @@ fn collect_multi(
     observations: &mut Vec<Observation>,
 ) -> Result<()> {
     let mut frames = 0;
-    while transport.now() < deadline {
-        let before = transport.now();
+    loop {
+        let mut ready = false;
         for character in &scenario.characters {
             if !transport.connected(&character.id) {
                 continue;
             }
-            let remaining = deadline
-                .saturating_sub(transport.now())
-                .min(Duration::from_millis(20));
-            if remaining.is_zero() {
-                break;
-            }
-            if let Some((opcode, body)) = transport.receive(&character.id, remaining)? {
-                let mut observation = Observation::from_frame_for_rules(
+            if let Some(frame) = transport.receive_ready(&character.id)? {
+                record_multi_frame(
+                    scenario,
                     step,
-                    Some(&character.id),
-                    opcode,
-                    &body,
-                    &scenario.rules.unexpected_packets,
-                );
-                let received_at = transport.now();
-                ensure!(
-                    received_at >= before && received_at >= started,
-                    "transport clock moved backwards"
-                );
-                observation.received_after_ms = Some(
-                    received_at
-                        .checked_sub(started)
-                        .unwrap()
-                        .as_millis()
-                        .try_into()?,
-                );
-                if opcode == 0x00c7 {
-                    use crate::decode::Field;
-                    let fields = &observation.packet.fields;
-                    if let (
-                        Some(Field::Guid(guid)),
-                        Some(Field::Unsigned(counter)),
-                        Some(Field::Unsigned(timestamp)),
-                    ) = (
-                        fields.get("guid"),
-                        fields.get("counter"),
-                        fields.get("timestamp"),
-                    ) {
-                        if *guid == transport.character_guid(&character.id)? {
-                            let mut ack = guid.to_le_bytes().to_vec();
-                            ack.extend(u32::try_from(*counter)?.to_le_bytes());
-                            ack.extend(u32::try_from(*timestamp)?.to_le_bytes());
-                            transport.send(&character.id, 0x00c7, &ack)?;
-                        }
-                    }
-                }
-                observations.push(observation);
+                    transport,
+                    started,
+                    observations,
+                    character,
+                    frame,
+                )?;
                 frames += 1;
-                ensure!(
-                    frames <= 4096 * scenario.characters.len(),
-                    "checkpoint exceeded frame limit"
-                );
+                ready = true;
             }
         }
         ensure!(
-            transport.now() > before
-                || scenario
-                    .characters
-                    .iter()
-                    .any(|c| transport.connected(&c.id)),
+            frames <= 4096 * scenario.characters.len(),
+            "checkpoint exceeded frame limit"
+        );
+        if ready {
+            continue;
+        }
+        if transport.now() >= deadline {
+            break;
+        }
+        let connected = scenario
+            .characters
+            .iter()
+            .filter(|character| transport.connected(&character.id))
+            .count();
+        ensure!(
+            connected > 0,
             "no connected Character can advance the clock"
         );
+        let before = transport.now();
+        let mut remaining_characters = connected;
+        let mut received = false;
+        for character in &scenario.characters {
+            if !transport.connected(&character.id) {
+                continue;
+            }
+            let remaining = deadline.saturating_sub(transport.now());
+            if remaining.is_zero() {
+                break;
+            }
+            let timeout = (remaining / remaining_characters as u32)
+                .min(Duration::from_millis(20))
+                .max(Duration::from_micros(1));
+            remaining_characters -= 1;
+            if let Some(frame) = transport.receive(&character.id, timeout)? {
+                record_multi_frame(
+                    scenario,
+                    step,
+                    transport,
+                    started,
+                    observations,
+                    character,
+                    frame,
+                )?;
+                frames += 1;
+                received = true;
+                break;
+            }
+        }
+        ensure!(
+            frames <= 4096 * scenario.characters.len(),
+            "checkpoint exceeded frame limit"
+        );
+        ensure!(
+            transport.now() > before || received,
+            "transport clock did not advance"
+        );
     }
+    Ok(())
+}
+
+fn record_multi_frame(
+    scenario: &Scenario,
+    step: &crate::scenario::Step,
+    transport: &mut impl MultiTransport,
+    started: Duration,
+    observations: &mut Vec<Observation>,
+    character: &crate::scenario::ScenarioCharacter,
+    (opcode, body): (u16, Vec<u8>),
+) -> Result<()> {
+    let mut observation = Observation::from_frame_for_rules(
+        step,
+        Some(&character.id),
+        opcode,
+        &body,
+        &scenario.rules.unexpected_packets,
+    );
+    let received_at = transport.now();
+    ensure!(received_at >= started, "transport clock moved backwards");
+    observation.received_after_ms = Some(
+        received_at
+            .checked_sub(started)
+            .unwrap()
+            .as_millis()
+            .try_into()?,
+    );
+    if opcode == 0x00c7 {
+        use crate::decode::Field;
+        let fields = &observation.packet.fields;
+        if let (
+            Some(Field::Guid(guid)),
+            Some(Field::Unsigned(counter)),
+            Some(Field::Unsigned(timestamp)),
+        ) = (
+            fields.get("guid"),
+            fields.get("counter"),
+            fields.get("timestamp"),
+        ) {
+            if *guid == transport.character_guid(&character.id)? {
+                let mut ack = guid.to_le_bytes().to_vec();
+                ack.extend(u32::try_from(*counter)?.to_le_bytes());
+                ack.extend(u32::try_from(*timestamp)?.to_le_bytes());
+                transport.send(&character.id, 0x00c7, &ack)?;
+            }
+        }
+    }
+    observations.push(observation);
     Ok(())
 }
