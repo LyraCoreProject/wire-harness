@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::collections::VecDeque;
 use std::time::Duration;
 
@@ -309,4 +310,50 @@ fn landing_acknowledges_only_the_passengers_full_guid_and_counter() {
     acknowledgement.extend(1234u32.to_le_bytes());
     assert_eq!(connection.sent[1], (199, acknowledgement));
     assert!(observed.iter().all(|o| o.received_after_ms.is_some()));
+}
+
+#[test]
+fn transport_clock_must_not_move_backwards_between_packets() {
+    struct RewindingConnection {
+        inner: Connection,
+        now_ms: Cell<u64>,
+        received: u8,
+    }
+
+    impl Transport for RewindingConnection {
+        fn now(&self) -> Duration {
+            Duration::from_millis(self.now_ms.get())
+        }
+        fn character_guid(&self) -> u64 {
+            self.inner.character_guid()
+        }
+        fn send(&mut self, opcode: u32, body: &[u8]) -> Result<()> {
+            self.inner.send(opcode, body)
+        }
+        fn receive(&mut self, timeout: Duration) -> Result<Option<(u16, Vec<u8>)>> {
+            let packet = self.inner.receive(timeout)?;
+            if packet.is_some() {
+                self.received += 1;
+                self.now_ms.set(if self.received == 1 { 20 } else { 10 });
+            }
+            Ok(packet)
+        }
+    }
+
+    let scenario = Scenario::parse(SCENARIO).unwrap();
+    let mut inner = connection();
+    inner.replies = [
+        None,
+        Some((0x01dd, vec![7, 0, 0, 0])),
+        Some((0x01dd, vec![7, 0, 0, 0])),
+        None,
+    ]
+    .into();
+    let mut connection = RewindingConnection {
+        inner,
+        now_ms: Cell::new(0),
+        received: 0,
+    };
+    let error = run_on(&scenario, &mut connection).unwrap_err();
+    assert_eq!(error.to_string(), "transport clock moved backwards");
 }

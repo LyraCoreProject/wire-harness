@@ -126,6 +126,7 @@ pub fn run_on(scenario: &Scenario, transport: &mut impl Transport) -> Result<Vec
         let sent_at = transport.now();
         transport.send(opcode, &body)?;
         let deadline = transport.now() + Duration::from_millis(step.checkpoint.window_ms);
+        let mut previous_sample = sent_at;
         let mut frames = 0;
         while let Some(remaining) = deadline.checked_sub(transport.now()) {
             if remaining.is_zero() {
@@ -137,9 +138,14 @@ pub fn run_on(scenario: &Scenario, transport: &mut impl Transport) -> Result<Vec
             frames += 1;
             ensure!(frames <= 4096, "checkpoint exceeded 4096 received frames");
             let mut observation = Observation::from_frame(step, opcode, &body);
+            let received_at = transport.now();
+            ensure!(
+                received_at >= previous_sample,
+                "transport clock moved backwards"
+            );
+            previous_sample = received_at;
             observation.received_after_ms = Some(
-                transport
-                    .now()
+                received_at
                     .checked_sub(sent_at)
                     .context("transport clock moved backwards")?
                     .as_millis()
