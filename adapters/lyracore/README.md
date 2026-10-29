@@ -30,6 +30,10 @@ restarts or provisions a Realm. Use a local Realm you own.
 
 ## Data scenarios
 
+Schema 4 scenarios use one pre-existing Account per named Character. Set `WIRE_PEER_ACCOUNTS` to
+the additional Account names in Character order and pass their passwords on later stdin lines.
+The adapter prepares each Character's Fixture Verbs and reconnects that Account when a step asks.
+
 The fixture adapter calls these existing debug reducers as the Operator: `debug_set_level(character_guid, level)`,
 `debug_teleport(character_guid, map_id, x, y, z, orientation)`,
 `debug_set_money(character_guid: u64, copper: u32)` and

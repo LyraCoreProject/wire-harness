@@ -156,6 +156,8 @@ pub enum Origin {
 pub struct Header {
     pub schema_version: u32,
     pub character_guid: u64,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub characters: BTreeMap<String, u64>,
     pub scenario: String,
     pub behavior: String,
     pub scenario_sha256: Sha256Digest,
@@ -193,8 +195,9 @@ impl Header {
     fn new(scenario_text: &str, origin: Origin, recorded_at_unix_ms: u64) -> Result<Self> {
         let scenario = Scenario::parse(scenario_text)?;
         Ok(Self {
-            schema_version: 3,
+            schema_version: scenario.schema_version,
             character_guid: 0,
+            characters: BTreeMap::new(),
             scenario: scenario.id,
             behavior: scenario.behavior,
             scenario_sha256: Sha256Digest::of(scenario_text.as_bytes()),
@@ -207,6 +210,8 @@ impl Header {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecordedPacket {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub character: Option<String>,
     pub received_after_ms: Option<u64>,
     pub checkpoint: String,
     pub stream: Stream,
@@ -229,6 +234,7 @@ impl Trace {
             packets: observations
                 .iter()
                 .map(|o| RecordedPacket {
+                    character: o.character.clone(),
                     received_after_ms: o.received_after_ms,
                     checkpoint: o.checkpoint.clone(),
                     stream: o.stream.clone(),
@@ -249,7 +255,37 @@ impl Trace {
     }
 
     pub fn validate(&self) -> Result<()> {
-        ensure!(self.header.schema_version == 3, "unsupported trace schema");
+        ensure!(
+            matches!(self.header.schema_version, 3 | 4),
+            "unsupported trace schema"
+        );
+        if self.header.schema_version == 3 {
+            ensure!(
+                self.header.characters.is_empty(),
+                "schema 3 trace has named Characters"
+            );
+        } else {
+            ensure!(
+                self.header.character_guid == 0 && (2..=16).contains(&self.header.characters.len()),
+                "schema 4 needs named Character GUIDs"
+            );
+            ensure!(
+                self.header
+                    .characters
+                    .iter()
+                    .all(|(id, guid)| identifier(id) && *guid != 0),
+                "invalid named Character GUID"
+            );
+            ensure!(
+                self.header
+                    .characters
+                    .values()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len()
+                    == self.header.characters.len(),
+                "named Characters must have distinct GUIDs"
+            );
+        }
         ensure!(
             identifier(&self.header.scenario) && identifier(&self.header.behavior),
             "invalid trace identity"
@@ -265,20 +301,34 @@ impl Trace {
         ensure!(self.packets.len() <= 65_536, "trace exceeds 65536 packets");
         let mut started = false;
         for packet in &self.packets {
+            if self.header.schema_version == 4 {
+                ensure!(
+                    packet
+                        .character
+                        .as_ref()
+                        .is_some_and(|id| self.header.characters.contains_key(id)),
+                    "packet names an unknown Character"
+                );
+            } else {
+                ensure!(
+                    packet.character.is_none(),
+                    "schema 3 packet names a Character"
+                );
+            }
             ensure!(
                 identifier(&packet.checkpoint),
                 "invalid checkpoint identifier"
             );
-            if packet.stream == Stream::Opening {
+            if packet.checkpoint == "opening" {
                 ensure!(
-                    !started && packet.checkpoint == "opening",
+                    !started && packet.stream == Stream::Opening,
                     "opening packets must precede every step"
                 );
             } else {
                 started = true;
                 ensure!(
-                    packet.checkpoint != "opening",
-                    "opening checkpoint requires the opening stream"
+                    packet.stream != Stream::Opening || self.header.schema_version == 4,
+                    "opening packets must precede every step"
                 );
             }
             match &packet.stream {
@@ -334,9 +384,40 @@ impl GoldenTrace {
         ensure!(
             trace.header.scenario_sha256 == Sha256Digest::of(scenario_text.as_bytes())
                 && trace.header.scenario == scenario.id
-                && trace.header.behavior == scenario.behavior,
+                && trace.header.behavior == scenario.behavior
+                && trace.header.schema_version == scenario.schema_version,
             "Golden Trace does not match this scenario revision"
         );
+        if scenario.schema_version == 4 {
+            ensure!(
+                scenario
+                    .characters
+                    .iter()
+                    .map(|character| &character.id)
+                    .collect::<std::collections::BTreeSet<_>>()
+                    == trace.header.characters.keys().collect(),
+                "Golden Trace Character set differs from scenario"
+            );
+            for packet in &trace.packets {
+                if packet.stream == Stream::Opening && packet.checkpoint != "opening" {
+                    ensure!(
+                        scenario
+                            .steps
+                            .iter()
+                            .any(|step| step.id == packet.checkpoint
+                                && step.character == packet.character
+                                && matches!(
+                                    step.action.as_ref(),
+                                    Some(
+                                        crate::scenario::SessionAction::Connect
+                                            | crate::scenario::SessionAction::Reconnect
+                                    )
+                                )),
+                        "opening packet must belong to a Character connection step"
+                    );
+                }
+            }
+        }
         crate::compare::validate_rule_samples(&scenario, &trace)?;
         Ok(Self { scenario, trace })
     }

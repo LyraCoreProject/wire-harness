@@ -843,6 +843,18 @@ impl WireClient {
         Ok((frame.opcode, frame.body))
     }
 
+    /// Polls one frame without waiting; an incomplete frame resumes on the next receive.
+    pub fn recv_raw_ready(&mut self) -> Result<Option<(u16, Vec<u8>)>> {
+        self.stream.set_nonblocking(true)?;
+        let result = self.recv_raw();
+        self.stream.set_nonblocking(false)?;
+        match result {
+            Ok(frame) => Ok(Some(frame)),
+            Err(error) if is_read_timeout(&error) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     /// Skips unsupported generated decodes after observing partial VALUES; socket failures propagate.
     pub fn recv(&mut self) -> Result<WorldSmsg> {
         let mut skipped = 0u32;

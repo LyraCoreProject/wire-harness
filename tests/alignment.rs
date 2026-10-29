@@ -27,6 +27,7 @@ fn measure(distinct_subjects: bool) {
     .unwrap();
     let make = |offset| {
         let mut packets = vec![RecordedPacket {
+            character: None,
             received_after_ms: Some(0),
             checkpoint: "query".into(),
             stream: Stream::Reply("query".into()),
@@ -50,6 +51,7 @@ fn measure(distinct_subjects: bool) {
                 Field::Guid(offset + if distinct_subjects { index + 1 } else { 1 }),
             );
             RecordedPacket {
+                character: None,
                 received_after_ms: Some(index),
                 checkpoint: "query".into(),
                 stream: Stream::Broadcast("updates".into()),

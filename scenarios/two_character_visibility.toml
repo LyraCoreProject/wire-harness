@@ -1,0 +1,77 @@
+schema_version = 4
+id = "two_character_visibility"
+behavior = "character_visibility"
+
+[opening]
+window_ms = 1000
+
+[rules]
+time_tolerance_ms = 100
+wall_clock_tolerance_ms = 2000
+
+[[rules.identities]]
+name = "create_guid_word"
+reason = "The CREATE values field_0 repeats the server-assigned Character GUID word. Identity consistency is unchecked: single sample."
+opcode = 169
+path = ["objects", "0", "values", "field_0"]
+
+[[rules.clocks]]
+name = "create_movement_clock"
+reason = "The CREATE movement timestamp uses the Reference Server's monotonic clock. Clock consistency is unchecked: single sample."
+opcode = 169
+path = ["objects", "0", "movement", "timestamp"]
+tolerance_ms = 100
+
+[[rules.data_fields]]
+name = "arrival_max_health"
+reason = "The Reference Server may update a fresh Character's max health during fixture setup; this scenario checks peer visibility."
+opcode = 169
+path = ["objects", "0", "values", "field_26"]
+
+[rules.character_scope]
+name = "scenario_characters"
+reason = "Each Character must see the other Character's CREATE fields. Own login and nearby entities are outside this check."
+all_characters = true
+creates_only = true
+packets = []
+
+[[rules.unexpected_packets]]
+name = "ambient_creature_movement"
+reason = "Nearby creature movement varies between recordings."
+checkpoint = "arrival"
+opcode = 221
+subject_guid_high = 61744
+
+[[rules.unexpected_packets]]
+name = "ambient_transport_notice"
+reason = "A nearby transport notice can arrive while another Character connects."
+checkpoint = "arrival"
+character = "watcher"
+opcode = 306
+
+[[characters]]
+id = "watcher"
+fixtures = [{ verb = "character", name = "Watchera", race = "human", class = "warrior", level = 1, at = { map = 0, x = -8840.56, y = 489.7, z = 109.61, orientation = 0.0 } }]
+
+[[characters]]
+id = "arriving"
+initially_connected = false
+fixtures = [{ verb = "character", name = "Arrivera", race = "human", class = "warrior", level = 1, at = { map = 0, x = -8842.0, y = 489.7, z = 109.61, orientation = 0.0 } }]
+
+[[steps]]
+id = "arrival"
+character = "arriving"
+action = { kind = "connect" }
+
+[steps.checkpoint]
+window_ms = 3000
+
+[[steps.checkpoint.characters]]
+character = "watcher"
+creates = ["arriving"]
+broadcasts = [{ opcode = 169, stream = "objects" }]
+
+[[steps.checkpoint.characters]]
+character = "arriving"
+creates = ["watcher"]
+broadcasts = [{ opcode = 169, stream = "objects" }]

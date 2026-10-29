@@ -261,6 +261,7 @@ def main():
     parser.add_argument('--lyracore-checkout', type=Path)
     parser.add_argument('--lyracore-cli', type=Path)
     parser.add_argument('--verify-account')
+    parser.add_argument('--ensure-peers', type=int)
     parser.add_argument('--taxi-node', type=int)
     args = parser.parse_args()
     if args.taxi_node is not None:
@@ -279,6 +280,13 @@ def main():
         verify_configuration()
         verify_account(args.verify_account)
         print(f'Reference Server GM settings checked; {args.verify_account} has gmlevel 0.')
+        return
+    if args.ensure_peers is not None:
+        if not 1 <= args.ensure_peers <= 15:
+            parser.error('peer count must be 1 through 15')
+        verify_configuration()
+        for peer in range(2, args.ensure_peers + 2):
+            account(f'CONFORMANCE{peer}', 0, f'peer{peer}')
         return
     if not args.lyracore_checkout or not args.lyracore_cli:
         parser.error('setup requires --lyracore-checkout and --lyracore-cli')

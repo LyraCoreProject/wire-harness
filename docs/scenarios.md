@@ -12,6 +12,66 @@ requires that name to be absent and checks race, class, level and position after
 disposable fixture before rerunning. Accounts are provisioned separately. Credentials never
 belong in a scenario.
 
+## Named Characters
+
+`schema_version = 4` declares 2 through 16 `[[characters]]`. Each has a lowercase `id` and a
+`fixtures` array. Its first Fixture Verb is `character`; later verbs apply only to that Character.
+The `race` in each Character fixture selects its faction. The adapters prepare every Character on
+a separate Account. Set `WIRE_PEER_ACCOUNTS` to the additional Account names in Character order,
+separated by commas. Send their passwords on stdin after the first Account password. The vmangos
+adapter reads the GM password after those peer passwords. Accounts and passwords stay outside TOML.
+
+Each step names its acting `character` and has exactly one `send` packet or `action`. A packet may
+target the actor with `target = "character"`, another Character with
+`target = { named_character = "watcher" }`, or one of the actor's creature fixtures. Session actions
+are `connect`, `disconnect` and `reconnect`. `initially_connected = false` on a Character delays its
+World Session until a `connect` step. Every checkpoint lists each Character once under
+`[[steps.checkpoint.characters]]`. Each entry has its own ordered `replies`, named `broadcasts`,
+field `expect` assertions and optional `creates` assertions. A `creates` name requires a CREATE
+object update for that Character in that recipient's stream.
+
+`walk` moves the actor from its current scenario position to `to` at `speed` yards per second,
+at most 7. It sends start, heartbeat every 200 ms, and stop packets. The runner receives from all
+connected Characters between sends. Its checkpoint window must exceed the walk duration.
+The same runner accepts a virtual-clock `MultiTransport`; `receive` advances that shared clock
+when it has no packet. A core tier 1 Transport can use one fixture connection per Character and
+route each delivery instruction to the recipient's stream.
+
+```toml
+[[steps]]
+id = "arrival"
+character = "arriving"
+action = { kind = "connect" }
+
+[steps.checkpoint]
+window_ms = 3000
+
+[[steps.checkpoint.characters]]
+character = "watcher"
+creates = ["arriving"]
+broadcasts = [{ opcode = 169, stream = "objects" }]
+
+[[steps.checkpoint.characters]]
+character = "arriving"
+creates = ["watcher"]
+broadcasts = [{ opcode = 169, stream = "objects" }]
+```
+
+Schema 4 traces carry `header.characters`, a map from Character id to GUID, and a `character` on
+each packet. The comparator keeps a separate stream for each recipient and one GUID bijection for
+the whole trace. A Character GUID first seen by one recipient must keep that mapping when another
+recipient sees it. Unlisted opcodes remain errors. During `connect` and `reconnect`, undeclared
+packets from the connecting Character are recorded as opening packets and excluded from comparison;
+declared opcodes in that checkpoint still compare. `rules.character_scope` may set
+`all_characters = true` to retain object updates for every named Character. The
+`creates_only = true` option keeps full CREATE updates for peer Characters and excludes own login
+and other object updates from comparison. Use it when a scenario checks peer visibility. The raw
+scrubbed packets remain in the trace. Schema 3 files and traces keep their existing bytes and hashes.
+
+Random, identity, clock, data-field, packet-timing and unexpected-packet rules may name one
+`character`. With no selector, a rule applies to every Character. Identity and clock origins
+remain separate per recipient; GUID mapping remains shared across all recipients.
+
 ## Fixture Verbs
 
 | Verb | Fields | Meaning |
@@ -42,7 +102,7 @@ The known-node reducer is the agreed T2d interface; its live verification is pen
 See [the adapter](../adapters/lyracore/README.md).
 
 The vmangos adapter checks that the gameplay Account's global and realm security levels are zero.
-A separate GM World Session uses `WIRE_GM_ACCOUNT`, `WIRE_GM_CHARACTER` and stdin password line 2.
+A separate GM World Session uses `WIRE_GM_ACCOUNT`, `WIRE_GM_CHARACTER` and the last stdin password line.
 It uses `.levelup`, `.go xyzo`, `.namego` and `.modify money`. To discover a node, it uses
 `.go taxinode`, summons the Character, spawns a temporary flight master and queries its menu until
 the node's bit is present. It then deletes that creature. Requested creatures use `.npc spawn add`
@@ -77,7 +137,7 @@ differences unless a named scenario rule excuses them. Undecodable declared pack
 `packet_decode` differences. Compressed object updates decode to the same opcode and fields as
 uncompressed updates. Missing, extra and reordered replies are reported after capture. Transport
 failures and resource limits fail the run. The runner records each packet's elapsed milliseconds
-since its step was sent and acknowledges valid teleport corrections for the Character.
+since its step began and acknowledges valid teleport corrections for the Character.
 
 An `[[rules.unexpected_packets]]` entry names a checkpoint and opcode. Set
 `subject_guid_high = 61744` to excuse only packets whose decoded subject GUID has `0xF130` in

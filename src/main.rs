@@ -21,6 +21,9 @@ fn main() -> Result<()> {
     }
     if let Command::ScenarioFile(path) = &inv.command {
         let scenario = wire_client::scenario::Scenario::parse(&std::fs::read_to_string(path)?)?;
+        if scenario.schema_version == 4 {
+            return adapters::run_multi_file(&inv, &scenario);
+        }
         let mut adapter = adapters::select(&inv)?;
         let run = wire_client::runner::run(&scenario, adapter.as_mut())?;
         let report = wire_client::compare::check_character_observations(

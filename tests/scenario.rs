@@ -144,11 +144,21 @@ fn bank_purchase_encodes_the_banker_and_requires_a_values_update() {
     let scenario = Scenario::parse(text).unwrap();
     let fixtures = std::collections::BTreeMap::from([("banker".to_owned(), 17)]);
     assert_eq!(
-        scenario.steps[0].send.encode(7, &fixtures).unwrap(),
+        scenario.steps[0]
+            .send
+            .as_ref()
+            .unwrap()
+            .encode(7, &fixtures)
+            .unwrap(),
         (0x01b7, 17u64.to_le_bytes().to_vec())
     );
     assert_eq!(
-        scenario.steps[1].send.encode(7, &fixtures).unwrap(),
+        scenario.steps[1]
+            .send
+            .as_ref()
+            .unwrap()
+            .encode(7, &fixtures)
+            .unwrap(),
         (0x01b9, 17u64.to_le_bytes().to_vec())
     );
     assert!(Scenario::parse(&text.replace(

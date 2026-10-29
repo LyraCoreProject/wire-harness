@@ -19,12 +19,14 @@ The Reference Server adapter uses a gmlevel 0 Account for gameplay and a separat
 for setup. Its wrapper supplies both passwords through stdin. See the
 [Reference Server instructions](../adapters/vmangos/README.md).
 
-Schema 3 labels a trace's `origin.kind` as `golden` or `candidate`. A Golden Trace carries the
+Schema 3 and 4 label a trace's `origin.kind` as `golden` or `candidate`. A Golden Trace carries the
 Reference Server's binary release, archive SHA-256, full source SHA and full database commit in
 `origin.provenance`. A candidate carries its adapter name and requires no vmangos provenance.
 The header also has the scenario id, Behavior, SHA-256 of the exact scenario file, schema version,
-`character_guid` and `recorded_at_unix_ms`. The recorder stamps this time after fixture setup,
-immediately before running the scenario. A moving release label alone does not identify a recording.
+`character_guid` and `recorded_at_unix_ms`. Schema 4 uses `header.characters` instead of one
+`character_guid`, and each packet names its receiving Character. The recorder stamps this time
+after fixture setup, immediately before running the scenario. A moving release label alone does
+not identify a recording.
 Older schemas must be recorded again; do not convert their headers by hand.
 
 `decode::Field` holds text in memory and cannot serialize. `Trace::record` recursively replaces
@@ -38,8 +40,10 @@ no extra feature to avoid differences caused by rounding.
 
 The opening records every frame from the final fixture login until the first step. Opening packets
 are scrubbed but are excluded from comparison and GUID mappings. They must form a prefix of the
-trace. They cannot excuse a packet received after a step. Every packet has `received_after_ms`,
-which is null during the opening and otherwise measures time since the current request was sent.
+schema 3 trace. In schema 4, a `connect` or `reconnect` step also records undeclared handshake
+packets as opening packets for that Character. Declared checkpoint opcodes still compare. Every
+packet has `received_after_ms`. It is null in the initial opening and otherwise measures time
+since the step began.
 
 Every received opcode in a checkpoint window becomes an observation. Declared replies and
 broadcasts go through the independent decoder. Undeclared packets use the `unexpected` stream,
@@ -74,11 +78,14 @@ candidate origin or a scenario whose id, Behavior or exact bytes differ from the
 Its scenario and trace are immutable through the comparison interface.
 
 In-process callers use `compare_observations(&golden, &observations, recorded_at_unix_ms, &deviations)`.
-For Character-scoped rules use
+For schema 3 Character-scoped rules use
 `compare_character_observations(&golden, &observations, character_guid, recorded_at_unix_ms, &deviations)`.
-A nonzero GUID is required for both traces in that case. Callers can build observations with `Observation::from_frame_with_rules`, passing the scenario's
-unexpected-packet rules, to use the same independent decoder and opcode classification as the wire
-runner. This path needs no candidate server provenance.
+A nonzero GUID is required for both traces in that case. Callers can build observations with
+`Observation::from_frame_with_rules`, passing the scenario's unexpected-packet rules, to use the
+same independent decoder and opcode classification as the wire runner. Schema 4 callers use
+`compare_multi_observations` with a map from each Character id to its GUID. They drive the shared
+clock through `runner::run_multi_on` and `MultiTransport`, then build observations with
+`Observation::from_frame_for_rules`. These paths need no candidate server provenance.
 
 ## Comparison
 
@@ -131,15 +138,17 @@ same record order, including ambiguous LCS ties.
 The scenario TOML owns all Equivalence Rule parameters, so its SHA-256 covers them. Callers cannot
 supply a replacement tolerance or random range to `compare`. General rule kinds stay in the library:
 
-- Nonzero reference GUIDs map bijectively to candidate GUIDs across the whole trace. Zero maps only
+- Nonzero reference GUIDs map bijectively to candidate GUIDs across the whole trace, including all
+  schema 4 Character streams. Zero maps only
   to zero. A nonzero Character GUID in each header establishes the first pair; aligned fields
   establish further mappings. Opening packets cannot establish mappings.
 - `time_ms` fields use the scenario's inclusive `time_tolerance_ms` for comparable elapsed times.
 - `wall_clock_ms` fields, including `SMSG_QUERY_TIME_RESPONSE`, must be within the scenario's
   `wall_clock_tolerance_ms` of their own trace's `recorded_at_unix_ms`. Recordings on different days
   can match. The tolerance must cover timestamp rounding and the scenario's capture duration.
-- Replies keep order and multiplicity within a checkpoint. Each broadcast stream keeps its own
-  order; unrelated streams can interleave. An LCS aligns packets by opcode and mapped subject GUID.
+- Replies keep order and multiplicity within each recipient stream and checkpoint. Each broadcast
+  stream keeps its own order for its recipient; there is no global arrival order across recipients.
+  Unrelated streams can interleave. An LCS aligns packets by opcode and mapped subject GUID.
   Subject fields are `guid`, `caster`, `attacker`, or the GUID of a scoped object update.
   Unmapped subjects can establish a bijection on their first aligned pair. Equal fields break ties
   between repeated keys, then a fixed index preference breaks remaining ties. Fields compare only
@@ -191,7 +200,8 @@ supply a replacement tolerance or random range to `compare`. General rule kinds 
   field multiplicity and any `packet_timing` bound still apply. A delayed fare therefore fails even
   when the final balance matches. Other updates naming the Character remain strict.
   Opening, malformed, unknown-checkpoint and mislabeled packets cannot bypass their normal checks.
-  Every original packet remains in the trace. This scopes a Behavior's outcome when nearby entities
+  CREATE updates for selected Characters retain all decoded fields for comparison. Every original
+  packet remains in the trace. This scopes a Behavior's outcome when nearby entities
   differ with world data.
 - Named `data_fields` rules classify changed values as data only at their declared opcode and field
   path. Each needs a reason. Presence, scalar types and object keys still compare; catalogue lists may differ in

@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::{ensure, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::scenario::{identifier, Observation, Scenario, Stream};
+use crate::scenario::{identifier, Observation, Scenario, SessionAction, Stream};
 use crate::trace::{GoldenTrace, Header, RecordedField as Field, RecordedPacket, Trace};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -46,6 +46,8 @@ impl RandomRange {
 pub struct RandomRule {
     pub name: String,
     pub reason: String,
+    #[serde(default)]
+    pub character: Option<String>,
     pub opcode: u16,
     pub path: Vec<String>,
     pub range: RandomRange,
@@ -57,6 +59,8 @@ pub struct UnexpectedPacketRule {
     pub name: String,
     pub reason: String,
     pub checkpoint: String,
+    #[serde(default)]
+    pub character: Option<String>,
     pub opcode: u16,
     #[serde(default)]
     pub subject_guid_high: Option<u16>,
@@ -67,6 +71,8 @@ pub struct UnexpectedPacketRule {
 pub struct FieldRule {
     pub name: String,
     pub reason: String,
+    #[serde(default)]
+    pub character: Option<String>,
     pub opcode: u16,
     pub path: Vec<String>,
 }
@@ -76,6 +82,8 @@ pub struct FieldRule {
 pub struct ClockRule {
     pub name: String,
     pub reason: String,
+    #[serde(default)]
+    pub character: Option<String>,
     pub opcode: u16,
     pub path: Vec<String>,
     pub tolerance_ms: u64,
@@ -86,6 +94,10 @@ pub struct ClockRule {
 pub struct CharacterScope {
     pub name: String,
     pub reason: String,
+    #[serde(default)]
+    pub all_characters: bool,
+    #[serde(default)]
+    pub creates_only: bool,
     pub packets: Vec<PacketSubjects>,
 }
 
@@ -105,6 +117,8 @@ pub struct PacketTimingRule {
     pub path: Vec<String>,
     pub name: String,
     pub reason: String,
+    #[serde(default)]
+    pub character: Option<String>,
     pub opcode: u16,
     pub tolerance_ms: u64,
 }
@@ -148,20 +162,24 @@ impl EquivalenceRules {
                 "invalid rule path"
             );
             ensure!(
-                paths.insert((rule.opcode, &rule.path)),
+                rule.character.as_deref().map_or(true, identifier),
+                "invalid rule Character"
+            );
+            ensure!(
+                paths.insert((rule.opcode, rule.path.clone(), rule.character.clone())),
                 "duplicate random field rule"
             );
             ensure!(rule.range.valid(), "invalid random range");
         }
-        for (name, reason, opcode, path) in self
+        for (name, reason, opcode, path, character) in self
             .identities
             .iter()
             .chain(&self.data_fields)
-            .map(|r| (&r.name, &r.reason, r.opcode, &r.path))
+            .map(|r| (&r.name, &r.reason, r.opcode, &r.path, &r.character))
             .chain(
                 self.clocks
                     .iter()
-                    .map(|r| (&r.name, &r.reason, r.opcode, &r.path)),
+                    .map(|r| (&r.name, &r.reason, r.opcode, &r.path, &r.character)),
             )
         {
             ensure!(
@@ -176,8 +194,22 @@ impl EquivalenceRules {
                 !path.is_empty() && path.iter().all(|p| identifier(p)),
                 "invalid field rule path"
             );
-            ensure!(paths.insert((opcode, path)), "overlapping field rules");
+            ensure!(
+                character.as_deref().map_or(true, identifier),
+                "invalid rule Character"
+            );
+            ensure!(
+                paths.insert((opcode, path.clone(), character.clone())),
+                "overlapping field rules"
+            );
         }
+        ensure!(
+            paths
+                .iter()
+                .all(|(opcode, path, character)| character.is_none()
+                    || !paths.contains(&(*opcode, path.clone(), None))),
+            "general and Character field rules overlap"
+        );
         let mut timed = BTreeSet::new();
         for rule in &self.packet_timing {
             ensure!(
@@ -193,6 +225,10 @@ impl EquivalenceRules {
                 "invalid timing field path"
             );
             ensure!(
+                rule.character.as_deref().map_or(true, identifier),
+                "invalid rule Character"
+            );
+            ensure!(
                 !rule.values_only
                     || (rule.opcode == 0x00a9
                         && rule.path.len() == 4
@@ -202,10 +238,17 @@ impl EquivalenceRules {
                 "values_only timing requires an object VALUES field path"
             );
             ensure!(
-                timed.insert((rule.opcode, &rule.path)),
+                timed.insert((rule.opcode, rule.path.clone(), rule.character.clone())),
                 "duplicate packet timing rule"
             );
         }
+        ensure!(
+            timed
+                .iter()
+                .all(|(opcode, path, character)| character.is_none()
+                    || !timed.contains(&(*opcode, path.clone(), None))),
+            "general and Character timing rules overlap"
+        );
         if let Some(rule) = &self.character_scope {
             ensure!(
                 identifier(&rule.name) && names.insert(&rule.name),
@@ -240,7 +283,11 @@ impl EquivalenceRules {
             );
             ensure!(identifier(&rule.checkpoint), "invalid rule checkpoint");
             ensure!(
-                packets.insert((&rule.checkpoint, rule.opcode)),
+                rule.character.as_deref().map_or(true, identifier),
+                "invalid rule Character"
+            );
+            ensure!(
+                packets.insert((&rule.checkpoint, &rule.character, rule.opcode)),
                 "duplicate unexpected packet rule"
             );
         }
@@ -251,6 +298,8 @@ impl EquivalenceRules {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Difference {
     pub classification: DifferenceClass,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub character: Option<String>,
     pub checkpoint: String,
     pub stream: Option<Stream>,
     pub packet_index: Option<usize>,
@@ -306,20 +355,21 @@ struct Comparator<'a> {
     expected_guids: BTreeMap<u64, u64>,
     actual_guids: BTreeMap<u64, u64>,
     used_random: BTreeSet<usize>,
-    identities: BTreeMap<(usize, u64), u64>,
-    reverse_identities: BTreeMap<(usize, u64), u64>,
+    identities: BTreeMap<(usize, Option<String>, u64), u64>,
+    reverse_identities: BTreeMap<(usize, Option<String>, u64), u64>,
     used_identities: BTreeSet<usize>,
-    clock_origins: BTreeMap<usize, (u32, u32)>,
+    clock_origins: BTreeMap<(usize, Option<String>), (u32, u32)>,
     used_clocks: BTreeSet<usize>,
     used_data_fields: BTreeSet<usize>,
     used_timing: BTreeSet<usize>,
-    unmatched_opcodes: BTreeSet<u16>,
-    unmatched_fields: BTreeSet<(u16, Vec<String>)>,
+    unmatched_opcodes: BTreeSet<(Option<String>, u16)>,
+    unmatched_fields: BTreeSet<(Option<String>, u16, Vec<String>)>,
     differences: Vec<Difference>,
 }
 
 #[derive(Clone)]
 struct Location {
+    character: Option<String>,
     checkpoint: String,
     stream: Option<Stream>,
     packet_index: Option<usize>,
@@ -494,6 +544,27 @@ fn subject(fields: &BTreeMap<String, Field>) -> Option<u64> {
 }
 
 impl Comparator<'_> {
+    fn unmatched_opcode(&self, character: &Option<String>, opcode: u16) -> bool {
+        self.unmatched_opcodes.iter().any(|(recipient, candidate)| {
+            *candidate == opcode
+                && character
+                    .as_ref()
+                    .map_or(true, |id| recipient.as_ref() == Some(id))
+        })
+    }
+
+    fn unmatched_field(&self, character: &Option<String>, opcode: u16, path: &[String]) -> bool {
+        self.unmatched_fields
+            .iter()
+            .any(|(recipient, candidate, candidate_path)| {
+                *candidate == opcode
+                    && candidate_path == path
+                    && character
+                        .as_ref()
+                        .map_or(true, |id| recipient.as_ref() == Some(id))
+            })
+    }
+
     fn guid_matches(&self, expected: u64, actual: u64) -> bool {
         if expected == 0 || actual == 0 {
             expected == actual
@@ -526,6 +597,7 @@ impl Comparator<'_> {
     ) {
         self.differences.push(Difference {
             classification: DifferenceClass::Rule,
+            character: location.character.clone(),
             checkpoint: location.checkpoint.clone(),
             stream: location.stream.clone(),
             packet_index: location.packet_index,
@@ -562,13 +634,14 @@ impl Comparator<'_> {
     }
 
     fn field(&mut self, opcode: u16, location: &Location, expected: &Field, actual: &Field) {
-        if let Some((index, rule)) = self
-            .rules
-            .data_fields
-            .iter()
-            .enumerate()
-            .find(|(_, rule)| rule.opcode == opcode && rule.path == location.path)
-        {
+        if let Some((index, rule)) = self.rules.data_fields.iter().enumerate().find(|(_, rule)| {
+            rule.opcode == opcode
+                && rule.path == location.path
+                && rule
+                    .character
+                    .as_ref()
+                    .map_or(true, |id| location.character.as_ref() == Some(id))
+        }) {
             self.used_data_fields.insert(index);
             let valid_shape = data_shape_matches(expected, actual);
             if !valid_shape || expected != actual {
@@ -585,13 +658,13 @@ impl Comparator<'_> {
             }
             return;
         }
-        if let Some((index, rule)) = self
-            .rules
-            .random
-            .iter()
-            .enumerate()
-            .find(|(_, r)| r.opcode == opcode && r.path == location.path)
-        {
+        if let Some((index, rule)) = self.rules.random.iter().enumerate().find(|(_, r)| {
+            r.opcode == opcode
+                && r.path == location.path
+                && r.character
+                    .as_ref()
+                    .map_or(true, |id| location.character.as_ref() == Some(id))
+        }) {
             self.used_random.insert(index);
             if !rule.range.contains(expected) || !rule.range.contains(actual) {
                 self.difference(
@@ -604,13 +677,14 @@ impl Comparator<'_> {
             }
             return;
         }
-        if let Some((index, rule)) = self
-            .rules
-            .identities
-            .iter()
-            .enumerate()
-            .find(|(_, rule)| rule.opcode == opcode && rule.path == location.path)
-        {
+        if let Some((index, rule)) = self.rules.identities.iter().enumerate().find(|(_, rule)| {
+            rule.opcode == opcode
+                && rule.path == location.path
+                && rule
+                    .character
+                    .as_ref()
+                    .map_or(true, |id| location.character.as_ref() == Some(id))
+        }) {
             self.used_identities.insert(index);
             let matches = match (expected, actual) {
                 (Field::Unsigned(e), Field::Unsigned(a))
@@ -618,19 +692,21 @@ impl Comparator<'_> {
                 {
                     !self
                         .identities
-                        .get(&(index, *e))
+                        .get(&(index, location.character.clone(), *e))
                         .is_some_and(|mapped| mapped != a)
                         && !self
                             .reverse_identities
-                            .get(&(index, *a))
+                            .get(&(index, location.character.clone(), *a))
                             .is_some_and(|mapped| mapped != e)
                 }
                 _ => false,
             };
             if matches {
                 if let (Field::Unsigned(e), Field::Unsigned(a)) = (expected, actual) {
-                    self.identities.insert((index, *e), *a);
-                    self.reverse_identities.insert((index, *a), *e);
+                    self.identities
+                        .insert((index, location.character.clone(), *e), *a);
+                    self.reverse_identities
+                        .insert((index, location.character.clone(), *a), *e);
                 }
             } else {
                 self.difference(
@@ -643,18 +719,22 @@ impl Comparator<'_> {
             }
             return;
         }
-        if let Some((index, rule)) = self
-            .rules
-            .clocks
-            .iter()
-            .enumerate()
-            .find(|(_, rule)| rule.opcode == opcode && rule.path == location.path)
-        {
+        if let Some((index, rule)) = self.rules.clocks.iter().enumerate().find(|(_, rule)| {
+            rule.opcode == opcode
+                && rule.path == location.path
+                && rule
+                    .character
+                    .as_ref()
+                    .map_or(true, |id| location.character.as_ref() == Some(id))
+        }) {
             self.used_clocks.insert(index);
             let matches = if let (Field::Unsigned(e), Field::Unsigned(a)) = (expected, actual) {
                 match (u32::try_from(*e), u32::try_from(*a)) {
                     (Ok(e), Ok(a)) => {
-                        let (eo, ao) = *self.clock_origins.entry(index).or_insert((e, a));
+                        let (eo, ao) = *self
+                            .clock_origins
+                            .entry((index, location.character.clone()))
+                            .or_insert((e, a));
                         u64::from(e.wrapping_sub(eo).abs_diff(a.wrapping_sub(ao)))
                             <= rule.tolerance_ms
                     }
@@ -842,17 +922,35 @@ fn scoped_trace(scenario: &Scenario, trace: &Trace) -> Result<Trace> {
         return Ok(trace.clone());
     };
     ensure!(
-        trace.header.character_guid != 0,
+        trace.header.character_guid != 0 || !trace.header.characters.is_empty(),
         "Character-scoped rules require the recorded Character GUID"
     );
     let mut result = trace.clone();
     result.packets.clear();
     for packet in &trace.packets {
+        let character_guid = packet
+            .character
+            .as_ref()
+            .and_then(|id| trace.header.characters.get(id))
+            .copied()
+            .unwrap_or(trace.header.character_guid);
+        let in_scope = |guid: u64| {
+            guid == character_guid
+                || (scope.all_characters
+                    && trace.header.characters.values().any(|value| *value == guid))
+        };
         let declared_stream = scenario
             .steps
             .iter()
             .find(|step| step.id == packet.checkpoint)
-            .map(|step| step.checkpoint.stream(&step.id, packet.opcode));
+            .map(|step| {
+                step.checkpoint
+                    .for_character(packet.character.as_deref().unwrap_or(""))
+                    .map_or_else(
+                        || step.checkpoint.stream(&step.id, packet.opcode),
+                        |capture| capture.stream(&step.id, packet.opcode),
+                    )
+            });
         if packet.stream == Stream::Opening
             || packet.stream == Stream::Malformed
             || declared_stream.as_ref() != Some(&packet.stream)
@@ -871,9 +969,14 @@ fn scoped_trace(scenario: &Scenario, trace: &Trace) -> Result<Trace> {
                 .filter_map(|path| field_at(&packet.fields, path))
                 .collect();
             if !fields.is_empty()
-                && !fields
-                    .iter()
-                    .any(|field| contains_guid(field, trace.header.character_guid))
+                && !fields.iter().any(|field| {
+                    trace
+                        .header
+                        .characters
+                        .values()
+                        .any(|guid| scope.all_characters && contains_guid(field, *guid))
+                        || contains_guid(field, character_guid)
+                })
             {
                 continue;
             }
@@ -884,14 +987,23 @@ fn scoped_trace(scenario: &Scenario, trace: &Trace) -> Result<Trace> {
                     let mut object = object.clone();
                     if let Field::Object(fields) = &mut object {
                         if let Some(Field::Guid(guid)) = fields.get("guid") {
-                            if *guid != trace.header.character_guid {
+                            if !in_scope(*guid) || (scope.creates_only && *guid == character_guid) {
                                 continue;
                             }
                         } else if let Some(Field::List(guids)) = fields.get_mut("guids") {
-                            guids.retain(|guid| !matches!(guid, Field::Guid(value) if *value != trace.header.character_guid));
+                            guids.retain(
+                                |guid| !matches!(guid, Field::Guid(value) if !in_scope(*value)),
+                            );
                             if guids.is_empty() {
                                 continue;
                             }
+                        }
+                        if scope.creates_only {
+                            if !matches!(fields.get("kind"), Some(Field::Unsigned(2 | 3))) {
+                                continue;
+                            }
+                            result.packets.push(object_packet(packet, object));
+                            continue;
                         }
                         if fields.get("kind") == Some(&Field::Unsigned(0)) {
                             if let Some(Field::Object(values)) = fields.get("values") {
@@ -964,9 +1076,27 @@ fn field_at<'a>(fields: &'a BTreeMap<String, Field>, path: &[String]) -> Option<
     Some(value)
 }
 
+fn received_create(trace: &Trace, recipient: &str, checkpoint: &str, target_guid: u64) -> bool {
+    trace.packets.iter().any(|packet| {
+        packet.character.as_deref() == Some(recipient)
+            && packet.checkpoint == checkpoint
+            && packet.opcode == 0x00a9
+            && matches!(packet.stream, Stream::Broadcast(_))
+            && matches!(packet.fields.get("objects"), Some(Field::List(objects)) if objects.iter().any(|object| {
+                matches!(object, Field::Object(fields)
+                    if matches!(fields.get("kind"), Some(Field::Unsigned(2 | 3)))
+                        && fields.get("guid") == Some(&Field::Guid(target_guid)))
+            }))
+    })
+}
+
 impl PacketTimingRule {
     fn applies(&self, packet: &RecordedPacket) -> bool {
         self.opcode == packet.opcode
+            && self
+                .character
+                .as_ref()
+                .map_or(true, |id| packet.character.as_ref() == Some(id))
             && (self.path.is_empty() || field_at(&packet.fields, &self.path).is_some())
             && (!self.values_only
                 || field_at(
@@ -978,7 +1108,7 @@ impl PacketTimingRule {
 
 pub(crate) fn validate_rule_samples(scenario: &Scenario, trace: &Trace) -> Result<()> {
     let trace = scoped_trace(scenario, trace)?;
-    for (name, reason, opcode, path, unchecked) in scenario
+    for (name, reason, character, opcode, path, unchecked) in scenario
         .rules
         .identities
         .iter()
@@ -986,6 +1116,7 @@ pub(crate) fn validate_rule_samples(scenario: &Scenario, trace: &Trace) -> Resul
             (
                 &rule.name,
                 &rule.reason,
+                &rule.character,
                 rule.opcode,
                 &rule.path,
                 "identity consistency is unchecked: single sample",
@@ -995,38 +1126,59 @@ pub(crate) fn validate_rule_samples(scenario: &Scenario, trace: &Trace) -> Resul
             (
                 &rule.name,
                 &rule.reason,
+                &rule.character,
                 rule.opcode,
                 &rule.path,
                 "clock consistency is unchecked: single sample",
             )
         }))
     {
-        let samples = trace
-            .packets
-            .iter()
-            .filter(|packet| {
-                packet.opcode == opcode
-                    && scenario.steps.iter().any(|step| {
-                        step.id == packet.checkpoint
-                            && step.checkpoint.stream(&step.id, opcode) == packet.stream
-                            && !matches!(
-                                packet.stream,
-                                Stream::Opening | Stream::Unexpected | Stream::Malformed
-                            )
-                    })
-                    && field_at(&packet.fields, path).is_some()
-            })
-            .take(2)
-            .count();
-        ensure!(
-            samples != 1 || reason.to_ascii_lowercase().contains(unchecked),
-            "rule {name} has one sample; its reason must state '{unchecked}'"
-        );
+        let recipients: Vec<_> = if scenario.schema_version == 4 {
+            scenario.characters.iter().map(|c| Some(&c.id)).collect()
+        } else {
+            vec![None]
+        };
+        for recipient in recipients {
+            if character.as_ref().is_some_and(|id| Some(id) != recipient) {
+                continue;
+            }
+            let samples = trace
+                .packets
+                .iter()
+                .filter(|packet| {
+                    packet.opcode == opcode
+                        && recipient.map_or(true, |id| packet.character.as_ref() == Some(id))
+                        && scenario.steps.iter().any(|step| {
+                            step.id == packet.checkpoint
+                                && step
+                                    .checkpoint
+                                    .for_character(packet.character.as_deref().unwrap_or(""))
+                                    .map_or_else(
+                                        || step.checkpoint.stream(&step.id, opcode),
+                                        |capture| capture.stream(&step.id, opcode),
+                                    )
+                                    == packet.stream
+                                && !matches!(
+                                    packet.stream,
+                                    Stream::Opening | Stream::Unexpected | Stream::Malformed
+                                )
+                        })
+                        && field_at(&packet.fields, path).is_some()
+                })
+                .take(2)
+                .count();
+            ensure!(
+                samples != 1 || reason.to_ascii_lowercase().contains(unchecked),
+                "rule {name} has one sample for Character {}; its reason must state '{unchecked}'",
+                recipient.map_or("single", String::as_str)
+            );
+        }
     }
     Ok(())
 }
 
-type Streams<'a> = BTreeMap<(String, Stream, Option<String>), Vec<&'a RecordedPacket>>;
+type Streams<'a> =
+    BTreeMap<(String, Option<String>, Stream, Option<String>), Vec<&'a RecordedPacket>>;
 
 impl Comparator<'_> {
     fn packets<'a>(
@@ -1039,9 +1191,42 @@ impl Comparator<'_> {
         let mut streams = BTreeMap::new();
         for (index, packet) in trace.packets.iter().enumerate() {
             if packet.stream == Stream::Opening {
+                if packet.checkpoint != "opening" {
+                    let allowed = scenario.steps.iter().any(|step| {
+                        step.id == packet.checkpoint
+                            && step.character == packet.character
+                            && matches!(
+                                step.action.as_ref(),
+                                Some(SessionAction::Connect | SessionAction::Reconnect)
+                            )
+                            && step
+                                .checkpoint
+                                .for_character(packet.character.as_deref().unwrap_or(""))
+                                .is_some_and(|capture| {
+                                    capture.stream(&step.id, packet.opcode) == Stream::Unexpected
+                                })
+                    });
+                    if !allowed {
+                        self.difference(
+                            &Location {
+                                character: packet.character.clone(),
+                                checkpoint: packet.checkpoint.clone(),
+                                stream: Some(Stream::Opening),
+                                packet_index: Some(index),
+                                path: Vec::new(),
+                                opcode: Some(packet.opcode),
+                            },
+                            "unexpected_opening",
+                            "only undeclared packets during a Character connection can be opening packets",
+                            None,
+                            Some(&Field::Unsigned(packet.opcode.into())),
+                        );
+                    }
+                }
                 continue;
             }
             let location = Location {
+                character: packet.character.clone(),
                 checkpoint: packet.checkpoint.clone(),
                 stream: Some(packet.stream.clone()),
                 packet_index: Some(index),
@@ -1064,13 +1249,26 @@ impl Comparator<'_> {
                 );
                 continue;
             };
-            let stream = step.checkpoint.stream(&step.id, packet.opcode);
+            let stream = step
+                .checkpoint
+                .for_character(packet.character.as_deref().unwrap_or(""))
+                .map_or_else(
+                    || step.checkpoint.stream(&step.id, packet.opcode),
+                    |capture| capture.stream(&step.id, packet.opcode),
+                );
             if stream == Stream::Unexpected {
                 let rule = self
                     .rules
                     .unexpected_packets
                     .iter()
-                    .find(|r| r.checkpoint == packet.checkpoint && r.opcode == packet.opcode);
+                    .filter(|r| {
+                        r.checkpoint == packet.checkpoint
+                            && r.opcode == packet.opcode
+                            && r.character
+                                .as_ref()
+                                .map_or(true, |id| packet.character.as_ref() == Some(id))
+                    })
+                    .max_by_key(|rule| rule.character.is_some());
                 if packet.stream == Stream::Malformed {
                     self.difference(
                         &location,
@@ -1131,6 +1329,7 @@ impl Comparator<'_> {
             streams
                 .entry((
                     packet.checkpoint.clone(),
+                    packet.character.clone(),
                     stream,
                     scenario
                         .rules
@@ -1143,65 +1342,113 @@ impl Comparator<'_> {
         }
         if check_replies {
             for step in &scenario.steps {
-                let received: Vec<_> = trace
-                    .packets
-                    .iter()
-                    .filter(|packet| {
-                        packet.checkpoint == step.id
-                            && step.checkpoint.replies.contains(&packet.opcode)
-                    })
-                    .map(|packet| packet.opcode)
-                    .collect();
-                for assertion in &step.checkpoint.expect {
-                    let count = trace
+                let captures: Vec<_> = if scenario.schema_version == 4 {
+                    step.checkpoint
+                        .characters
+                        .iter()
+                        .map(|capture| {
+                            (
+                                Some(capture.character.as_str()),
+                                capture.replies.as_slice(),
+                                capture.expect.as_slice(),
+                            )
+                        })
+                        .collect()
+                } else {
+                    vec![(
+                        None,
+                        step.checkpoint.replies.as_slice(),
+                        step.checkpoint.expect.as_slice(),
+                    )]
+                };
+                for (character, replies, assertions) in captures {
+                    if let Some(capture) =
+                        character.and_then(|id| step.checkpoint.for_character(id))
+                    {
+                        for target in &capture.creates {
+                            let target_guid = trace.header.characters[target];
+                            if !received_create(trace, character.unwrap(), &step.id, target_guid) {
+                                self.difference(
+                                    &Location {
+                                        character: character.map(str::to_owned),
+                                        checkpoint: step.id.clone(),
+                                        stream: Some(Stream::Broadcast("objects".into())),
+                                        packet_index: None,
+                                        path: vec!["objects".into()],
+                                        opcode: Some(0x00a9),
+                                    },
+                                    "checkpoint_create",
+                                    "Character must receive the named Character's CREATE update",
+                                    Some(&Field::Guid(target_guid)),
+                                    None,
+                                );
+                            }
+                        }
+                    }
+                    let received: Vec<_> = trace
                         .packets
                         .iter()
                         .filter(|packet| {
                             packet.checkpoint == step.id
-                                && packet.opcode == assertion.opcode
-                                && field_at(&packet.fields, &assertion.path)
-                                    == Some(&assertion.value)
+                                && packet.character.as_deref() == character
+                                && replies.contains(&packet.opcode)
                         })
-                        .count();
-                    if count != assertion.count {
+                        .map(|packet| packet.opcode)
+                        .collect();
+                    for assertion in assertions {
+                        let count = trace
+                            .packets
+                            .iter()
+                            .filter(|packet| {
+                                packet.checkpoint == step.id
+                                    && packet.character.as_deref() == character
+                                    && packet.opcode == assertion.opcode
+                                    && field_at(&packet.fields, &assertion.path)
+                                        == Some(&assertion.value)
+                            })
+                            .count();
+                        if count != assertion.count {
+                            self.difference(
+                                &Location {
+                                    character: character.map(str::to_owned),
+                                    checkpoint: step.id.clone(),
+                                    stream: None,
+                                    packet_index: None,
+                                    path: assertion.path.clone(),
+                                    opcode: Some(assertion.opcode),
+                                },
+                                "checkpoint_assertion",
+                                "matching field occurrences must meet the scenario assertion",
+                                Some(&Field::Unsigned(assertion.count as u64)),
+                                Some(&Field::Unsigned(count as u64)),
+                            );
+                        }
+                    }
+                    if received != replies {
+                        let location = Location {
+                            character: character.map(str::to_owned),
+                            checkpoint: step.id.clone(),
+                            stream: Some(Stream::Reply(step.id.clone())),
+                            packet_index: None,
+                            path: Vec::new(),
+                            opcode: None,
+                        };
+                        let opcodes = |opcodes: &[u16]| {
+                            Field::List(
+                                opcodes
+                                    .iter()
+                                    .map(|v| Field::Unsigned((*v).into()))
+                                    .collect(),
+                            )
+                        };
                         self.difference(
-                            &Location {
-                                checkpoint: step.id.clone(),
-                                stream: None,
-                                packet_index: None,
-                                path: assertion.path.clone(),
-                                opcode: Some(assertion.opcode),
-                            },
-                            "checkpoint_assertion",
-                            "matching field occurrences must meet the scenario assertion",
-                            Some(&Field::Unsigned(assertion.count as u64)),
-                            Some(&Field::Unsigned(count as u64)),
+                            &location,
+                            "checkpoint_replies",
+                            "reply opcodes must match the scenario in order and multiplicity",
+                            Some(&opcodes(replies)),
+                            Some(&opcodes(&received)),
                         );
                     }
-                }
-                if received != step.checkpoint.replies {
-                    let location = Location {
-                        checkpoint: step.id.clone(),
-                        stream: Some(Stream::Reply(step.id.clone())),
-                        packet_index: None,
-                        path: Vec::new(),
-                        opcode: None,
-                    };
-                    let opcodes = |opcodes: &[u16]| {
-                        Field::List(
-                            opcodes
-                                .iter()
-                                .map(|v| Field::Unsigned((*v).into()))
-                                .collect(),
-                        )
-                    };
-                    self.difference(
-                        &location,
-                        "checkpoint_replies",
-                        "reply opcodes must match the scenario in order and multiplicity",
-                        Some(&opcodes(&step.checkpoint.replies)),
-                        Some(&opcodes(&received)),
-                    );
                 }
             }
         }
@@ -1233,6 +1480,7 @@ impl Comparator<'_> {
             if !used {
                 self.difference(
                     &Location {
+                        character: None,
                         checkpoint: String::new(),
                         stream: None,
                         packet_index: None,
@@ -1272,7 +1520,7 @@ fn comparator(rules: &EquivalenceRules, recorded_at: (u64, u64)) -> Comparator<'
     }
 }
 
-/// Checks replies and received opcodes without requiring a Golden Trace.
+/// Checks schema 3 replies and received opcodes without a Golden Trace.
 pub fn check_observations(scenario: &Scenario, observations: &[Observation]) -> Result<Comparison> {
     check_character_observations(scenario, observations, 0)
 }
@@ -1283,9 +1531,14 @@ pub fn check_character_observations(
     character_guid: u64,
 ) -> Result<Comparison> {
     scenario.validate()?;
+    ensure!(
+        scenario.schema_version == 3,
+        "single-Character check requires schema 3"
+    );
     let header = Header {
-        schema_version: 3,
+        schema_version: scenario.schema_version,
         character_guid,
+        characters: BTreeMap::new(),
         scenario: scenario.id.clone(),
         behavior: scenario.behavior.clone(),
         scenario_sha256: crate::trace::Sha256Digest::of(b""),
@@ -1296,6 +1549,34 @@ pub fn check_character_observations(
     };
     let trace = Trace::record(header, observations)?;
     let trace = scoped_trace(scenario, &trace)?;
+    let mut comparator = comparator(&scenario.rules, (0, 0));
+    comparator.packets(scenario, &trace, false, true);
+    comparator.finish(&[])
+}
+
+pub fn check_multi_observations(
+    scenario: &Scenario,
+    observations: &[Observation],
+    characters: &BTreeMap<String, u64>,
+) -> Result<Comparison> {
+    scenario.validate()?;
+    ensure!(
+        scenario.schema_version == 4,
+        "named Character check requires schema 4"
+    );
+    let header = Header {
+        schema_version: 4,
+        character_guid: 0,
+        characters: characters.clone(),
+        scenario: scenario.id.clone(),
+        behavior: scenario.behavior.clone(),
+        scenario_sha256: crate::trace::Sha256Digest::of(b""),
+        recorded_at_unix_ms: 0,
+        origin: crate::trace::Origin::Candidate {
+            adapter: "observations".into(),
+        },
+    };
+    let trace = scoped_trace(scenario, &Trace::record(header, observations)?)?;
     let mut comparator = comparator(&scenario.rules, (0, 0));
     comparator.packets(scenario, &trace, false, true);
     comparator.finish(&[])
@@ -1321,9 +1602,11 @@ pub fn compare(
     if expected.header.scenario != actual.header.scenario
         || expected.header.behavior != actual.header.behavior
         || expected.header.scenario_sha256 != actual.header.scenario_sha256
+        || expected.header.schema_version != actual.header.schema_version
     {
         comparator.difference(
             &Location {
+                character: None,
                 checkpoint: String::new(),
                 stream: None,
                 packet_index: None,
@@ -1348,6 +1631,33 @@ pub fn compare(
         comparator
             .actual_guids
             .insert(actual.header.character_guid, expected.header.character_guid);
+    }
+    if scenario.schema_version == 4 {
+        ensure!(
+            expected
+                .header
+                .characters
+                .keys()
+                .eq(actual.header.characters.keys()),
+            "candidate Character set differs"
+        );
+        for (id, expected_guid) in &expected.header.characters {
+            let actual_guid = actual.header.characters[id];
+            ensure!(
+                comparator
+                    .expected_guids
+                    .insert(*expected_guid, actual_guid)
+                    .map_or(true, |guid| guid == actual_guid),
+                "conflicting Character GUID mapping"
+            );
+            ensure!(
+                comparator
+                    .actual_guids
+                    .insert(actual_guid, *expected_guid)
+                    .map_or(true, |guid| guid == *expected_guid),
+                "conflicting Character GUID mapping"
+            );
+        }
     }
     let mut keys: Vec<_> = expected_streams
         .keys()
@@ -1374,14 +1684,15 @@ pub fn compare(
             let ap = ai.map(|i| a[i]);
             let packet = ep.or(ap).unwrap();
             let location = Location {
+                character: key.1.clone(),
                 checkpoint: key.0.clone(),
-                stream: Some(key.1.clone()),
+                stream: Some(key.2.clone()),
                 packet_index: ei.or(ai),
                 path: Vec::new(),
                 opcode: Some(packet.opcode),
             };
             let mut update_location = location.clone();
-            if let Some(field) = &key.2 {
+            if let Some(field) = &key.3 {
                 update_location.path =
                     vec!["objects".into(), "0".into(), "values".into(), field.clone()];
             }
@@ -1418,7 +1729,9 @@ pub fn compare(
                 }
                 (Some(_), Some(_)) => (),
                 _ => {
-                    comparator.unmatched_opcodes.insert(packet.opcode);
+                    comparator
+                        .unmatched_opcodes
+                        .insert((packet.character.clone(), packet.opcode));
                     for (opcode, path) in rules
                         .identities
                         .iter()
@@ -1428,14 +1741,20 @@ pub fn compare(
                         .chain(rules.random.iter().map(|rule| (rule.opcode, &rule.path)))
                     {
                         if opcode == packet.opcode && field_at(&packet.fields, path).is_some() {
-                            comparator.unmatched_fields.insert((opcode, path.clone()));
+                            comparator.unmatched_fields.insert((
+                                packet.character.clone(),
+                                opcode,
+                                path.clone(),
+                            ));
                         }
                     }
                     for rule in &rules.packet_timing {
                         if rule.applies(packet) && !rule.path.is_empty() {
-                            comparator
-                                .unmatched_fields
-                                .insert((rule.opcode, rule.path.clone()));
+                            comparator.unmatched_fields.insert((
+                                packet.character.clone(),
+                                rule.opcode,
+                                rule.path.clone(),
+                            ));
                         }
                     }
                     comparator.difference(
@@ -1455,12 +1774,11 @@ pub fn compare(
     }
     for (index, rule) in rules.random.iter().enumerate() {
         if !comparator.used_random.contains(&index)
-            && !comparator
-                .unmatched_fields
-                .contains(&(rule.opcode, rule.path.clone()))
+            && !comparator.unmatched_field(&rule.character, rule.opcode, &rule.path)
         {
             comparator.difference(
                 &Location {
+                    character: rule.character.clone(),
                     checkpoint: String::new(),
                     stream: None,
                     packet_index: None,
@@ -1476,12 +1794,11 @@ pub fn compare(
     }
     for (index, rule) in rules.identities.iter().enumerate() {
         if !comparator.used_identities.contains(&index)
-            && !comparator
-                .unmatched_fields
-                .contains(&(rule.opcode, rule.path.clone()))
+            && !comparator.unmatched_field(&rule.character, rule.opcode, &rule.path)
         {
             comparator.difference(
                 &Location {
+                    character: rule.character.clone(),
                     checkpoint: String::new(),
                     stream: None,
                     packet_index: None,
@@ -1497,12 +1814,11 @@ pub fn compare(
     }
     for (index, rule) in rules.clocks.iter().enumerate() {
         if !comparator.used_clocks.contains(&index)
-            && !comparator
-                .unmatched_fields
-                .contains(&(rule.opcode, rule.path.clone()))
+            && !comparator.unmatched_field(&rule.character, rule.opcode, &rule.path)
         {
             comparator.difference(
                 &Location {
+                    character: rule.character.clone(),
                     checkpoint: String::new(),
                     stream: None,
                     packet_index: None,
@@ -1519,15 +1835,14 @@ pub fn compare(
     for (index, rule) in rules.packet_timing.iter().enumerate() {
         if !comparator.used_timing.contains(&index)
             && !(if rule.path.is_empty() {
-                comparator.unmatched_opcodes.contains(&rule.opcode)
+                comparator.unmatched_opcode(&rule.character, rule.opcode)
             } else {
-                comparator
-                    .unmatched_fields
-                    .contains(&(rule.opcode, rule.path.clone()))
+                comparator.unmatched_field(&rule.character, rule.opcode, &rule.path)
             })
         {
             comparator.difference(
                 &Location {
+                    character: rule.character.clone(),
                     checkpoint: String::new(),
                     stream: None,
                     packet_index: None,
@@ -1543,12 +1858,11 @@ pub fn compare(
     }
     for (index, rule) in rules.data_fields.iter().enumerate() {
         if !comparator.used_data_fields.contains(&index)
-            && !comparator
-                .unmatched_fields
-                .contains(&(rule.opcode, rule.path.clone()))
+            && !comparator.unmatched_field(&rule.character, rule.opcode, &rule.path)
         {
             comparator.difference(
                 &Location {
+                    character: rule.character.clone(),
                     checkpoint: String::new(),
                     stream: None,
                     packet_index: None,
@@ -1565,13 +1879,17 @@ pub fn compare(
     comparator.finish(deviations)
 }
 
-/// In-process callers supply decoded observations and their capture time, without server provenance.
+/// Schema 3 callers supply decoded observations and capture time without server provenance.
 pub fn compare_observations(
     expected: &GoldenTrace,
     observations: &[Observation],
     recorded_at_unix_ms: u64,
     deviations: &[DeliberateDeviation],
 ) -> Result<Comparison> {
+    ensure!(
+        expected.scenario().schema_version == 3,
+        "single-Character comparison requires schema 3"
+    );
     let mut header = expected.trace().header.clone();
     header.origin = crate::trace::Origin::Candidate {
         adapter: "observations".into(),
@@ -1581,7 +1899,7 @@ pub fn compare_observations(
     compare(expected, &Trace::record(header, observations)?, deviations)
 }
 
-/// Supplies the actor identity used by scenario-owned Character scope rules.
+/// Supplies the schema 3 actor identity used by Character scope rules.
 pub fn compare_character_observations(
     expected: &GoldenTrace,
     observations: &[Observation],
@@ -1589,8 +1907,33 @@ pub fn compare_character_observations(
     recorded_at_unix_ms: u64,
     deviations: &[DeliberateDeviation],
 ) -> Result<Comparison> {
+    ensure!(
+        expected.scenario().schema_version == 3,
+        "single-Character comparison requires schema 3"
+    );
     let mut header = expected.trace().header.clone();
     header.character_guid = character_guid;
+    header.origin = crate::trace::Origin::Candidate {
+        adapter: "observations".into(),
+    };
+    header.recorded_at_unix_ms = recorded_at_unix_ms;
+    compare(expected, &Trace::record(header, observations)?, deviations)
+}
+
+pub fn compare_multi_observations(
+    expected: &GoldenTrace,
+    observations: &[Observation],
+    characters: &BTreeMap<String, u64>,
+    recorded_at_unix_ms: u64,
+    deviations: &[DeliberateDeviation],
+) -> Result<Comparison> {
+    ensure!(
+        expected.scenario().schema_version == 4,
+        "named Character comparison requires schema 4"
+    );
+    let mut header = expected.trace().header.clone();
+    header.character_guid = 0;
+    header.characters = characters.clone();
     header.origin = crate::trace::Origin::Candidate {
         adapter: "observations".into(),
     };
