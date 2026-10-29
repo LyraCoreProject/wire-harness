@@ -403,8 +403,14 @@ fn collect_opening(
     observations: &mut Vec<Observation>,
 ) -> Result<()> {
     loop {
+        if transport.now() >= deadline {
+            break;
+        }
         let mut ready = false;
         for character in &scenario.characters {
+            if transport.now() >= deadline {
+                break;
+            }
             if !transport.connected(&character.id) {
                 continue;
             }
@@ -484,8 +490,14 @@ fn collect_multi(
 ) -> Result<()> {
     let mut frames = 0;
     loop {
+        if transport.now() >= deadline {
+            break;
+        }
         let mut ready = false;
         for character in &scenario.characters {
+            if transport.now() >= deadline {
+                break;
+            }
             if !transport.connected(&character.id) {
                 continue;
             }

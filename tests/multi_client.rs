@@ -165,6 +165,146 @@ fn a_ready_second_character_is_captured_during_opening() {
     }));
 }
 
+struct BusyTransport {
+    elapsed_us: u64,
+    second_frames: usize,
+    first_frames: usize,
+    pong_due_us: Option<u64>,
+    pong_sent: bool,
+}
+
+impl MultiTransport for BusyTransport {
+    fn now(&self) -> Duration {
+        Duration::from_micros(self.elapsed_us)
+    }
+    fn character_guid(&self, character: &str) -> Result<u64> {
+        Ok(if character == "first" { 10 } else { 20 })
+    }
+    fn fixture_guids(&self, _: &str) -> Result<BTreeMap<String, u64>> {
+        Ok(BTreeMap::new())
+    }
+    fn take_opening(&mut self, _: &str) -> Result<Vec<Observation>> {
+        Ok(Vec::new())
+    }
+    fn connected(&self, _: &str) -> bool {
+        true
+    }
+    fn connect(&mut self, _: &str) -> Result<()> {
+        Ok(())
+    }
+    fn disconnect(&mut self, _: &str) -> Result<()> {
+        Ok(())
+    }
+    fn send(&mut self, _: &str, _: u32, _: &[u8]) -> Result<()> {
+        self.pong_due_us.get_or_insert(self.elapsed_us + 5_000);
+        Ok(())
+    }
+    fn receive(&mut self, character: &str, timeout: Duration) -> Result<Option<(u16, Vec<u8>)>> {
+        if let Some(frame) = self.receive_ready(character)? {
+            return Ok(Some(frame));
+        }
+        self.elapsed_us += timeout.as_micros() as u64;
+        Ok(None)
+    }
+    fn receive_ready(&mut self, character: &str) -> Result<Option<(u16, Vec<u8>)>> {
+        if self.pong_due_us.is_none() {
+            return Ok(None);
+        }
+        if character == "first" {
+            if self.first_frames > 0 {
+                self.first_frames -= 1;
+                self.elapsed_us += 1;
+                return Ok(Some((0xffff, Vec::new())));
+            }
+            if !self.pong_sent && self.pong_due_us.is_some_and(|due| self.elapsed_us >= due) {
+                self.pong_sent = true;
+                return Ok(Some((477, 7u32.to_le_bytes().to_vec())));
+            }
+        } else if self.second_frames > 0 {
+            self.second_frames -= 1;
+            self.elapsed_us += 1;
+            return Ok(Some((0xffff, Vec::new())));
+        }
+        Ok(None)
+    }
+}
+
+fn busy_scenario() -> Scenario {
+    let fixtures = ACTORS.split("[[steps]]").next().unwrap();
+    Scenario::parse(&format!(
+        "{fixtures}[[steps]]\nid = 'ping'\ncharacter = 'first'\nsend = {{ opcode = 'CMSG_PING', sequence = 7, latency_ms = 0 }}\ncheckpoint = {{ window_ms = 2, characters = [{{ character = 'first', replies = [477] }}, {{ character = 'second' }}] }}\n[[steps]]\nid = 'next'\ncharacter = 'first'\nsend = {{ opcode = 'CMSG_PING', sequence = 8, latency_ms = 0 }}\ncheckpoint = {{ window_ms = 10, characters = [{{ character = 'first', replies = [477] }}, {{ character = 'second' }}] }}\n"
+    ))
+    .unwrap()
+}
+
+#[test]
+fn a_late_pong_follows_six_thousand_ready_frames_into_the_next_checkpoint() {
+    let scenario = busy_scenario();
+    let mut transport = BusyTransport {
+        elapsed_us: 0,
+        first_frames: 0,
+        second_frames: 6_000,
+        pong_due_us: None,
+        pong_sent: false,
+    };
+    let observed = run_multi_on(&scenario, &mut transport).unwrap();
+    let pong = observed
+        .iter()
+        .find(|packet| packet.packet.opcode == 477)
+        .unwrap();
+    assert_eq!(pong.checkpoint, "next");
+    assert_eq!(pong.character.as_deref(), Some("first"));
+}
+
+#[test]
+fn opening_stops_before_a_late_pong() {
+    let scenario = busy_scenario();
+    let mut transport = BusyTransport {
+        elapsed_us: 0,
+        first_frames: 0,
+        second_frames: 6_000,
+        pong_due_us: Some(5_000),
+        pong_sent: false,
+    };
+    let observed = run_multi_on(&scenario, &mut transport).unwrap();
+    let pong = observed
+        .iter()
+        .find(|packet| packet.packet.opcode == 477)
+        .unwrap();
+    assert_ne!(pong.checkpoint, "opening");
+    assert!(
+        observed
+            .iter()
+            .filter(|packet| packet.checkpoint == "opening")
+            .count()
+            <= 1_000
+    );
+}
+
+#[test]
+fn busy_recipients_each_get_a_turn_before_the_checkpoint_closes() {
+    let mut scenario = busy_scenario();
+    scenario.steps.truncate(1);
+    let mut transport = BusyTransport {
+        elapsed_us: 0,
+        first_frames: 6_000,
+        second_frames: 6_000,
+        pong_due_us: None,
+        pong_sent: false,
+    };
+    let observed = run_multi_on(&scenario, &mut transport).unwrap();
+    let ping = observed.iter().filter(|packet| packet.checkpoint == "ping");
+    let first = ping
+        .clone()
+        .filter(|packet| packet.character.as_deref() == Some("first"))
+        .count();
+    let second = ping
+        .filter(|packet| packet.character.as_deref() == Some("second"))
+        .count();
+    assert!(first > 0 && second > 0);
+    assert!(first.abs_diff(second) <= 1);
+}
+
 #[test]
 fn reconnect_reopens_the_same_character_during_a_scenario() {
     let scenario = Scenario::parse(
