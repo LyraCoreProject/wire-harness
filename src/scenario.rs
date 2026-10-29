@@ -441,12 +441,28 @@ impl Observation {
         }
     }
 
-    /// Retains every opcode; undeclared bodies are discarded without decoding or storing packet text.
+    /// Retains every opcode and discards undeclared bodies.
     pub fn from_frame(step: &Step, opcode: u16, body: &[u8]) -> Self {
+        Self::from_frame_with_rules(step, opcode, body, &[])
+    }
+
+    /// Decodes unexpected packets only when a rule filters their subject.
+    pub fn from_frame_with_rules(
+        step: &Step,
+        opcode: u16,
+        body: &[u8],
+        unexpected_rules: &[crate::compare::UnexpectedPacketRule],
+    ) -> Self {
         let wire_opcode = opcode;
         let opcode = if opcode == 0x01f6 { 0x00a9 } else { opcode };
         let stream = step.checkpoint.stream(&step.id, opcode);
-        let (stream, packet) = if stream == Stream::Unexpected {
+        let decode_unexpected = stream == Stream::Unexpected
+            && unexpected_rules.iter().any(|rule| {
+                rule.checkpoint == step.id
+                    && rule.opcode == opcode
+                    && rule.subject_guid_high.is_some()
+            });
+        let (stream, packet) = if stream == Stream::Unexpected && !decode_unexpected {
             (
                 stream,
                 Packet {

@@ -51,9 +51,11 @@ name = "ambient_movement_during_open"
 reason = "Nearby creature movement is independent of opening the bank."
 checkpoint = "open"
 opcode = 221
+subject_guid_high = 61744
 
 [[rules.unexpected_packets]]
 name = "ambient_movement_during_buy_slot"
 reason = "Nearby creature movement is independent of buying the bank slot."
 checkpoint = "buy_slot"
 opcode = 221
+subject_guid_high = 61744

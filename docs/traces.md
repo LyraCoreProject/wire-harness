@@ -152,8 +152,10 @@ supply a replacement tolerance or random range to `compare`. General rule kinds 
   constrains alignment and makes a swap observable. Alignment snapshots the mappings before each
   stream or list; field comparison then checks every selected pair against the growing bijection.
 - Every undeclared opcode is an `unexpected_packet` difference, even if both traces contain it.
-  A named `rules.unexpected_packets` entry may excuse that opcode in one checkpoint. The packet
-  remains recorded, and the rule must not name a declared reply or broadcast. The connection
+  A named `rules.unexpected_packets` entry may excuse that opcode in one checkpoint. An optional
+  `subject_guid_high` restricts it to the decoded subject GUID's upper 16 bits; malformed packets
+  and packets without that subject remain differences. The packet remains recorded, and the rule
+  must not name a declared reply or broadcast. The connection
   scenario names ambient `SMSG_MONSTER_MOVE` as independent of its ping and name queries.
 - Random fields require a name, reason, opcode, path, numeric type and inclusive range. Both values
   must have that type and fall in the range. Random rules cannot override GUID or timestamp types.

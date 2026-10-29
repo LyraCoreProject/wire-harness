@@ -98,7 +98,8 @@ Warden is disabled by the pinned release's default configuration.
 
 ## Login and recording
 
-Build with `cargo build --locked --bin vanilla-wire`. If the target directory is outside the
+Build with `cargo build --locked --bin vanilla-wire`. If `cargo` is not on `PATH`, run
+`source "$HOME/.cargo/env"` first. If the target directory is outside the
 checkout, set `WIRE_BIN` to its `debug/vanilla-wire`. The connection scenario fixes the name `Conformant`; the taxi scenario uses `Taxirider`.
 The wrapper uses `Conformsetup` for the separate GM Character and supplies both passwords:
 
@@ -130,6 +131,10 @@ attention. Exit code 1 means server startup, fixture setup, recording, cleanup, 
 comparison failed; the last message names the failed step. Any failure removes the output. A partial
 running server is left for inspection. Use a fresh output path for another attempt. Only move a
 checked trace into `traces/` after review.
+
+Checked recordings hold `.audit.lock` in the Reference Server directory from fixture
+setup through both recordings and cleanup. It shares the lock with conformance audits. A checked
+recording exits with code 3 and a lock message when either is active; rerun after it finishes.
 
 The output directory must exist, and the output file and scenario Character must be absent.
 Before a rerun, delete the previous disposable Character through the protocol and use a fresh
