@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::compare::{
-    compare, compare_with_rules, scoped_trace, EquivalenceRules, PacketTimingRule,
+    compare, compare_with_rules, scoped_trace, update_field, EquivalenceRules, PacketTimingRule,
 };
 use crate::scenario::{Scenario, SessionAction, Stream};
 use crate::trace::{GoldenTrace, RecordedField as Field, RecordedPacket, Sha256Digest, Trace};
@@ -102,6 +102,7 @@ struct Analyzer<'a> {
     without_rule: BTreeMap<String, (EquivalenceRules, usize)>,
     seen: BTreeSet<[u8; 32]>,
     scoped: Trace,
+    packet_indices: Vec<Option<usize>>,
 }
 
 impl Analyzer<'_> {
@@ -250,7 +251,8 @@ impl Analyzer<'_> {
             self.report.detected_mutations.push(id);
             return Ok(());
         }
-        for name in candidate_rules(self.golden, packet, &change) {
+        let stream_index = source_index.and_then(|index| self.packet_indices[index]);
+        for name in candidate_rules(self.golden, packet, &change, stream_index) {
             if matches!(change, Change::Timing) {
                 self.excuse(name, id);
                 return Ok(());
@@ -496,24 +498,14 @@ fn field_contains_guid(field: &Field, guid: u64) -> bool {
     }
 }
 
-fn candidate_rules(golden: &GoldenTrace, packet: &RecordedPacket, change: &Change) -> Vec<String> {
+fn candidate_rules(
+    golden: &GoldenTrace,
+    packet: &RecordedPacket,
+    change: &Change,
+    stream_index: Option<usize>,
+) -> Vec<String> {
     let rules = &golden.scenario().rules;
     let mut names = Vec::new();
-    let stream_index = golden
-        .trace()
-        .packets
-        .iter()
-        .position(|source| std::ptr::eq(source, packet))
-        .map(|index| {
-            golden.trace().packets[..index]
-                .iter()
-                .filter(|source| {
-                    source.checkpoint == packet.checkpoint
-                        && source.character == packet.character
-                        && source.stream == packet.stream
-                })
-                .count()
-        });
     match change {
         Change::Field(path) => {
             let mut path = path.clone();
@@ -984,6 +976,32 @@ fn fixture_create(object: &Field, entry: u32) -> bool {
             if values.get("field_3") == Some(&Field::Unsigned(u64::from(entry))))
 }
 
+fn packet_indices(golden: &GoldenTrace) -> Result<Vec<Option<usize>>> {
+    let mut counts = BTreeMap::new();
+    golden
+        .trace()
+        .packets
+        .iter()
+        .map(|packet| {
+            let mut index = None;
+            for packet in scoped_packet(golden, packet.clone())?.packets {
+                let field = golden
+                    .scenario()
+                    .rules
+                    .character_scope
+                    .as_ref()
+                    .and_then(|_| update_field(&packet));
+                let count = counts
+                    .entry((packet.checkpoint, packet.character, packet.stream, field))
+                    .or_insert(0);
+                index.get_or_insert(*count);
+                *count += 1;
+            }
+            Ok(index)
+        })
+        .collect()
+}
+
 pub fn analyze(golden: &GoldenTrace) -> Result<StrictnessReport> {
     ensure!(
         compare(golden, golden.trace(), &[])?.is_match(),
@@ -1014,6 +1032,7 @@ pub fn analyze(golden: &GoldenTrace) -> Result<StrictnessReport> {
         without_rule: BTreeMap::new(),
         seen: BTreeSet::new(),
         scoped: scoped_trace(scenario, trace, &scenario.rules)?,
+        packet_indices: packet_indices(golden)?,
     };
     for create in &scenario.opening.fixture_creates {
         let entry = scenario
@@ -1253,21 +1272,14 @@ pub fn analyze(golden: &GoldenTrace) -> Result<StrictnessReport> {
             {
                 normalized[1] = "0".into();
             }
-            let stream_index = trace.packets[..index]
-                .iter()
-                .filter(|source| {
-                    source.character == packet.character
-                        && source.checkpoint == packet.checkpoint
-                        && source.stream == packet.stream
-                })
-                .count();
+            let stream_index = analyzer.packet_indices[index];
             if let Some(rule) = scenario.rules.tolerances.iter().find(|rule| {
                 rule.opcode == packet.opcode
                     && rule_character_applies(&rule.character, packet)
                     && rule.path == normalized
                     && rule
                         .packet_index
-                        .map_or(true, |expected| expected == stream_index)
+                        .map_or(true, |expected| Some(expected) == stream_index)
             }) {
                 for (name, offset) in [
                     ("at_bound", rule.tolerance),

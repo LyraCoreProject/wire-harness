@@ -974,6 +974,23 @@ fn named_rules_cannot_shadow_builtin_strictness_rules() {
 }
 
 #[test]
+fn guid_mapping_preserves_type_bits_when_the_counter_changes() {
+    let creature = Field::Guid(0xf130_0001_0000_0001);
+    assert!(matches(
+        std::slice::from_ref(&creature),
+        &[Field::Guid(0xf130_0001_0000_0002)],
+        ""
+    ));
+    for guid in [2, u64::MAX] {
+        assert!(!matches(
+            std::slice::from_ref(&creature),
+            &[Field::Guid(guid)],
+            ""
+        ));
+    }
+}
+
+#[test]
 fn field_timing_override_keeps_a_matching_default_rule_valid() {
     let rules = "[[rules.packet_timing]]\nname = 'default_delivery'\nreason = 'Default bound.'\nopcode = 477\ntolerance_ms = 10\n[[rules.packet_timing]]\nname = 'field_delivery'\nreason = 'This field permits a later delivery.'\nopcode = 477\npath = ['value']\ntolerance_ms = 400\n";
     let text = scenario(&[477], rules);

@@ -742,9 +742,11 @@ impl Comparator<'_> {
         if expected == 0 || actual == 0 {
             expected == actual
         } else {
-            self.expected_guids
-                .get(&expected)
-                .map_or(true, |mapped| *mapped == actual)
+            expected >> 48 == actual >> 48
+                && self
+                    .expected_guids
+                    .get(&expected)
+                    .map_or(true, |mapped| *mapped == actual)
                 && self
                     .actual_guids
                     .get(&actual)
@@ -952,17 +954,11 @@ impl Comparator<'_> {
         }
         match (expected, actual) {
             (Field::Guid(e), Field::Guid(a)) => {
-                let mismatch = if *e == 0 || *a == 0 {
-                    e != a
-                } else {
-                    self.expected_guids.get(e).is_some_and(|mapped| mapped != a)
-                        || self.actual_guids.get(a).is_some_and(|mapped| mapped != e)
-                };
-                if mismatch {
+                if !self.guid_matches(*e, *a) {
                     self.difference(
                         location,
                         "guid_bijection",
-                        "GUID mapping must be consistent and one-to-one; zero maps only to zero",
+                        "GUID mapping must preserve type and be one-to-one; zero maps only to zero",
                         Some(expected),
                         Some(actual),
                     );
@@ -1256,7 +1252,7 @@ fn object_packet(packet: &RecordedPacket, object: Field) -> RecordedPacket {
     packet
 }
 
-fn update_field(packet: &RecordedPacket) -> Option<String> {
+pub(crate) fn update_field(packet: &RecordedPacket) -> Option<String> {
     if packet.opcode != 0x00a9 {
         return None;
     }

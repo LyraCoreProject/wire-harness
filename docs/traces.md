@@ -141,7 +141,8 @@ same record order, including ambiguous LCS ties.
 The scenario TOML owns all Equivalence Rule parameters, so its SHA-256 covers them. Callers cannot
 supply a replacement tolerance or random range to `compare`. General rule kinds stay in the library:
 
-- Nonzero reference GUIDs map bijectively to candidate GUIDs across the whole trace, including all
+- Nonzero reference GUIDs map bijectively to candidate GUIDs of the same type, identified by their
+  upper 16 bits, across the whole trace, including all
   schema 4 Character streams. Zero maps only
   to zero. A nonzero Character GUID in each header establishes the first pair; aligned fields
   establish further mappings. A bank-open request targeting a creature fixture binds its reply GUID

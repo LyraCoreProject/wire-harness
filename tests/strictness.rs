@@ -245,3 +245,40 @@ fn field_time_tolerance_explains_mutations_inside_the_fallback_bound() {
         .detected_mutations
         .contains(&format!("packet_{index}/field_duration/past_bound")));
 }
+
+#[test]
+fn field_tolerance_indices_follow_the_scoped_stream() {
+    let entry = wire_client::catalogue::ENTRIES
+        .iter()
+        .find(|entry| entry.id == "connection_identity")
+        .unwrap();
+    let scenario = format!("{}\n[rules.character_scope]\nname = 'actor_only'\nreason = 'Only the actor replies belong to this check.'\npackets = [{{ opcode = 477, paths = [['guid']] }}]\n[[rules.tolerances]]\nname = 'sample_duration'\nreason = 'Sampling may vary by 250 ms.'\nopcode = 477\npath = ['duration']\npacket_index = 0\ntolerance = 250.0\n", entry.scenario);
+    let mut trace = Trace::parse(entry.trace.as_bytes()).unwrap();
+    trace.header.scenario_sha256 = Sha256Digest::of(scenario.as_bytes());
+    let index = trace
+        .packets
+        .iter()
+        .position(|packet| packet.opcode == 477)
+        .unwrap();
+    trace.packets[index].fields.insert(
+        "guid".into(),
+        RecordedField::Guid(trace.header.character_guid),
+    );
+    trace.packets[index]
+        .fields
+        .insert("duration".into(), RecordedField::TimeMs(1000));
+    let mut ambient = trace.packets[index].clone();
+    ambient
+        .fields
+        .insert("guid".into(), RecordedField::Guid(0xf130_0001_0000_0001));
+    trace.packets.insert(index, ambient);
+    let report = analyze(&GoldenTrace::new(&scenario, trace).unwrap()).unwrap();
+    let index = index + 1;
+    for suffix in ["plus_one", "minus_one", "at_bound"] {
+        assert!(report.excused_mutations["sample_duration"]
+            .contains(&format!("packet_{index}/field_duration/{suffix}")));
+    }
+    assert!(report
+        .detected_mutations
+        .contains(&format!("packet_{index}/field_duration/past_bound")));
+}
