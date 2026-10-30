@@ -1,0 +1,7 @@
+[[variants]]
+axis = "observer"
+viewer = { verb = "character", name = "Bankwatcher", race = "human", class = "warrior", level = 1, at = { map = 0, x = -8948.0, y = -132.493, z = 83.5312, orientation = 0.0 } }
+
+[[variants]]
+axis = "spawn_beside_viewer"
+viewer = { verb = "character", name = "Spawnwatch", race = "human", class = "warrior", level = 1, at = { map = 0, x = -8948.0, y = -132.493, z = 83.5312, orientation = 0.0 } }

@@ -15,6 +15,18 @@ pub const ENTRIES: &[Entry] = &[
         trace: include_str!("../traces/bank_slot_purchase.json"),
     },
     Entry {
+        id: "bank_slot_purchase__observer",
+        scenario: include_str!("../scenarios/generated/bank_slot_purchase__observer.toml"),
+        trace: include_str!("../traces/bank_slot_purchase__observer.json"),
+    },
+    Entry {
+        id: "bank_slot_purchase__spawn_beside_viewer",
+        scenario: include_str!(
+            "../scenarios/generated/bank_slot_purchase__spawn_beside_viewer.toml"
+        ),
+        trace: include_str!("../traces/bank_slot_purchase__spawn_beside_viewer.json"),
+    },
+    Entry {
         id: "connection_identity",
         scenario: include_str!("../scenarios/connection_identity.toml"),
         trace: include_str!("../traces/connection_identity.json"),
@@ -25,9 +37,26 @@ pub const ENTRIES: &[Entry] = &[
         trace: include_str!("../traces/taxi_single_hop.json"),
     },
     Entry {
+        id: "taxi_single_hop__late_observer",
+        scenario: include_str!("../scenarios/generated/taxi_single_hop__late_observer.toml"),
+        trace: include_str!("../traces/taxi_single_hop__late_observer.json"),
+    },
+    Entry {
+        id: "taxi_single_hop__reconnect",
+        scenario: include_str!("../scenarios/generated/taxi_single_hop__reconnect.toml"),
+        trace: include_str!("../traces/taxi_single_hop__reconnect.json"),
+    },
+    Entry {
         id: "two_character_visibility",
         scenario: include_str!("../scenarios/two_character_visibility.toml"),
         trace: include_str!("../traces/two_character_visibility.json"),
+    },
+    Entry {
+        id: "two_character_visibility__opposite_faction",
+        scenario: include_str!(
+            "../scenarios/generated/two_character_visibility__opposite_faction.toml"
+        ),
+        trace: include_str!("../traces/two_character_visibility__opposite_faction.json"),
     },
 ];
 

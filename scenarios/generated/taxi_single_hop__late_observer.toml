@@ -1,0 +1,658 @@
+# Generated from taxi_single_hop and its variant declaration.
+# Base SHA-256: 264f82f2ae727eb2be18ca11e7d6b73aaad304c49ae31edcf8aadb072f1e095a
+behavior = "taxi_single_hop"
+id = "taxi_single_hop__late_observer"
+schema_version = 4
+
+[[characters]]
+id = "actor"
+
+[[characters.fixtures]]
+class = "warrior"
+level = 1
+name = "Taxirider"
+race = "human"
+verb = "character"
+
+[characters.fixtures.at]
+map = 0
+orientation = 0.0
+x = -8840.56
+y = 489.7
+z = 109.61
+
+[[characters.fixtures]]
+copper = 1000
+verb = "money"
+
+[[characters.fixtures]]
+node_id = 2
+verb = "known_flight_node"
+
+[[characters.fixtures]]
+node_id = 4
+verb = "known_flight_node"
+
+[[characters.fixtures]]
+entry = 523
+id = "flight_master"
+offset = 2.0
+verb = "creature"
+
+[[characters]]
+id = "viewer"
+initially_connected = false
+
+[[characters.fixtures]]
+class = "warrior"
+level = 1
+name = "Taxiviewer"
+race = "human"
+verb = "character"
+
+[characters.fixtures.at]
+map = 0
+orientation = 0.0
+x = -10628.9
+y = 1036.68
+z = 34.06
+
+[opening]
+window_ms = 1000
+
+[rules]
+time_tolerance_ms = 1
+wall_clock_tolerance_ms = 2000
+
+[rules.character_scope]
+all_characters = true
+exclude_self_for = ["viewer"]
+name = "passenger_and_taxi_state"
+reason = "Nearby entities depend on world data. Keep packets naming the passenger as source or target. Compare every passenger field, preserving each field's changes and received times across packet batching."
+
+[[rules.character_scope.packets]]
+opcode = 221
+paths = [["guid"]]
+
+[[rules.character_scope.packets]]
+opcode = 170
+paths = [["guid"]]
+
+[[rules.character_scope.packets]]
+opcode = 533
+paths = [["guid"]]
+
+[[rules.character_scope.packets]]
+opcode = 259
+paths = [["guid"]]
+
+[[rules.character_scope.packets]]
+opcode = 305
+paths = [
+    ["caster"],
+    ["targets"],
+]
+
+[[rules.character_scope.packets]]
+opcode = 306
+paths = [
+    ["caster"],
+    ["targets"],
+    ["hits"],
+    ["misses"],
+]
+
+[[rules.character_scope.packets]]
+opcode = 316
+paths = [["guid"]]
+
+[[rules.character_scope.packets]]
+opcode = 323
+paths = [
+    ["attacker"],
+    ["victim"],
+]
+
+[[rules.character_scope.packets]]
+opcode = 324
+paths = [
+    ["attacker"],
+    ["victim"],
+]
+
+[[rules.character_scope.packets]]
+opcode = 769
+paths = [["guid"]]
+
+[[rules.character_scope.packets]]
+opcode = 781
+paths = [["guid"]]
+
+[[rules.character_scope.packets]]
+opcode = 782
+paths = [["guid"]]
+
+[[rules.character_scope.packets]]
+opcode = 197
+paths = [["guid"]]
+
+[[rules.clocks]]
+name = "landing_clock_origin"
+opcode = 199
+path = ["timestamp"]
+reason = "Require an unsigned 32-bit timestamp. Process clock origins differ; elapsed-clock consistency is unchecked: single sample. Future samples compare within one 100 ms map tick; landing delivery has its own rule."
+tolerance_ms = 100
+
+[[rules.clocks]]
+name = "create_clock"
+opcode = 169
+path = [
+    "objects",
+    "0",
+    "movement",
+    "timestamp",
+]
+reason = "CREATE timestamps use the process clock. Clock consistency is unchecked: single sample."
+tolerance_ms = 250
+
+[[rules.clocks]]
+character = "viewer"
+name = "viewer_teleport_clock"
+opcode = 197
+path = ["timestamp"]
+reason = "The viewer's teleport timestamps use the Reference Server process clock. Compare their elapsed time within one 100 ms map tick."
+tolerance_ms = 100
+
+[[rules.data_fields]]
+name = "zone_world_state_catalogue"
+opcode = 706
+path = ["states"]
+reason = "The state ids and values depend on the world's event catalogue. Compare packet count, order, delivery time, map and zone; allow this catalogue's contents to differ."
+
+[[rules.data_fields]]
+name = "zone_weather_type"
+opcode = 756
+path = ["weather_type"]
+reason = "The weather type depends on the zone's current weather, independently of this flight. Packet count, order, delivery time and the instant-change flag remain checked."
+
+[[rules.data_fields]]
+name = "zone_weather_sound"
+opcode = 756
+path = ["sound"]
+reason = "The weather sound id follows the independently selected weather type and intensity."
+
+[[rules.identities]]
+name = "spline_identity"
+opcode = 221
+path = ["spline_id"]
+reason = "Require unsigned 32-bit spline ids and preserve a bijection across samples. The number is a server-local sequence, not elapsed time. Identity consistency is unchecked: single sample."
+
+[[rules.identities]]
+name = "teleport_counter"
+opcode = 199
+path = ["counter"]
+reason = "Require an unsigned 32-bit counter, including zero. Counters belong to each connection; identity consistency is unchecked: single sample. The runner echoes the received counter."
+
+[[rules.identities]]
+name = "create_guid_word"
+opcode = 169
+path = [
+    "objects",
+    "0",
+    "values",
+    "field_0",
+]
+reason = "CREATE field_0 repeats the server-assigned Character GUID word. Identity consistency is unchecked: single sample."
+
+[[rules.identities]]
+name = "create_spline_id"
+opcode = 169
+path = [
+    "objects",
+    "0",
+    "movement",
+    "spline_id",
+]
+reason = "A moving CREATE carries a server-local spline id. Identity consistency is unchecked: single sample."
+
+[[rules.packet_timing]]
+name = "landing_delivery"
+opcode = 199
+reason = "Landing follows a scheduled flight-end tick. 150 ms covers one configured 100 ms map tick plus 50 ms of local delivery jitter; the advertised spline duration still has its separate 1 ms limit."
+tolerance_ms = 150
+
+[[rules.packet_timing]]
+name = "passenger_update_delivery"
+opcode = 169
+reason = "Each passenger field retains its arrival time from activation. 150 ms covers one 100 ms map tick plus 50 ms local delivery jitter; fare and mount changes must occur at takeoff or landing as recorded."
+tolerance_ms = 150
+
+[[rules.packet_timing]]
+name = "zone_world_states_delivery"
+opcode = 706
+reason = "The Reference Server polls zone changes every 1000 ms. 1150 ms covers that polling phase, one 100 ms map tick and 50 ms local delivery jitter. Count, order, map and zone remain exact. See docs/taxi.md for the pinned source."
+tolerance_ms = 1150
+
+[[rules.packet_timing]]
+name = "zone_weather_delivery"
+opcode = 756
+reason = "Weather follows the same 1000 ms zone poll as world states. 1150 ms covers polling phase, one 100 ms map tick and 50 ms local delivery jitter. See docs/taxi.md for the pinned source."
+tolerance_ms = 1150
+
+[[rules.packet_timing]]
+name = "passenger_zone_flags_delivery"
+opcode = 169
+path = [
+    "objects",
+    "0",
+    "values",
+    "field_190",
+]
+reason = "PLAYER_FLAGS VALUES updates follow the capital's resting area. The 1000 ms zone poll plus one 100 ms update tick and 50 ms local jitter gives 1150 ms. Its value remains exact; CREATE, fare, mount and unit-flags updates keep their 150 ms bound. See docs/taxi.md."
+tolerance_ms = 1150
+values_only = true
+
+[[rules.packet_timing]]
+character = "actor"
+creates_only = true
+name = "actor_create_delivery"
+opcode = 169
+path = [
+    "objects",
+    "0",
+    "kind",
+]
+reason = "The timed connection can shift a CREATE by one extra 100 ms map tick. VALUES delivery keeps the base 150 ms bound."
+tolerance_ms = 250
+
+[[rules.packet_timing]]
+character = "viewer"
+creates_only = true
+name = "viewer_create_delivery"
+opcode = 169
+path = [
+    "objects",
+    "0",
+    "kind",
+]
+reason = "The timed connection can shift a CREATE by one extra 100 ms map tick. VALUES delivery keeps the base 150 ms bound."
+tolerance_ms = 250
+
+[[rules.random]]
+name = "zone_weather_grade"
+opcode = 756
+path = ["grade"]
+reason = "Weather intensity varies independently of the flight. Both samples must be finite floats between 0 and 1."
+
+[rules.random.range]
+maximum = 1.0
+minimum = 0.0
+type = "float"
+
+[[rules.tolerances]]
+name = "create_elapsed"
+opcode = 169
+path = [
+    "objects",
+    "0",
+    "movement",
+    "elapsed",
+]
+reason = "The moving CREATE samples the rider within two 100 ms map ticks and 50 ms local jitter. At 32 units per second the position bound is 8 units."
+tolerance = 250.0
+
+[[rules.tolerances]]
+name = "create_orientation"
+opcode = 169
+path = [
+    "objects",
+    "0",
+    "movement",
+    "orientation",
+]
+reason = "The moving CREATE samples the rider within two 100 ms map ticks and 50 ms local jitter. At 32 units per second the position bound is 8 units."
+tolerance = 0.1
+
+[[rules.tolerances]]
+name = "create_position_x"
+opcode = 169
+path = [
+    "objects",
+    "0",
+    "movement",
+    "position",
+    "x",
+]
+reason = "The moving CREATE samples the rider within two 100 ms map ticks and 50 ms local jitter. At 32 units per second the position bound is 8 units."
+tolerance = 8.0
+
+[[rules.tolerances]]
+name = "create_position_y"
+opcode = 169
+path = [
+    "objects",
+    "0",
+    "movement",
+    "position",
+    "y",
+]
+reason = "The moving CREATE samples the rider within two 100 ms map ticks and 50 ms local jitter. At 32 units per second the position bound is 8 units."
+tolerance = 8.0
+
+[[rules.tolerances]]
+name = "create_position_z"
+opcode = 169
+path = [
+    "objects",
+    "0",
+    "movement",
+    "position",
+    "z",
+]
+reason = "The moving CREATE samples the rider within two 100 ms map ticks and 50 ms local jitter. At 32 units per second the position bound is 8 units."
+tolerance = 8.0
+
+[[rules.unexpected_packets]]
+checkpoint = "nodes"
+name = "ambient_node_emote"
+opcode = 259
+reason = "Nearby creature emotes are independent of the taxi-node reply."
+subject_guid_high = 61744
+
+[[steps]]
+character = "actor"
+id = "status"
+
+[steps.checkpoint]
+window_ms = 250
+
+[[steps.checkpoint.characters]]
+character = "actor"
+replies = [427]
+
+[[steps.checkpoint.characters.broadcasts]]
+opcode = 221
+stream = "movement"
+
+[[steps.checkpoint.characters.broadcasts]]
+opcode = 169
+stream = "values"
+
+[[steps.checkpoint.characters.expect]]
+count = 1
+opcode = 427
+path = ["known"]
+
+[steps.checkpoint.characters.expect.value]
+type = "unsigned"
+value = 1
+
+[[steps.checkpoint.characters]]
+character = "viewer"
+
+[[steps.checkpoint.characters.broadcasts]]
+opcode = 169
+stream = "objects"
+
+[steps.send]
+opcode = "CMSG_TAXINODE_STATUS_QUERY"
+
+[steps.send.target]
+fixture = "flight_master"
+
+[[steps]]
+character = "actor"
+id = "nodes"
+
+[steps.checkpoint]
+window_ms = 250
+
+[[steps.checkpoint.characters]]
+character = "actor"
+replies = [425]
+
+[[steps.checkpoint.characters.broadcasts]]
+opcode = 221
+stream = "movement"
+
+[[steps.checkpoint.characters.broadcasts]]
+opcode = 169
+stream = "values"
+
+[[steps.checkpoint.characters.expect]]
+count = 1
+opcode = 425
+path = ["node"]
+
+[steps.checkpoint.characters.expect.value]
+type = "unsigned"
+value = 2
+
+[[steps.checkpoint.characters.expect]]
+count = 1
+opcode = 425
+path = [
+    "known_nodes",
+    "0",
+]
+
+[steps.checkpoint.characters.expect.value]
+type = "unsigned"
+value = 10
+
+[[steps.checkpoint.characters]]
+character = "viewer"
+
+[[steps.checkpoint.characters.broadcasts]]
+opcode = 169
+stream = "objects"
+
+[steps.send]
+opcode = "CMSG_TAXIQUERYAVAILABLENODES"
+
+[steps.send.target]
+fixture = "flight_master"
+
+[[steps]]
+character = "actor"
+id = "flight"
+
+[steps.checkpoint]
+window_ms = 80000
+
+[[steps.checkpoint.characters]]
+character = "actor"
+replies = [
+    334,
+    430,
+    366,
+    221,
+    367,
+    334,
+    199,
+]
+
+[[steps.checkpoint.characters.broadcasts]]
+opcode = 169
+stream = "values"
+
+[[steps.checkpoint.characters.broadcasts]]
+opcode = 706
+stream = "zones"
+
+[[steps.checkpoint.characters.broadcasts]]
+opcode = 756
+stream = "zones"
+
+[[steps.checkpoint.characters.broadcasts]]
+opcode = 305
+stream = "spells"
+
+[[steps.checkpoint.characters.broadcasts]]
+opcode = 306
+stream = "spells"
+
+[[steps.checkpoint.characters.broadcasts]]
+opcode = 259
+stream = "emotes"
+
+[[steps.checkpoint.characters.broadcasts]]
+opcode = 170
+stream = "entities"
+
+[[steps.checkpoint.characters.broadcasts]]
+opcode = 533
+stream = "entities"
+
+[[steps.checkpoint.characters.broadcasts]]
+opcode = 316
+stream = "combat"
+
+[[steps.checkpoint.characters.broadcasts]]
+opcode = 323
+stream = "combat"
+
+[[steps.checkpoint.characters.broadcasts]]
+opcode = 324
+stream = "combat"
+
+[[steps.checkpoint.characters.broadcasts]]
+opcode = 769
+stream = "movement_modes"
+
+[[steps.checkpoint.characters.broadcasts]]
+opcode = 781
+stream = "movement_modes"
+
+[[steps.checkpoint.characters.broadcasts]]
+opcode = 782
+stream = "movement_modes"
+
+[[steps.checkpoint.characters.expect]]
+count = 1
+opcode = 430
+path = ["result"]
+
+[steps.checkpoint.characters.expect.value]
+type = "unsigned"
+value = 0
+
+[[steps.checkpoint.characters.expect]]
+count = 1
+opcode = 199
+path = ["flags"]
+
+[steps.checkpoint.characters.expect.value]
+type = "unsigned"
+value = 0
+
+[[steps.checkpoint.characters.expect]]
+count = 1
+opcode = 169
+path = [
+    "objects",
+    "0",
+    "values",
+    "field_133",
+]
+
+[steps.checkpoint.characters.expect.value]
+type = "unsigned"
+value = 0
+
+[[steps.checkpoint.characters.expect]]
+count = 1
+opcode = 169
+path = [
+    "objects",
+    "0",
+    "values",
+    "field_1176",
+]
+
+[steps.checkpoint.characters.expect.value]
+type = "unsigned"
+value = 890
+
+[[steps.checkpoint.characters]]
+character = "viewer"
+creates = ["actor"]
+
+[[steps.checkpoint.characters.broadcasts]]
+opcode = 706
+stream = "zones"
+
+[[steps.checkpoint.characters.broadcasts]]
+opcode = 756
+stream = "zones"
+
+[[steps.checkpoint.characters.broadcasts]]
+opcode = 305
+stream = "spells"
+
+[[steps.checkpoint.characters.broadcasts]]
+opcode = 306
+stream = "spells"
+
+[[steps.checkpoint.characters.broadcasts]]
+opcode = 259
+stream = "emotes"
+
+[[steps.checkpoint.characters.broadcasts]]
+opcode = 170
+stream = "entities"
+
+[[steps.checkpoint.characters.broadcasts]]
+opcode = 533
+stream = "entities"
+
+[[steps.checkpoint.characters.broadcasts]]
+opcode = 316
+stream = "combat"
+
+[[steps.checkpoint.characters.broadcasts]]
+opcode = 323
+stream = "combat"
+
+[[steps.checkpoint.characters.broadcasts]]
+opcode = 324
+stream = "combat"
+
+[[steps.checkpoint.characters.broadcasts]]
+opcode = 769
+stream = "movement_modes"
+
+[[steps.checkpoint.characters.broadcasts]]
+opcode = 781
+stream = "movement_modes"
+
+[[steps.checkpoint.characters.broadcasts]]
+opcode = 782
+stream = "movement_modes"
+
+[[steps.checkpoint.characters.broadcasts]]
+opcode = 169
+stream = "objects"
+
+[[steps.checkpoint.characters.broadcasts]]
+opcode = 221
+stream = "movement"
+
+[[steps.checkpoint.characters.broadcasts]]
+opcode = 197
+stream = "teleport"
+
+[[steps.events]]
+after_ms = 40000
+character = "viewer"
+
+[steps.events.action]
+kind = "connect"
+
+[steps.send]
+destination = 4
+opcode = "CMSG_ACTIVATETAXI"
+source = 2
+
+[steps.send.target]
+fixture = "flight_master"

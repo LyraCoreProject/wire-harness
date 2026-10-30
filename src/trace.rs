@@ -266,7 +266,7 @@ impl Trace {
             );
         } else {
             ensure!(
-                self.header.character_guid == 0 && (2..=16).contains(&self.header.characters.len()),
+                self.header.character_guid == 0 && (1..=16).contains(&self.header.characters.len()),
                 "schema 4 needs named Character GUIDs"
             );
             ensure!(
@@ -405,14 +405,23 @@ impl GoldenTrace {
                             .steps
                             .iter()
                             .any(|step| step.id == packet.checkpoint
-                                && step.character == packet.character
-                                && matches!(
-                                    step.action.as_ref(),
-                                    Some(
-                                        crate::scenario::SessionAction::Connect
-                                            | crate::scenario::SessionAction::Reconnect
-                                    )
-                                )),
+                                && ((step.character == packet.character
+                                    && matches!(
+                                        step.action.as_ref(),
+                                        Some(
+                                            crate::scenario::SessionAction::Connect
+                                                | crate::scenario::SessionAction::Reconnect
+                                        )
+                                    ))
+                                    || step.events.iter().any(|event| {
+                                        packet.character.as_deref()
+                                            == Some(event.character.as_str())
+                                            && matches!(
+                                                event.action,
+                                                crate::scenario::SessionAction::Connect
+                                                    | crate::scenario::SessionAction::Reconnect
+                                            )
+                                    }))),
                         "opening packet must belong to a Character connection step"
                     );
                 }

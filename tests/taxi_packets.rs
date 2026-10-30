@@ -34,6 +34,28 @@ fn movement(kind: u8) -> Vec<u8> {
 }
 
 #[test]
+fn observer_teleport_decodes_subject_and_position() {
+    let mut body = packed_guid(9);
+    body.extend(0u32.to_le_bytes());
+    body.extend(123u32.to_le_bytes());
+    for coordinate in [1.0f32, 2.0, 3.0, 4.0] {
+        body.extend(coordinate.to_le_bytes());
+    }
+    body.extend(0u32.to_le_bytes());
+    let packet = decode(197, &body).unwrap();
+    assert_eq!(packet.fields["guid"], Field::Guid(9));
+    assert_eq!(
+        packet.fields["position"],
+        Field::Object(BTreeMap::from([
+            ("x".into(), Field::Float(1.0)),
+            ("y".into(), Field::Float(2.0)),
+            ("z".into(), Field::Float(3.0)),
+        ]))
+    );
+    assert!(decode(197, &body[..body.len() - 1]).is_err());
+}
+
+#[test]
 fn taxi_requests_use_full_guids_and_little_endian_node_ids() {
     let target = Target::Fixture("master".into());
     let fixtures = BTreeMap::from([("master".into(), 0xf130_0001_6000_0017)]);

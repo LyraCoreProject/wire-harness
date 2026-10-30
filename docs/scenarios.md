@@ -25,6 +25,7 @@ reason for each mutation id. CI checks that the entries match the current report
 For pull requests, CI also rejects entries absent from the allowlist at the merge base with main.
 The pull request introducing the file establishes the initial approved entries. Later additions
 need a maintainer to change the base allowlist in its own reviewed pull request.
+The report also names the built-in `time_tolerance_ms` and `stream_interleaving` rules.
 An excusal counts only when the mutation fits the rule's opcode, field, Character, checkpoint, and
 subject intent. For an unexpected-packet rule without `subject_guid_high`, the analyzer derives
 allowed subject GUID high bits from packets observed under that rule in the Golden Trace. It allows
@@ -47,7 +48,7 @@ belong in a scenario.
 
 ## Named Characters
 
-`schema_version = 4` declares 2 through 16 `[[characters]]`. Each has a lowercase `id` and a
+`schema_version = 4` declares 1 through 16 `[[characters]]`. Each has a lowercase `id` and a
 `fixtures` array. Its first Fixture Verb is `character`; later verbs apply only to that Character.
 The `race` in each Character fixture selects its faction. The adapters prepare every Character on
 a separate Account. Set `WIRE_PEER_ACCOUNTS` to the additional Account names in Character order,
@@ -69,6 +70,109 @@ connected Characters between sends. Its checkpoint window must exceed the walk d
 The same runner accepts a virtual-clock `MultiTransport`; `receive` advances that shared clock
 when it has no packet. A core tier 1 Transport can use one fixture connection per Character and
 route each delivery instruction to the recipient's stream.
+
+## Generated variants
+
+Keep the base TOML and Golden Trace unchanged. A companion `variants/<base-id>.toml` declares
+the axes for that scenario. `cargo run --bin generate_variants` writes derived TOML to
+`scenarios/generated/`; `cargo run --bin generate_variants -- --check` fails if a generated file
+is stale. The catalogue test makes the same check. The generated text includes the base file's
+SHA-256, and its own bytes are the `scenario_sha256` in the Golden Trace. A base edit therefore
+requires new generated files and checked recordings. Do not edit generated TOML by hand.
+
+Each `[[variants]]` has one `axis`. The generated id is `<base-id>__<axis>`. Axes use one actor
+named `actor`; observer axes also use `viewer`. The actor keeps the base fixtures, packets,
+checkpoints and Equivalence Rules. For an observer, the generator adds an object-update stream to
+the viewer's checkpoints. If the base has a Character scope, the generated rule includes both
+named Characters so the viewer can compare the actor's updates. This is the only change to an
+inherited rule by default. `scope_packets` may add subject paths when a new viewer stream needs
+the base Character scope. The taxi late observer declares the teleport subject at opcode 197.
+The viewer's ambient creature movement stays under the base scenario's
+unexpected-packet rule if one exists. Other packets remain strict.
+
+| Axis | Declaration | Generated action |
+| --- | --- | --- |
+| `observer` | `viewer` Character fixture | Viewer stays connected through every step. |
+| `late_observer` | `viewer`, `step`, `after_ms` | Viewer connects during that step. Its checkpoint requires the actor's CREATE. |
+| `reconnect` | `step`, `after_ms` | Actor disconnects and reconnects during that step, retaining its GUID. |
+| `opposite_faction` | Opposite `race`, optional `at`; `character` for schema 4 | Replays the base with that Character's race and position. Choose fixtures that accept both factions. |
+| `spawn_beside_viewer` | `viewer`; base must spawn a creature | Prepares the viewer first. Opening checks require the actor's creature CREATE in the viewer's stream. |
+
+The first, second, third and fifth axes accept schema-3 bases and derive schema 4. The faction
+axis preserves the base schema. Each declaration yields one variant; axes are not combined.
+The generator refuses unknown fields, duplicate axes, absent event steps and invalid event times.
+
+Timed axes produce `[[steps.events]]` with `after_ms`, `character` and a `connect` or `reconnect`
+`action`. Only packet steps accept events. Times increase and fall inside the checkpoint window.
+The runner collects all connected Characters until each event, changes that World Session, then
+continues to the original checkpoint deadline. It keeps declared replies and broadcasts from the
+new connection in that checkpoint. Undeclared login packets use the opening stream for
+`opening.window_ms` after the connection returns. Malformed declared packets remain differences.
+
+Variant declarations may add rules where the new situation requires them. `scope_packets` adds
+subject paths; timed variants accept `identities`, `clocks`, `tolerances` and `packet_timing`.
+The late observer accepts `watcher_movement` and `viewer_broadcasts` for its new streams and
+`exclude_self_for` to omit the viewer's own object updates. Both timed variants accept
+`unexpected_packets` for subject-filtered ambient opcodes. Reconnect `replies` must retain every base reply in order;
+it may add packets replayed during login. `values_only_assertions` restricts inherited object
+field assertions to VALUES updates so the reconnect CREATE does not count as a second purchase
+or state change. The comparator still compares the CREATE fields with the Golden Trace.
+Faction variants accept `unexpected_packets` and
+`unexpected_subjects`, which can add a subject selector to an inherited exception that lacks one.
+A variant cannot remove an inherited rule.
+
+The committed declarations make these comparison changes. Both taxi variants also permit
+creature emotes during the node query, restricted by subject GUID type.
+
+- The taxi late viewer connects at 40,000 ms near Sentinel Hill and sees the rider before landing.
+  The viewer's own login state is outside this check. The actor's VALUES, the viewer's peer VALUES,
+  and both recipients' peer CREATE fields remain compared. CREATE clocks and GUID words use
+  named clock and identity rules. Position sampling allows 8 units per coordinate, corresponding to 250 ms at
+  32 units per second. Elapsed spline time allows 250 ms and orientation allows 0.1 radians.
+  The spline points, destination, flags, mount and duration remain checked.
+- Taxi reconnect also occurs at 40,000 ms. It adds the resumed taxi packets to the reply sequence.
+  Only the resumed spline's start position and remaining duration receive the 8-unit and 250-ms
+  sampling bounds. The original spline stays under the base rules. The unit-flags VALUES delivery
+  bound accounts for one 1000-ms zone poll. Landing and dismount allow 400 ms,
+  covering 250 ms login time, a 100-ms landing tick and 50 ms delivery jitter. Fare and other
+  VALUES keep their inherited timing bounds.
+  The new login snapshot also includes seven allocated item GUID words, covered by identity rules.
+  `exclude_create_values` names only its skill-slot fields 718 through 1101, whose order changes
+  between logins. This range follows the build-5875 skill array, 128 slots of three words. It does
+  not cover mount, unit flags, money, movement or any VALUES update. Skill conformance needs a
+  separate scenario that compares skills by id.
+- The faction variant changes the arriving human warrior to an orc. Its inherited transport-notice
+  exception now decodes and requires a Character subject. A separate exception permits creature
+  emotes during that connection. Peer CREATE assertions remain required.
+- The bank observer adds no field exceptions. The spawn variant additionally requires exactly one
+  CREATE for the banker in the viewer's opening packets and compares its GUID, kind and object type.
+  The actor's opening packets bind that fixture by creature entry. Other opening fields stay
+  outside comparison. Bank-open replies must name the banker identified during opening in both
+  the base and generated scenarios.
+
+Record each generated file with `adapters/vmangos/reference.sh record-checked SCENARIO OUTPUT`.
+That command writes two independent scrubbed samples and compares them before retaining the
+Golden Trace. Register it in `src/catalogue.rs`. The catalogue test checks generated files,
+recorded hashes and membership; `strictness-gate` then measures every variant.
+
+Core tier 1 must pin a harness revision containing these entries and add each variant id to its
+Behavior's Feature Ledger `scenarios`. Add a tier 1 test for each id in
+`module/tests/conformance/tier1.rs` using `run_multi_scenario`, which calls
+`runner::run_multi_on`. `MultiOperatorTransport` in the adjacent `transport.rs` must prepare
+one fixture connection per named Character, keep its shared virtual clock across timed
+`connect` and `reconnect` events, and deliver packets to every connected recipient. The taxi
+test must read the actor's schema-4 fixtures when it builds the route and flight master. The
+bank test must install the friendly banker template used by the base test. Run each new tier 1
+test, then `./conformance/baseline <scenario>` to add its id, harness revision, scenario hash and rule
+signatures to `conformance/tier1-baseline.json`. The audit and scoreboard iterate the catalogue
+after the pin and ledger update. These harness recordings make no core tier 1 pass claim.
+For `spawn_beside_viewer`, core must connect the viewer before `prepare_fixtures` spawns the
+actor's creatures and retain the viewer's CREATE in its opening observations. The current
+`MultiOperatorTransport::prepare` prepares all fixtures before connecting Characters, so it
+needs that ordering change before this axis can pass tier 1.
+For the visibility faction variant, `seed_visibility_world` must accept the orc warrior fixture
+and install its start items as well as the human warrior's. It currently requires both Characters
+to be human warriors.
 
 ```toml
 [[steps]]

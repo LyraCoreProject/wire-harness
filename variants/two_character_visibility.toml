@@ -1,0 +1,6 @@
+[[variants]]
+axis = "opposite_faction"
+character = "arriving"
+race = "orc"
+unexpected_subjects = [{ name = "ambient_transport_notice", subject_guid_high = 0 }]
+unexpected_packets = [{ name = "ambient_creature_emote", reason = "Nearby creatures can emote while the opposite-faction Character connects. Peer CREATE packets remain required.", checkpoint = "arrival", opcode = 259, subject_guid_high = 61744 }]

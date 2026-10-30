@@ -280,6 +280,10 @@ pub fn decode(opcode: u16, body: &[u8]) -> Result<Packet> {
             fields.insert("counter".into(), Field::Unsigned(body.u32()?.into()));
             fields.extend(body.movement_info()?.1);
         }
+        0x00c5 => {
+            fields.insert("guid".into(), body.packed_guid()?);
+            fields.extend(body.movement_info()?.1);
+        }
         0x013c => {
             fields.insert(
                 "guid".into(),

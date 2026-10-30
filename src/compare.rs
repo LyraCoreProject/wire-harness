@@ -1,9 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::scenario::{identifier, Observation, Scenario, SessionAction, Stream};
+use crate::scenario::{
+    identifier, ClientPacket, FixtureVerb, Observation, Scenario, SessionAction, Stream, Target,
+};
 use crate::trace::{GoldenTrace, Header, RecordedField as Field, RecordedPacket, Trace};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -79,6 +81,32 @@ pub struct FieldRule {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ToleranceRule {
+    pub name: String,
+    pub reason: String,
+    #[serde(default)]
+    pub character: Option<String>,
+    pub opcode: u16,
+    pub path: Vec<String>,
+    #[serde(default)]
+    pub packet_index: Option<usize>,
+    pub tolerance: f64,
+}
+
+impl ToleranceRule {
+    fn matches(&self, expected: &Field, actual: &Field) -> bool {
+        match (expected, actual) {
+            (Field::TimeMs(e), Field::TimeMs(a)) | (Field::Unsigned(e), Field::Unsigned(a)) => {
+                e.abs_diff(*a) as f64 <= self.tolerance
+            }
+            (Field::Float(e), Field::Float(a)) => (e - a).abs() <= self.tolerance,
+            _ => false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ClockRule {
     pub name: String,
     pub reason: String,
@@ -91,6 +119,26 @@ pub struct ClockRule {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct CreateValueExclusion {
+    pub name: String,
+    pub reason: String,
+    pub character: String,
+    pub first: u16,
+    pub last: u16,
+}
+
+impl CreateValueExclusion {
+    pub(crate) fn contains(&self, character: Option<&str>, field: &str) -> bool {
+        character == Some(self.character.as_str())
+            && field
+                .strip_prefix("field_")
+                .and_then(|field| field.parse::<u16>().ok())
+                .is_some_and(|field| (self.first..=self.last).contains(&field))
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CharacterScope {
     pub name: String,
     pub reason: String,
@@ -98,6 +146,10 @@ pub struct CharacterScope {
     pub all_characters: bool,
     #[serde(default)]
     pub creates_only: bool,
+    #[serde(default)]
+    pub exclude_self_for: Vec<String>,
+    #[serde(default)]
+    pub exclude_create_values: Vec<CreateValueExclusion>,
     pub packets: Vec<PacketSubjects>,
 }
 
@@ -113,6 +165,8 @@ pub struct PacketSubjects {
 pub struct PacketTimingRule {
     #[serde(default)]
     pub values_only: bool,
+    #[serde(default)]
+    pub creates_only: bool,
     #[serde(default)]
     pub path: Vec<String>,
     pub name: String,
@@ -133,6 +187,8 @@ pub struct EquivalenceRules {
     #[serde(default)]
     pub data_fields: Vec<FieldRule>,
     #[serde(default)]
+    pub tolerances: Vec<ToleranceRule>,
+    #[serde(default)]
     pub packet_timing: Vec<PacketTimingRule>,
     #[serde(default)]
     pub character_scope: Option<CharacterScope>,
@@ -147,7 +203,7 @@ pub struct EquivalenceRules {
 impl EquivalenceRules {
     pub fn validate(&self) -> Result<()> {
         let mut paths = BTreeSet::new();
-        let mut names = BTreeSet::new();
+        let mut names = BTreeSet::from(["time_tolerance_ms", "stream_interleaving"]);
         for rule in &self.random {
             ensure!(
                 identifier(&rule.name) && names.insert(&rule.name),
@@ -177,6 +233,11 @@ impl EquivalenceRules {
             .chain(&self.data_fields)
             .map(|r| (&r.name, &r.reason, r.opcode, &r.path, &r.character))
             .chain(
+                self.tolerances
+                    .iter()
+                    .map(|r| (&r.name, &r.reason, r.opcode, &r.path, &r.character)),
+            )
+            .chain(
                 self.clocks
                     .iter()
                     .map(|r| (&r.name, &r.reason, r.opcode, &r.path, &r.character)),
@@ -204,11 +265,25 @@ impl EquivalenceRules {
             );
         }
         ensure!(
+            self.tolerances
+                .iter()
+                .all(|rule| rule.tolerance.is_finite() && rule.tolerance >= 0.0),
+            "invalid field tolerance"
+        );
+        ensure!(
             paths
                 .iter()
                 .all(|(opcode, path, character)| character.is_none()
                     || !paths.contains(&(*opcode, path.clone(), None))),
             "general and Character field rules overlap"
+        );
+        ensure!(
+            self.tolerances
+                .iter()
+                .all(|rule| self.character_scope.is_none()
+                    || rule.opcode != 169
+                    || rule.packet_index.is_none()),
+            "scoped object tolerances cannot select a packet index"
         );
         let mut timed = BTreeSet::new();
         for rule in &self.packet_timing {
@@ -238,6 +313,16 @@ impl EquivalenceRules {
                 "values_only timing requires an object VALUES field path"
             );
             ensure!(
+                !rule.creates_only
+                    || (rule.opcode == 0x00a9
+                        && !rule.values_only
+                        && rule.path.len() == 3
+                        && rule.path[0] == "objects"
+                        && rule.path[1].parse::<usize>().is_ok()
+                        && rule.path[2] == "kind"),
+                "creates_only timing requires an object kind field path"
+            );
+            ensure!(
                 timed.insert((rule.opcode, rule.path.clone(), rule.character.clone())),
                 "duplicate packet timing rule"
             );
@@ -257,6 +342,28 @@ impl EquivalenceRules {
             ensure!(
                 !rule.reason.trim().is_empty() && rule.reason.len() <= 512,
                 "rule needs a reason"
+            );
+            for excluded in &rule.exclude_create_values {
+                ensure!(
+                    identifier(&excluded.name) && names.insert(&excluded.name),
+                    "invalid or duplicate rule name"
+                );
+                ensure!(
+                    !excluded.reason.trim().is_empty() && excluded.reason.len() <= 512,
+                    "CREATE value exclusion needs a reason"
+                );
+                ensure!(
+                    identifier(&excluded.character)
+                        && excluded.first <= excluded.last
+                        && excluded.last < 2048,
+                    "invalid CREATE value exclusion"
+                );
+            }
+            let recipients = &rule.exclude_self_for;
+            ensure!(
+                recipients.iter().all(|id| identifier(id))
+                    && recipients.iter().collect::<BTreeSet<_>>().len() == recipients.len(),
+                "invalid or duplicate scope Character"
             );
             let mut opcodes = BTreeSet::new();
             for packet in &rule.packets {
@@ -361,6 +468,7 @@ struct Comparator<'a> {
     clock_origins: BTreeMap<(usize, Option<String>), (u32, u32)>,
     used_clocks: BTreeSet<usize>,
     used_data_fields: BTreeSet<usize>,
+    used_tolerances: BTreeSet<usize>,
     used_timing: BTreeSet<usize>,
     unmatched_opcodes: BTreeSet<(Option<String>, u16)>,
     unmatched_fields: BTreeSet<(Option<String>, u16, Vec<String>)>,
@@ -543,6 +651,71 @@ fn subject(fields: &BTreeMap<String, Field>) -> Option<u64> {
     None
 }
 
+fn opening_creature_guid(trace: &Trace, character: Option<&str>, entry: u32) -> Option<u64> {
+    let mut matches = trace
+        .packets
+        .iter()
+        .filter(|packet| {
+            packet.checkpoint == "opening"
+                && packet.character.as_deref() == character
+                && packet.opcode == 169
+        })
+        .flat_map(|packet| match packet.fields.get("objects") {
+            Some(Field::List(objects)) => objects.iter().collect::<Vec<_>>(),
+            _ => Vec::new(),
+        })
+        .filter_map(|object| match object {
+            Field::Object(object) => match (object.get("guid"), object.get("values")) {
+                (Some(Field::Guid(guid)), Some(Field::Object(values)))
+                    if values.get("field_3") == Some(&Field::Unsigned(u64::from(entry)))
+                        && matches!(object.get("kind"), Some(Field::Unsigned(2 | 3))) =>
+                {
+                    Some(*guid)
+                }
+                _ => None,
+            },
+            _ => None,
+        });
+    let guid = matches.next()?;
+    matches.next().is_none().then_some(guid)
+}
+
+fn opening_fixture_create(
+    trace: &Trace,
+    recipient: &str,
+    guid: u64,
+) -> Option<BTreeMap<String, Field>> {
+    let mut matches = trace
+        .packets
+        .iter()
+        .filter(|packet| {
+            packet.checkpoint == "opening"
+                && packet.character.as_deref() == Some(recipient)
+                && packet.opcode == 169
+        })
+        .filter_map(|packet| match packet.fields.get("objects") {
+            Some(Field::List(objects)) => Some(objects),
+            _ => None,
+        })
+        .flat_map(|objects| objects.iter())
+        .filter_map(|object| match object {
+            Field::Object(fields)
+                if fields.get("guid") == Some(&Field::Guid(guid))
+                    && matches!(fields.get("kind"), Some(Field::Unsigned(2 | 3)))
+                    && matches!(fields.get("object_type"), Some(Field::Unsigned(_))) =>
+            {
+                Some(BTreeMap::from([
+                    ("guid".into(), fields["guid"].clone()),
+                    ("kind".into(), fields["kind"].clone()),
+                    ("object_type".into(), fields["object_type"].clone()),
+                ]))
+            }
+            _ => None,
+        });
+    let create = matches.next()?;
+    matches.next().is_none().then_some(create)
+}
+
 impl Comparator<'_> {
     fn unmatched_opcode(&self, character: &Option<String>, opcode: u16) -> bool {
         self.unmatched_opcodes.iter().any(|(recipient, candidate)| {
@@ -569,9 +742,11 @@ impl Comparator<'_> {
         if expected == 0 || actual == 0 {
             expected == actual
         } else {
-            self.expected_guids
-                .get(&expected)
-                .map_or(true, |mapped| *mapped == actual)
+            expected >> 48 == actual >> 48
+                && self
+                    .expected_guids
+                    .get(&expected)
+                    .map_or(true, |mapped| *mapped == actual)
                 && self
                     .actual_guids
                     .get(&actual)
@@ -634,6 +809,29 @@ impl Comparator<'_> {
     }
 
     fn field(&mut self, opcode: u16, location: &Location, expected: &Field, actual: &Field) {
+        if let Some((index, rule)) = self.rules.tolerances.iter().enumerate().find(|(_, rule)| {
+            rule.opcode == opcode
+                && rule.path == location.path
+                && rule
+                    .packet_index
+                    .map_or(true, |index| location.packet_index == Some(index))
+                && rule
+                    .character
+                    .as_ref()
+                    .map_or(true, |id| location.character.as_ref() == Some(id))
+        }) {
+            self.used_tolerances.insert(index);
+            if !rule.matches(expected, actual) {
+                self.difference(
+                    location,
+                    &rule.name,
+                    &rule.reason,
+                    Some(expected),
+                    Some(actual),
+                );
+            }
+            return;
+        }
         if let Some((index, rule)) = self.rules.data_fields.iter().enumerate().find(|(_, rule)| {
             rule.opcode == opcode
                 && rule.path == location.path
@@ -756,17 +954,11 @@ impl Comparator<'_> {
         }
         match (expected, actual) {
             (Field::Guid(e), Field::Guid(a)) => {
-                let mismatch = if *e == 0 || *a == 0 {
-                    e != a
-                } else {
-                    self.expected_guids.get(e).is_some_and(|mapped| mapped != a)
-                        || self.actual_guids.get(a).is_some_and(|mapped| mapped != e)
-                };
-                if mismatch {
+                if !self.guid_matches(*e, *a) {
                     self.difference(
                         location,
                         "guid_bijection",
-                        "GUID mapping must be consistent and one-to-one; zero maps only to zero",
+                        "GUID mapping must preserve type and be one-to-one; zero maps only to zero",
                         Some(expected),
                         Some(actual),
                     );
@@ -943,6 +1135,11 @@ pub(crate) fn scoped_trace(
                 || (scope.all_characters
                     && trace.header.characters.values().any(|value| *value == guid))
         };
+        let exclude_self = scope.creates_only
+            || packet
+                .character
+                .as_ref()
+                .is_some_and(|id| scope.exclude_self_for.contains(id));
         let declared_stream = scenario
             .steps
             .iter()
@@ -991,7 +1188,7 @@ pub(crate) fn scoped_trace(
                     let mut object = object.clone();
                     if let Field::Object(fields) = &mut object {
                         if let Some(Field::Guid(guid)) = fields.get("guid") {
-                            if !in_scope(*guid) || (scope.creates_only && *guid == character_guid) {
+                            if !in_scope(*guid) || (exclude_self && *guid == character_guid) {
                                 continue;
                             }
                         } else if let Some(Field::List(guids)) = fields.get_mut("guids") {
@@ -1002,12 +1199,19 @@ pub(crate) fn scoped_trace(
                                 continue;
                             }
                         }
-                        if scope.creates_only {
-                            if !matches!(fields.get("kind"), Some(Field::Unsigned(2 | 3))) {
-                                continue;
-                            }
-                            result.packets.push(object_packet(packet, object));
+                        if scope.creates_only
+                            && !matches!(fields.get("kind"), Some(Field::Unsigned(2 | 3)))
+                        {
                             continue;
+                        }
+                        if matches!(fields.get("kind"), Some(Field::Unsigned(2 | 3))) {
+                            if let Some(Field::Object(values)) = fields.get_mut("values") {
+                                values.retain(|name, _| {
+                                    !scope.exclude_create_values.iter().any(|rule| {
+                                        rule.contains(packet.character.as_deref(), name)
+                                    })
+                                });
+                            }
                         }
                         if fields.get("kind") == Some(&Field::Unsigned(0)) {
                             if let Some(Field::Object(values)) = fields.get("values") {
@@ -1048,7 +1252,7 @@ fn object_packet(packet: &RecordedPacket, object: Field) -> RecordedPacket {
     packet
 }
 
-fn update_field(packet: &RecordedPacket) -> Option<String> {
+pub(crate) fn update_field(packet: &RecordedPacket) -> Option<String> {
     if packet.opcode != 0x00a9 {
         return None;
     }
@@ -1107,6 +1311,11 @@ impl PacketTimingRule {
                     &packet.fields,
                     &[self.path[0].clone(), self.path[1].clone(), "kind".into()],
                 ) == Some(&Field::Unsigned(0)))
+            && (!self.creates_only
+                || matches!(
+                    field_at(&packet.fields, &self.path),
+                    Some(Field::Unsigned(2 | 3))
+                ))
     }
 }
 
@@ -1198,11 +1407,18 @@ impl Comparator<'_> {
                 if packet.checkpoint != "opening" {
                     let allowed = scenario.steps.iter().any(|step| {
                         step.id == packet.checkpoint
-                            && step.character == packet.character
-                            && matches!(
-                                step.action.as_ref(),
-                                Some(SessionAction::Connect | SessionAction::Reconnect)
-                            )
+                            && ((step.character == packet.character
+                                && matches!(
+                                    step.action.as_ref(),
+                                    Some(SessionAction::Connect | SessionAction::Reconnect)
+                                ))
+                                || step.events.iter().any(|event| {
+                                    packet.character.as_deref() == Some(event.character.as_str())
+                                        && matches!(
+                                            event.action,
+                                            SessionAction::Connect | SessionAction::Reconnect
+                                        )
+                                }))
                             && step
                                 .checkpoint
                                 .for_character(packet.character.as_deref().unwrap_or(""))
@@ -1408,6 +1624,15 @@ impl Comparator<'_> {
                                     && packet.opcode == assertion.opcode
                                     && field_at(&packet.fields, &assertion.path)
                                         == Some(&assertion.value)
+                                    && (!assertion.values_only
+                                        || field_at(
+                                            &packet.fields,
+                                            &[
+                                                "objects".into(),
+                                                assertion.path[1].clone(),
+                                                "kind".into(),
+                                            ],
+                                        ) == Some(&Field::Unsigned(0)))
                             })
                             .count();
                         if count != assertion.count {
@@ -1516,6 +1741,7 @@ fn comparator(rules: &EquivalenceRules, recorded_at: (u64, u64)) -> Comparator<'
         clock_origins: BTreeMap::new(),
         used_clocks: BTreeSet::new(),
         used_data_fields: BTreeSet::new(),
+        used_tolerances: BTreeSet::new(),
         unmatched_opcodes: BTreeSet::new(),
         unmatched_fields: BTreeSet::new(),
         used_timing: BTreeSet::new(),
@@ -1635,10 +1861,6 @@ pub(crate) fn compare_with_rules(
         );
         return comparator.finish(deviations);
     }
-    let expected = scoped_trace(scenario, expected, rules)?;
-    let actual = scoped_trace(scenario, actual, rules)?;
-    let expected_streams = comparator.packets(scenario, &expected, true, true);
-    let actual_streams = comparator.packets(scenario, &actual, false, false);
     if expected.header.character_guid != 0 && actual.header.character_guid != 0 {
         comparator
             .expected_guids
@@ -1674,6 +1896,123 @@ pub(crate) fn compare_with_rules(
             );
         }
     }
+    for step in &scenario.steps {
+        let Some(ClientPacket::BankerActivate {
+            target: Target::Fixture(id),
+        }) = &step.send
+        else {
+            continue;
+        };
+        let character = step.character.as_deref();
+        let fixtures = if let Some(character) = character {
+            &scenario
+                .characters
+                .iter()
+                .find(|item| item.id == character)
+                .context("bank actor")?
+                .fixtures
+        } else {
+            &scenario.fixtures
+        };
+        let entry = fixtures
+            .iter()
+            .find_map(|fixture| match fixture {
+                FixtureVerb::Creature {
+                    id: fixture_id,
+                    entry,
+                    ..
+                } if fixture_id == id => Some(*entry),
+                _ => None,
+            })
+            .context("banker fixture")?;
+        let expected_guid = opening_creature_guid(expected, character, entry);
+        let actual_guid = opening_creature_guid(actual, character, entry);
+        let location = Location {
+            character: character.map(str::to_owned),
+            checkpoint: step.id.clone(),
+            stream: Some(Stream::Reply(step.id.clone())),
+            packet_index: None,
+            path: vec!["guid".into()],
+            opcode: Some(440),
+        };
+        match (expected_guid, actual_guid) {
+            (Some(expected_guid), Some(actual_guid)) => {
+                comparator.field(
+                    440,
+                    &location,
+                    &Field::Guid(expected_guid),
+                    &Field::Guid(actual_guid),
+                );
+                for (trace, guid) in [(expected, expected_guid), (actual, actual_guid)] {
+                    for packet in trace.packets.iter().filter(|packet| {
+                        packet.checkpoint == step.id
+                            && packet.character.as_deref() == character
+                            && packet.opcode == 440
+                    }) {
+                        if packet.fields.get("guid") != Some(&Field::Guid(guid)) {
+                            comparator.difference(
+                                &location,
+                                "fixture_guid",
+                                "bank reply must name its banker fixture",
+                                Some(&Field::Guid(guid)),
+                                packet.fields.get("guid"),
+                            );
+                        }
+                    }
+                }
+            }
+            _ => comparator.difference(
+                &location,
+                "fixture_guid",
+                "The bank reply must name the banker created during opening",
+                expected_guid.map(Field::Guid).as_ref(),
+                actual_guid.map(Field::Guid).as_ref(),
+            ),
+        }
+    }
+    for create in &scenario.opening.fixture_creates {
+        let actor = scenario
+            .characters
+            .iter()
+            .find(|character| character.id == create.actor)
+            .context("opening CREATE actor")?;
+        let entry = actor
+            .fixtures
+            .iter()
+            .find_map(|fixture| match fixture {
+                FixtureVerb::Creature { id, entry, .. } if *id == create.fixture => Some(*entry),
+                _ => None,
+            })
+            .context("opening CREATE fixture")?;
+        let expected_create = opening_creature_guid(expected, Some(&create.actor), entry)
+            .and_then(|guid| opening_fixture_create(expected, &create.recipient, guid));
+        let actual_create = opening_creature_guid(actual, Some(&create.actor), entry)
+            .and_then(|guid| opening_fixture_create(actual, &create.recipient, guid));
+        let location = Location {
+            character: Some(create.recipient.clone()),
+            checkpoint: "opening".into(),
+            stream: Some(Stream::Opening),
+            packet_index: None,
+            path: vec!["objects".into(), create.fixture.clone()],
+            opcode: Some(169),
+        };
+        match (&expected_create, &actual_create) {
+            (Some(expected_create), Some(actual_create)) => {
+                comparator.fields(169, &location, expected_create, actual_create)
+            }
+            _ => comparator.difference(
+                &location,
+                "opening_fixture_create",
+                "viewer must receive the creature fixture CREATE during opening",
+                expected_create.map(Field::Object).as_ref(),
+                actual_create.map(Field::Object).as_ref(),
+            ),
+        }
+    }
+    let expected = scoped_trace(scenario, expected, rules)?;
+    let actual = scoped_trace(scenario, actual, rules)?;
+    let expected_streams = comparator.packets(scenario, &expected, true, true);
+    let actual_streams = comparator.packets(scenario, &actual, false, false);
     let mut keys: Vec<_> = expected_streams
         .keys()
         .chain(actual_streams.keys())
@@ -1715,7 +2054,7 @@ pub(crate) fn compare_with_rules(
                 (Some(e), Some(a))
                     if e.stream != Stream::Malformed && a.stream != Stream::Malformed =>
                 {
-                    if let Some((index, rule)) = rules
+                    if let Some((_, rule)) = rules
                         .packet_timing
                         .iter()
                         .enumerate()
@@ -1726,9 +2065,11 @@ pub(crate) fn compare_with_rules(
                                 rule.applies(e) || rule.applies(a)
                             }
                         })
+                        .inspect(|(index, _)| {
+                            comparator.used_timing.insert(*index);
+                        })
                         .max_by_key(|(_, rule)| rule.path.len())
                     {
-                        comparator.used_timing.insert(index);
                         if !matches!((e.received_after_ms, a.received_after_ms), (Some(e), Some(a)) if e.abs_diff(a) <= rule.tolerance_ms)
                         {
                             comparator.difference(
@@ -1754,6 +2095,12 @@ pub(crate) fn compare_with_rules(
                         .map(|rule| (rule.opcode, &rule.path))
                         .chain(rules.clocks.iter().map(|rule| (rule.opcode, &rule.path)))
                         .chain(rules.random.iter().map(|rule| (rule.opcode, &rule.path)))
+                        .chain(
+                            rules
+                                .tolerances
+                                .iter()
+                                .map(|rule| (rule.opcode, &rule.path)),
+                        )
                     {
                         if opcode == packet.opcode && field_at(&packet.fields, path).is_some() {
                             comparator.unmatched_fields.insert((
@@ -1886,6 +2233,26 @@ pub(crate) fn compare_with_rules(
                 },
                 &rule.name,
                 "data field rule did not match a compared field",
+                None,
+                None,
+            );
+        }
+    }
+    for (index, rule) in rules.tolerances.iter().enumerate() {
+        if !comparator.used_tolerances.contains(&index)
+            && !comparator.unmatched_field(&rule.character, rule.opcode, &rule.path)
+        {
+            comparator.difference(
+                &Location {
+                    character: rule.character.clone(),
+                    checkpoint: String::new(),
+                    stream: None,
+                    packet_index: None,
+                    path: rule.path.clone(),
+                    opcode: Some(rule.opcode),
+                },
+                &rule.name,
+                "tolerance rule did not match a compared field",
                 None,
                 None,
             );

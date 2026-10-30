@@ -249,6 +249,7 @@ pub fn run_multi_on(
         })
         .collect();
     for step in &scenario.steps {
+        let mut opening_until = BTreeMap::new();
         let actor = step
             .character
             .as_deref()
@@ -319,6 +320,7 @@ pub fn run_multi_on(
                             started + Duration::from_millis(elapsed),
                             started,
                             &mut observations,
+                            &opening_until,
                         )?;
                         let fraction = elapsed as f32 / duration_ms as f32;
                         let at = Position {
@@ -342,6 +344,7 @@ pub fn run_multi_on(
                         started + Duration::from_millis(duration_ms),
                         started,
                         &mut observations,
+                        &opening_until,
                     )?;
                     transport.send(
                         actor,
@@ -352,27 +355,36 @@ pub fn run_multi_on(
                 }
             }
         }
-        let mut opening = transport.take_opening(actor)?;
-        for mut observed in opening.drain(..) {
-            observed.character = Some(actor.to_owned());
-            observed.checkpoint = step.id.clone();
-            observed.stream = step
-                .checkpoint
-                .for_character(actor)
-                .unwrap()
-                .stream(&step.id, observed.packet.opcode);
-            if observed.stream == crate::scenario::Stream::Unexpected {
-                observed.stream = crate::scenario::Stream::Opening;
+        take_step_opening(step, transport, actor, started, &mut observations)?;
+        for event in &step.events {
+            collect_multi(
+                scenario,
+                step,
+                transport,
+                started + Duration::from_millis(event.after_ms),
+                started,
+                &mut observations,
+                &opening_until,
+            )?;
+            match event.action {
+                SessionAction::Connect => transport.connect(&event.character)?,
+                SessionAction::Reconnect => {
+                    transport.disconnect(&event.character)?;
+                    transport.connect(&event.character)?;
+                }
+                _ => unreachable!("validated timed event"),
             }
-            observed.received_after_ms = Some(
-                transport
-                    .now()
-                    .checked_sub(started)
-                    .context("clock moved backwards")?
-                    .as_millis()
-                    .try_into()?,
+            opening_until.insert(
+                event.character.clone(),
+                transport.now() + Duration::from_millis(scenario.opening.window_ms),
             );
-            observations.push(observed);
+            take_step_opening(
+                step,
+                transport,
+                &event.character,
+                started,
+                &mut observations,
+            )?;
         }
         collect_multi(
             scenario,
@@ -381,9 +393,41 @@ pub fn run_multi_on(
             deadline,
             started,
             &mut observations,
+            &opening_until,
         )?;
     }
     Ok(observations)
+}
+
+fn take_step_opening(
+    step: &crate::scenario::Step,
+    transport: &mut impl MultiTransport,
+    character: &str,
+    started: Duration,
+    observations: &mut Vec<Observation>,
+) -> Result<()> {
+    for mut observed in transport.take_opening(character)? {
+        observed.character = Some(character.to_owned());
+        observed.checkpoint = step.id.clone();
+        observed.stream = step
+            .checkpoint
+            .for_character(character)
+            .context("missing Character checkpoint")?
+            .stream(&step.id, observed.packet.opcode);
+        if observed.stream == crate::scenario::Stream::Unexpected {
+            observed.stream = crate::scenario::Stream::Opening;
+        }
+        observed.received_after_ms = Some(
+            transport
+                .now()
+                .checked_sub(started)
+                .context("clock moved backwards")?
+                .as_millis()
+                .try_into()?,
+        );
+        observations.push(observed);
+    }
+    Ok(())
 }
 
 fn movement(at: &Position, orientation: f32, timestamp: u32, forward: bool) -> Vec<u8> {
@@ -487,6 +531,7 @@ fn collect_multi(
     deadline: Duration,
     started: Duration,
     observations: &mut Vec<Observation>,
+    opening_until: &BTreeMap<String, Duration>,
 ) -> Result<()> {
     let mut frames = 0;
     loop {
@@ -511,8 +556,8 @@ fn collect_multi(
                     transport,
                     started,
                     observations,
-                    character,
-                    frame,
+                    (&character.id, frame),
+                    opening_until,
                 )?;
                 frames += 1;
                 ready = true;
@@ -565,8 +610,8 @@ fn collect_multi(
                     transport,
                     started,
                     observations,
-                    character,
-                    frame,
+                    (&character.id, frame),
+                    opening_until,
                 )?;
                 frames += 1;
                 received = true;
@@ -591,18 +636,25 @@ fn record_multi_frame(
     transport: &mut impl MultiTransport,
     started: Duration,
     observations: &mut Vec<Observation>,
-    character: &crate::scenario::ScenarioCharacter,
-    (opcode, body): (u16, Vec<u8>),
+    (character, (opcode, body)): (&str, (u16, Vec<u8>)),
+    opening_until: &BTreeMap<String, Duration>,
 ) -> Result<()> {
     let mut observation = Observation::from_frame_for_rules(
         step,
-        Some(&character.id),
+        Some(character),
         opcode,
         &body,
         &scenario.rules.unexpected_packets,
     );
     let received_at = transport.now();
     ensure!(received_at >= started, "transport clock moved backwards");
+    if opening_until
+        .get(character)
+        .is_some_and(|until| received_at <= *until)
+        && matches!(observation.stream, crate::scenario::Stream::Unexpected)
+    {
+        observation.stream = crate::scenario::Stream::Opening;
+    }
     observation.received_after_ms = Some(
         received_at
             .checked_sub(started)
@@ -622,11 +674,11 @@ fn record_multi_frame(
             fields.get("counter"),
             fields.get("timestamp"),
         ) {
-            if *guid == transport.character_guid(&character.id)? {
+            if *guid == transport.character_guid(character)? {
                 let mut ack = guid.to_le_bytes().to_vec();
                 ack.extend(u32::try_from(*counter)?.to_le_bytes());
                 ack.extend(u32::try_from(*timestamp)?.to_le_bytes());
-                transport.send(&character.id, 0x00c7, &ack)?;
+                transport.send(character, 0x00c7, &ack)?;
             }
         }
     }

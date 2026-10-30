@@ -30,6 +30,14 @@ fn header(scenario: &str, now: u64) -> Header {
     .unwrap()
 }
 
+#[test]
+fn schema_four_trace_accepts_one_named_character_for_reconnect() {
+    let mut header = header(include_str!("../scenarios/connection_identity.toml"), 1000);
+    header.schema_version = 4;
+    header.characters.insert("actor".into(), 42);
+    assert!(Trace::record(header, &[]).is_ok());
+}
+
 fn packet(opcode: u16, value: Field) -> Observation {
     let stream = match opcode {
         463 => Stream::Broadcast("clock".into()),
@@ -929,4 +937,80 @@ fn swapped_unmapped_subjects_establish_pairs_in_stream_order() {
     let report = compare_observations(&expected, &actual, 1000, &[]).unwrap();
     assert_eq!(report.differences.len(), 1);
     assert_eq!(report.differences[0].rule, "guid_bijection");
+}
+
+#[test]
+fn field_tolerances_keep_bounds_types_and_other_packet_indices_strict() {
+    let rules = "[[rules.tolerances]]\nname = 'resumed_duration'\nreason = 'Reconnect samples at a later map tick.'\nopcode = 477\npath = ['value']\npacket_index = 1\ntolerance = 250.0\n";
+    let expected = [Field::TimeMs(1000), Field::TimeMs(500)];
+    assert!(matches(
+        &expected,
+        &[Field::TimeMs(1000), Field::TimeMs(750)],
+        rules
+    ));
+    assert!(!matches(
+        &expected,
+        &[Field::TimeMs(1000), Field::TimeMs(751)],
+        rules
+    ));
+    assert!(!matches(
+        &expected,
+        &[Field::TimeMs(1250), Field::TimeMs(500)],
+        rules
+    ));
+    assert!(!matches(
+        &expected,
+        &[Field::TimeMs(1000), Field::Unsigned(500)],
+        rules
+    ));
+}
+
+#[test]
+fn named_rules_cannot_shadow_builtin_strictness_rules() {
+    for name in ["time_tolerance_ms", "stream_interleaving"] {
+        let rules = format!("[[rules.identities]]\nname = '{name}'\nreason = 'Allocated id.'\nopcode = 477\npath = ['value']\n");
+        assert!(Scenario::parse(&scenario(&[477], &rules)).is_err());
+    }
+}
+
+#[test]
+fn guid_mapping_preserves_type_bits_when_the_counter_changes() {
+    let creature = Field::Guid(0xf130_0001_0000_0001);
+    assert!(matches(
+        std::slice::from_ref(&creature),
+        &[Field::Guid(0xf130_0001_0000_0002)],
+        ""
+    ));
+    for guid in [2, u64::MAX] {
+        assert!(!matches(
+            std::slice::from_ref(&creature),
+            &[Field::Guid(guid)],
+            ""
+        ));
+    }
+}
+
+#[test]
+fn field_timing_override_keeps_a_matching_default_rule_valid() {
+    let rules = "[[rules.packet_timing]]\nname = 'default_delivery'\nreason = 'Default bound.'\nopcode = 477\ntolerance_ms = 10\n[[rules.packet_timing]]\nname = 'field_delivery'\nreason = 'This field permits a later delivery.'\nopcode = 477\npath = ['value']\ntolerance_ms = 400\n";
+    let text = scenario(&[477], rules);
+    let mut observed = vec![packet(477, Field::Unsigned(7))];
+    observed[0].received_after_ms = Some(100);
+    let reference = golden(&text, &observed, 1000);
+    observed[0].received_after_ms = Some(500);
+    assert!(compare_observations(&reference, &observed, 1000, &[])
+        .unwrap()
+        .is_match());
+    observed[0].received_after_ms = Some(501);
+    assert!(!compare_observations(&reference, &observed, 1000, &[])
+        .unwrap()
+        .is_match());
+    let typo = text.replace("path = ['value']", "path = ['missing']");
+    observed[0].received_after_ms = Some(100);
+    let reference = golden(&typo, &observed, 1000);
+    assert!(compare_observations(&reference, &observed, 1000, &[])
+        .unwrap()
+        .differences
+        .iter()
+        .any(|difference| difference.rule == "field_delivery"));
 }
