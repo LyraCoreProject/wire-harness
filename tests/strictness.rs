@@ -91,6 +91,29 @@ fn pre37_bank_character_movement_is_unexplained() {
 }
 
 #[test]
+fn bank_reply_must_name_the_banker_created_during_opening() {
+    let golden = wire_client::catalogue::get("bank_slot_purchase").unwrap();
+    for guid in [golden.trace().header.character_guid, 999999] {
+        let mut candidate = golden.trace().clone();
+        let reply = candidate
+            .packets
+            .iter_mut()
+            .find(|packet| packet.checkpoint == "open" && packet.opcode == 440)
+            .unwrap();
+        reply
+            .fields
+            .insert("guid".into(), RecordedField::Guid(guid));
+        assert!(!compare(&golden, &candidate, &[]).unwrap().is_match());
+        let invalid = GoldenTrace::new(
+            include_str!("../scenarios/bank_slot_purchase.toml"),
+            candidate.clone(),
+        )
+        .unwrap();
+        assert!(!compare(&invalid, &candidate, &[]).unwrap().is_match());
+    }
+}
+
+#[test]
 fn pre39_visibility_detects_peer_create_max_health() {
     let golden = historical(
         include_str!("fixtures/strictness/visibility_pre39.toml"),
@@ -194,4 +217,31 @@ fn pong_timing_bound_is_mutated() {
                 .any(|item| item.as_str()
                     == Some(&format!("packet_{index}/received_after_ms/at_bound"))))
     );
+}
+
+#[test]
+fn field_time_tolerance_explains_mutations_inside_the_fallback_bound() {
+    let entry = wire_client::catalogue::ENTRIES
+        .iter()
+        .find(|entry| entry.id == "connection_identity")
+        .unwrap();
+    let scenario = format!("{}\n[[rules.tolerances]]\nname = 'sample_duration'\nreason = 'Sampling may vary by 250 ms.'\nopcode = 477\npath = ['duration']\ntolerance = 250.0\n", entry.scenario);
+    let mut trace = Trace::parse(entry.trace.as_bytes()).unwrap();
+    trace.header.scenario_sha256 = Sha256Digest::of(scenario.as_bytes());
+    let index = trace
+        .packets
+        .iter()
+        .position(|packet| packet.opcode == 477)
+        .unwrap();
+    trace.packets[index]
+        .fields
+        .insert("duration".into(), RecordedField::TimeMs(1000));
+    let report = analyze(&GoldenTrace::new(&scenario, trace).unwrap()).unwrap();
+    for suffix in ["plus_one", "minus_one", "at_bound"] {
+        assert!(report.excused_mutations["sample_duration"]
+            .contains(&format!("packet_{index}/field_duration/{suffix}")));
+    }
+    assert!(report
+        .detected_mutations
+        .contains(&format!("packet_{index}/field_duration/past_bound")));
 }

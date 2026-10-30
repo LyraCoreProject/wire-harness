@@ -1,0 +1,150 @@
+# Generated from bank_slot_purchase and its variant declaration.
+# Base SHA-256: d73644183fd921f24df5f209ffe3f79ca4573ff04ea8e41d478a768c98ccf358
+behavior = "bank_slot_purchase"
+id = "bank_slot_purchase__observer"
+schema_version = 4
+
+[[characters]]
+id = "actor"
+
+[[characters.fixtures]]
+class = "warrior"
+level = 1
+name = "Banktester"
+race = "human"
+verb = "character"
+
+[characters.fixtures.at]
+map = 0
+orientation = 0.0
+x = -8949.95
+y = -132.493
+z = 83.5312
+
+[[characters.fixtures]]
+copper = 10000
+verb = "money"
+
+[[characters.fixtures]]
+entry = 5099
+id = "banker"
+offset = 2.0
+verb = "creature"
+
+[[characters]]
+id = "viewer"
+
+[[characters.fixtures]]
+class = "warrior"
+level = 1
+name = "Bankwatcher"
+race = "human"
+verb = "character"
+
+[characters.fixtures.at]
+map = 0
+orientation = 0.0
+x = -8948.0
+y = -132.493
+z = 83.5312
+
+[opening]
+window_ms = 1000
+
+[rules]
+time_tolerance_ms = 100
+wall_clock_tolerance_ms = 2000
+
+[[rules.unexpected_packets]]
+checkpoint = "open"
+name = "ambient_movement_during_open"
+opcode = 221
+reason = "Nearby creature movement is independent of opening the bank."
+subject_guid_high = 61744
+
+[[rules.unexpected_packets]]
+checkpoint = "buy_slot"
+name = "ambient_movement_during_buy_slot"
+opcode = 221
+reason = "Nearby creature movement is independent of buying the bank slot."
+subject_guid_high = 61744
+
+[[steps]]
+character = "actor"
+id = "open"
+
+[steps.checkpoint]
+window_ms = 500
+
+[[steps.checkpoint.characters]]
+character = "actor"
+replies = [440]
+
+[[steps.checkpoint.characters]]
+character = "viewer"
+
+[[steps.checkpoint.characters.broadcasts]]
+opcode = 169
+stream = "objects"
+
+[steps.send]
+opcode = "CMSG_BANKER_ACTIVATE"
+
+[steps.send.target]
+fixture = "banker"
+
+[[steps]]
+character = "actor"
+id = "buy_slot"
+
+[steps.checkpoint]
+window_ms = 500
+
+[[steps.checkpoint.characters]]
+character = "actor"
+replies = []
+
+[[steps.checkpoint.characters.broadcasts]]
+opcode = 169
+stream = "values"
+
+[[steps.checkpoint.characters.expect]]
+count = 1
+opcode = 169
+path = [
+    "objects",
+    "0",
+    "values",
+    "field_1176",
+]
+
+[steps.checkpoint.characters.expect.value]
+type = "unsigned"
+value = 9000
+
+[[steps.checkpoint.characters.expect]]
+count = 1
+opcode = 169
+path = [
+    "objects",
+    "0",
+    "values",
+    "field_194",
+]
+
+[steps.checkpoint.characters.expect.value]
+type = "unsigned"
+value = 33680896
+
+[[steps.checkpoint.characters]]
+character = "viewer"
+
+[[steps.checkpoint.characters.broadcasts]]
+opcode = 169
+stream = "objects"
+
+[steps.send]
+opcode = "CMSG_BUY_BANK_SLOT"
+
+[steps.send.target]
+fixture = "banker"

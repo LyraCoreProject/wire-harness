@@ -1,0 +1,136 @@
+# Generated from two_character_visibility and its variant declaration.
+# Base SHA-256: 51126d4da33601aa9f2862073408b3e6575fe48ab07152b52a557b691b0a4b6f
+behavior = "character_visibility"
+id = "two_character_visibility__opposite_faction"
+schema_version = 4
+
+[[characters]]
+id = "watcher"
+
+[[characters.fixtures]]
+class = "warrior"
+level = 1
+name = "Watchera"
+race = "human"
+verb = "character"
+
+[characters.fixtures.at]
+map = 0
+orientation = 0.0
+x = -8840.56
+y = 489.7
+z = 109.61
+
+[[characters]]
+id = "arriving"
+initially_connected = false
+
+[[characters.fixtures]]
+class = "warrior"
+level = 1
+name = "Arrivera"
+race = "orc"
+verb = "character"
+
+[characters.fixtures.at]
+map = 0
+orientation = 0.0
+x = -8842.0
+y = 489.7
+z = 109.61
+
+[opening]
+window_ms = 1000
+
+[rules]
+time_tolerance_ms = 100
+wall_clock_tolerance_ms = 2000
+
+[rules.character_scope]
+all_characters = true
+creates_only = true
+name = "scenario_characters"
+packets = []
+reason = "Each Character must see the other Character's CREATE fields. Own login and nearby entities are outside this check."
+
+[[rules.clocks]]
+name = "create_movement_clock"
+opcode = 169
+path = [
+    "objects",
+    "0",
+    "movement",
+    "timestamp",
+]
+reason = "The CREATE movement timestamp uses the Reference Server's monotonic clock. Clock consistency is unchecked: single sample."
+tolerance_ms = 100
+
+[[rules.data_fields]]
+name = "arrival_power4"
+opcode = 169
+path = [
+    "objects",
+    "0",
+    "values",
+    "field_26",
+]
+reason = "The Reference Server may update a fresh Character's UNIT_FIELD_POWER4 during fixture setup; this scenario checks peer visibility."
+
+[[rules.identities]]
+name = "create_guid_word"
+opcode = 169
+path = [
+    "objects",
+    "0",
+    "values",
+    "field_0",
+]
+reason = "The CREATE values field_0 repeats the server-assigned Character GUID word. Identity consistency is unchecked: single sample."
+
+[[rules.unexpected_packets]]
+checkpoint = "arrival"
+name = "ambient_creature_movement"
+opcode = 221
+reason = "Nearby creature movement varies between recordings."
+subject_guid_high = 61744
+
+[[rules.unexpected_packets]]
+character = "watcher"
+checkpoint = "arrival"
+name = "ambient_transport_notice"
+opcode = 306
+reason = "A nearby transport notice can arrive while another Character connects."
+subject_guid_high = 0
+
+[[rules.unexpected_packets]]
+checkpoint = "arrival"
+name = "ambient_creature_emote"
+opcode = 259
+reason = "Nearby creatures can emote while the opposite-faction Character connects. Peer CREATE packets remain required."
+subject_guid_high = 61744
+
+[[steps]]
+character = "arriving"
+id = "arrival"
+
+[steps.action]
+kind = "connect"
+
+[steps.checkpoint]
+window_ms = 3000
+
+[[steps.checkpoint.characters]]
+character = "watcher"
+creates = ["arriving"]
+
+[[steps.checkpoint.characters.broadcasts]]
+opcode = 169
+stream = "objects"
+
+[[steps.checkpoint.characters]]
+character = "arriving"
+creates = ["watcher"]
+
+[[steps.checkpoint.characters.broadcasts]]
+opcode = 169
+stream = "objects"

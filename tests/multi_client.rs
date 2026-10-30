@@ -68,12 +68,14 @@ impl MultiTransport for ClockTransport {
     }
     fn connect(&mut self, character: &str) -> Result<()> {
         self.connected.insert(character.into(), true);
-        self.calls.push(format!("connect {character}"));
+        self.calls
+            .push(format!("connect {character} at {}", self.ms));
         Ok(())
     }
     fn disconnect(&mut self, character: &str) -> Result<()> {
         self.connected.insert(character.into(), false);
-        self.calls.push(format!("disconnect {character}"));
+        self.calls
+            .push(format!("disconnect {character} at {}", self.ms));
         Ok(())
     }
     fn send(&mut self, character: &str, opcode: u32, body: &[u8]) -> Result<()> {
@@ -114,7 +116,10 @@ fn virtual_clock_captures_each_character_and_connects_during_a_scenario() {
         sent: Vec::new(),
     };
     let observations = run_multi_on(&scenario, &mut transport).unwrap();
-    assert_eq!(transport.calls, ["disconnect second", "connect second"]);
+    assert_eq!(
+        transport.calls,
+        ["disconnect second at 3", "connect second at 5"]
+    );
     assert_eq!(observations.len(), 1);
     assert_eq!(observations[0].character.as_deref(), Some("first"));
     assert_eq!(observations[0].stream, Stream::Reply("ping".into()));
@@ -331,12 +336,45 @@ fn reconnect_reopens_the_same_character_during_a_scenario() {
     assert_eq!(
         transport.calls,
         [
-            "disconnect second",
-            "connect second",
-            "disconnect second",
-            "connect second"
+            "disconnect second at 3",
+            "connect second at 3",
+            "disconnect second at 5",
+            "connect second at 5"
         ]
     );
+}
+
+#[test]
+fn timed_connect_keeps_late_login_packets_in_opening() {
+    let fixtures = ACTORS.split("[[steps]]").next().unwrap().replace(
+        "id = \"second\"\nfixtures",
+        "id = \"second\"\ninitially_connected = false\nfixtures",
+    );
+    let text = format!(
+        "{fixtures}[[steps]]\nid = 'ping'\ncharacter = 'first'\nsend = {{ opcode = 'CMSG_PING', sequence = 7, latency_ms = 0 }}\nevents = [{{ after_ms = 2, character = 'second', action = {{ kind = 'connect' }} }}]\ncheckpoint = {{ window_ms = 6, characters = [{{ character = 'first', replies = [477] }}, {{ character = 'second' }}] }}\n"
+    );
+    let scenario = Scenario::parse(&text).unwrap();
+    let mut transport = ClockTransport {
+        ms: 0,
+        connected: BTreeMap::from([("first".into(), true), ("second".into(), false)]),
+        frames: VecDeque::from([("second".into(), 521, Vec::new())]),
+        pong_recipient: "first",
+        calls: Vec::new(),
+        sent: Vec::new(),
+    };
+    let observations = run_multi_on(&scenario, &mut transport).unwrap();
+    assert!(observations.iter().any(|packet| {
+        packet.character.as_deref() == Some("second")
+            && packet.packet.opcode == 521
+            && packet.stream == Stream::Opening
+    }));
+    assert!(check_multi_observations(
+        &scenario,
+        &observations,
+        &BTreeMap::from([("first".into(), 10), ("second".into(), 20)])
+    )
+    .unwrap()
+    .is_match());
 }
 
 #[test]
@@ -565,4 +603,171 @@ fn a_declared_create_cannot_be_relabelled_as_opening() {
         difference.rule == "unexpected_opening"
             && difference.character.as_deref() == Some("arriving")
     }));
+}
+
+#[test]
+fn timed_reconnect_uses_step_time_without_restarting_the_checkpoint() {
+    let mut scenario = Scenario::parse(ACTORS).unwrap();
+    scenario.steps.truncate(1);
+    scenario.steps[0].checkpoint.window_ms = 20;
+    scenario.steps[0]
+        .events
+        .push(wire_client::scenario::TimedEvent {
+            after_ms: 7,
+            character: "first".into(),
+            action: SessionAction::Reconnect,
+        });
+    let mut transport = ClockTransport {
+        ms: 0,
+        connected: BTreeMap::from([("first".into(), true), ("second".into(), true)]),
+        frames: VecDeque::new(),
+        pong_recipient: "first",
+        calls: Vec::new(),
+        sent: Vec::new(),
+    };
+    let observed = run_multi_on(&scenario, &mut transport).unwrap();
+    assert_eq!(
+        transport.calls,
+        ["disconnect first at 8", "connect first at 8"]
+    );
+    assert_eq!(transport.ms, 21);
+    assert_eq!(observed.len(), 1);
+    assert_eq!(observed[0].received_after_ms, Some(0));
+}
+
+#[test]
+fn timed_events_cannot_connect_a_disconnected_sender_after_its_request() {
+    let mut scenario = Scenario::parse(ACTORS).unwrap();
+    scenario.characters[0].initially_connected = false;
+    scenario.steps[0]
+        .events
+        .push(wire_client::scenario::TimedEvent {
+            after_ms: 1,
+            character: "first".into(),
+            action: SessionAction::Connect,
+        });
+    assert!(scenario.validate().is_err());
+}
+
+#[test]
+fn a_timed_login_does_not_hide_malformed_declared_packets() {
+    let fixtures = ACTORS.split("[[steps]]").next().unwrap().replace(
+        "id = \"second\"\nfixtures",
+        "id = \"second\"\ninitially_connected = false\nfixtures",
+    );
+    let text = format!("{fixtures}[[steps]]\nid = 'ping'\ncharacter = 'first'\nsend = {{ opcode = 'CMSG_PING', sequence = 7, latency_ms = 0 }}\nevents = [{{ after_ms = 2, character = 'second', action = {{ kind = 'connect' }} }}]\ncheckpoint = {{ window_ms = 6, characters = [{{ character = 'first', replies = [477] }}, {{ character = 'second', broadcasts = [{{ opcode = 477, stream = 'pongs' }}] }}] }}\n");
+    let scenario = Scenario::parse(&text).unwrap();
+    let mut transport = ClockTransport {
+        ms: 0,
+        connected: BTreeMap::from([("first".into(), true), ("second".into(), false)]),
+        frames: VecDeque::from([("second".into(), 477, Vec::new())]),
+        pong_recipient: "first",
+        calls: Vec::new(),
+        sent: Vec::new(),
+    };
+    let observed = run_multi_on(&scenario, &mut transport).unwrap();
+    assert!(observed
+        .iter()
+        .any(|packet| packet.character.as_deref() == Some("second")
+            && packet.stream == Stream::Malformed));
+    assert!(!check_multi_observations(
+        &scenario,
+        &observed,
+        &BTreeMap::from([("first".into(), 10), ("second".into(), 20)])
+    )
+    .unwrap()
+    .is_match());
+}
+
+#[test]
+fn late_observer_requires_the_riders_spline_and_mount_in_create() {
+    let golden = wire_client::catalogue::get("taxi_single_hop__late_observer").unwrap();
+    for field in ["movement", "values"] {
+        let mut candidate = golden.trace().clone();
+        let actor = candidate.header.characters["actor"];
+        let object = candidate
+            .packets
+            .iter_mut()
+            .filter(|packet| {
+                packet.character.as_deref() == Some("viewer") && packet.checkpoint == "flight"
+            })
+            .filter_map(|packet| match packet.fields.get_mut("objects") {
+                Some(RecordedField::List(objects)) => Some(objects),
+                _ => None,
+            })
+            .flatten()
+            .find_map(|object| match object {
+                RecordedField::Object(fields)
+                    if fields.get("guid") == Some(&RecordedField::Guid(actor))
+                        && matches!(fields.get("kind"), Some(RecordedField::Unsigned(2 | 3))) =>
+                {
+                    Some(fields)
+                }
+                _ => None,
+            })
+            .unwrap();
+        object.remove(field);
+        assert!(
+            !compare(&golden, &candidate, &[]).unwrap().is_match(),
+            "missing CREATE {field} must fail"
+        );
+    }
+}
+
+#[test]
+fn reconnect_skill_exclusion_preserves_mount_flags_and_fare_checks() {
+    let golden = wire_client::catalogue::get("taxi_single_hop__reconnect").unwrap();
+    for (create, field, matches) in [
+        (true, "field_718", true),
+        (true, "field_133", false),
+        (true, "field_46", false),
+        (false, "field_1176", false),
+    ] {
+        let mut candidate = golden.trace().clone();
+        let actor = candidate.header.characters["actor"];
+        let values = candidate
+            .packets
+            .iter_mut()
+            .filter(|packet| {
+                packet.character.as_deref() == Some("actor") && packet.checkpoint == "flight"
+            })
+            .filter_map(|packet| match packet.fields.get_mut("objects") {
+                Some(RecordedField::List(objects)) => Some(objects),
+                _ => None,
+            })
+            .flatten()
+            .find_map(|object| match object {
+                RecordedField::Object(fields)
+                    if fields.get("guid") == Some(&RecordedField::Guid(actor))
+                        && if create {
+                            matches!(fields.get("kind"), Some(RecordedField::Unsigned(2 | 3)))
+                        } else {
+                            fields.get("kind") == Some(&RecordedField::Unsigned(0))
+                        } =>
+                {
+                    match fields.get_mut("values") {
+                        Some(RecordedField::Object(values))
+                            if create || values.contains_key(field) =>
+                        {
+                            Some(values)
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            })
+            .unwrap();
+        let value = values
+            .entry(field.into())
+            .or_insert(RecordedField::Unsigned(0));
+        let RecordedField::Unsigned(value) = value else {
+            panic!("expected unsigned {field}");
+        };
+        *value += 1;
+        assert_eq!(
+            compare(&golden, &candidate, &[]).unwrap().is_match(),
+            matches,
+            "CREATE {create}, {field}"
+        );
+    }
 }

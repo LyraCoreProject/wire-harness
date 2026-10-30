@@ -38,6 +38,16 @@ fn initially_connected() -> bool {
 #[serde(deny_unknown_fields)]
 pub struct Opening {
     pub window_ms: u64,
+    #[serde(default)]
+    pub fixture_creates: Vec<OpeningFixtureCreate>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OpeningFixtureCreate {
+    pub recipient: String,
+    pub actor: String,
+    pub fixture: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -94,7 +104,17 @@ pub struct Step {
     pub send: Option<ClientPacket>,
     #[serde(default)]
     pub action: Option<SessionAction>,
+    #[serde(default)]
+    pub events: Vec<TimedEvent>,
     pub checkpoint: Checkpoint,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TimedEvent {
+    pub after_ms: u64,
+    pub character: String,
+    pub action: SessionAction,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -168,10 +188,35 @@ pub struct CharacterCheckpoint {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Expectation {
+    #[serde(default)]
+    pub values_only: bool,
     pub opcode: u16,
     pub path: Vec<String>,
     pub value: crate::trace::RecordedField,
     pub count: usize,
+}
+
+impl Expectation {
+    fn validate(&self) -> Result<()> {
+        self.value.validate(0)?;
+        ensure!(
+            self.count > 0
+                && self.count <= 4096
+                && !self.path.is_empty()
+                && self.path.iter().all(|part| identifier(part)),
+            "invalid checkpoint assertion"
+        );
+        ensure!(
+            !self.values_only
+                || (self.opcode == 169
+                    && self.path.len() == 4
+                    && self.path[0] == "objects"
+                    && self.path[1].parse::<usize>().is_ok()
+                    && self.path[2] == "values"),
+            "values_only assertion needs an object VALUES field"
+        );
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -264,6 +309,10 @@ impl Scenario {
             (1..=30_000).contains(&self.opening.window_ms),
             "opening window must be 1 through 30000 ms"
         );
+        ensure!(
+            self.opening.fixture_creates.is_empty(),
+            "schema 3 has no opening fixture CREATE checks"
+        );
         let (fixture_ids, nodes) = validate_fixtures(&self.fixtures)?;
         ensure!(
             !self.steps.is_empty() && self.steps.len() <= 256,
@@ -272,7 +321,7 @@ impl Scenario {
         let mut ids = BTreeSet::new();
         for step in &self.steps {
             ensure!(
-                step.character.is_none() && step.action.is_none(),
+                step.character.is_none() && step.action.is_none() && step.events.is_empty(),
                 "schema 3 step must send a packet"
             );
             let send = step.send.as_ref().context("step needs a packet")?;
@@ -331,14 +380,7 @@ impl Scenario {
                 "too many checkpoint assertions"
             );
             for assertion in &checkpoint.expect {
-                assertion.value.validate(0)?;
-                ensure!(
-                    assertion.count > 0
-                        && assertion.count <= 4096
-                        && !assertion.path.is_empty()
-                        && assertion.path.iter().all(|p| identifier(p)),
-                    "invalid checkpoint assertion"
-                );
+                assertion.validate()?;
                 ensure!(
                     checkpoint.stream(&step.id, assertion.opcode) != Stream::Unexpected,
                     "assertion opcode must be declared"
@@ -378,8 +420,8 @@ impl Scenario {
             "schema 4 uses named Character fixtures"
         );
         ensure!(
-            (2..=16).contains(&self.characters.len()),
-            "schema 4 needs 2 through 16 Characters"
+            (1..=16).contains(&self.characters.len()),
+            "schema 4 needs 1 through 16 Characters"
         );
         ensure!(
             (1..=30_000).contains(&self.opening.window_ms),
@@ -388,8 +430,8 @@ impl Scenario {
         self.rules.validate()?;
         if let Some(scope) = &self.rules.character_scope {
             ensure!(
-                !scope.creates_only || scope.all_characters,
-                "create-only scope needs all Characters"
+                (!scope.creates_only && scope.exclude_self_for.is_empty()) || scope.all_characters,
+                "peer scope needs all Characters"
             );
         }
         let mut ids = BTreeSet::new();
@@ -407,6 +449,28 @@ impl Scenario {
             };
             ensure!(self.characters.iter().filter(|c| matches!(c.fixtures.first(), Some(FixtureVerb::Character { name: other, .. }) if other == name)).count() == 1, "duplicate Character name");
             validate_fixtures(&character.fixtures)?;
+        }
+        let mut opening_creates = BTreeSet::new();
+        for create in &self.opening.fixture_creates {
+            ensure!(
+                opening_creates.insert((&create.recipient, &create.actor, &create.fixture)),
+                "duplicate opening fixture CREATE"
+            );
+            let recipient = self
+                .characters
+                .iter()
+                .position(|character| character.id == create.recipient)
+                .context("opening CREATE recipient")?;
+            let actor = self
+                .characters
+                .iter()
+                .position(|character| character.id == create.actor)
+                .context("opening CREATE actor")?;
+            ensure!(
+                recipient < actor && self.characters[recipient].initially_connected,
+                "opening fixture CREATE needs a viewer connected before fixture setup"
+            );
+            ensure!(self.characters[actor].fixtures.iter().any(|fixture| matches!(fixture, FixtureVerb::Creature { id, .. } if *id == create.fixture)), "opening CREATE names an unknown creature fixture");
         }
         ensure!(
             self.rule_characters().all(|id| ids.contains(id)),
@@ -466,6 +530,38 @@ impl Scenario {
                 connected.insert(actor, false);
             }
             ensure!(
+                step.events.is_empty() || step.send.is_some(),
+                "timed events require a packet step"
+            );
+            ensure!(
+                step.events.len() <= 16,
+                "checkpoint has too many timed events"
+            );
+            let mut previous_event = 0;
+            for event in &step.events {
+                ensure!(
+                    ids.contains(&event.character)
+                        && event.after_ms > previous_event
+                        && event.after_ms < step.checkpoint.window_ms,
+                    "timed events need known Characters and increasing times inside the checkpoint"
+                );
+                previous_event = event.after_ms;
+                let connected_now = *connected.get(event.character.as_str()).unwrap();
+                match event.action {
+                    SessionAction::Connect => {
+                        ensure!(
+                            !connected_now,
+                            "timed connect needs a disconnected Character"
+                        );
+                        connected.insert(event.character.as_str(), true);
+                    }
+                    SessionAction::Reconnect => {
+                        ensure!(connected_now, "timed reconnect needs a connected Character");
+                    }
+                    _ => anyhow::bail!("timed events support connect and reconnect"),
+                }
+            }
+            ensure!(
                 connected.values().any(|state| *state),
                 "checkpoint needs a connected Character"
             );
@@ -522,14 +618,10 @@ impl Scenario {
                     );
                 }
                 for assertion in &capture.expect {
-                    assertion.value.validate(0)?;
+                    assertion.validate()?;
                     ensure!(
-                        assertion.count > 0
-                            && assertion.count <= 4096
-                            && !assertion.path.is_empty()
-                            && assertion.path.iter().all(|p| identifier(p))
-                            && capture.stream(&step.id, assertion.opcode) != Stream::Unexpected,
-                        "invalid checkpoint assertion"
+                        capture.stream(&step.id, assertion.opcode) != Stream::Unexpected,
+                        "assertion opcode must be declared"
                     );
                 }
             }
@@ -672,6 +764,20 @@ impl Scenario {
                     .iter()
                     .filter_map(|rule| rule.character.as_ref()),
             )
+            .chain(
+                self.rules
+                    .tolerances
+                    .iter()
+                    .filter_map(|rule| rule.character.as_ref()),
+            )
+            .chain(self.rules.character_scope.iter().flat_map(|scope| {
+                scope.exclude_self_for.iter().chain(
+                    scope
+                        .exclude_create_values
+                        .iter()
+                        .map(|rule| &rule.character),
+                )
+            }))
     }
 }
 

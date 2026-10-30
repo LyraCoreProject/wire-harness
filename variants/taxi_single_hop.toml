@@ -1,0 +1,165 @@
+[[variants]]
+axis = "late_observer"
+identities = [
+  { name = "create_guid_word", reason = "CREATE field_0 repeats the server-assigned Character GUID word. Identity consistency is unchecked: single sample.", opcode = 169, path = ["objects", "0", "values", "field_0"] },
+  { name = "create_spline_id", reason = "A moving CREATE carries a server-local spline id. Identity consistency is unchecked: single sample.", opcode = 169, path = ["objects", "0", "movement", "spline_id"] },
+]
+step = "flight"
+after_ms = 40000
+watcher_movement = true
+viewer_broadcasts = [{ opcode = 197, stream = "teleport" }]
+scope_packets = [{ opcode = 197, paths = [["guid"]] }]
+exclude_self_for = ["viewer"]
+clocks = [{ name = "create_clock", reason = "CREATE timestamps use the process clock. Clock consistency is unchecked: single sample.", opcode = 169, path = ["objects", "0", "movement", "timestamp"], tolerance_ms = 250 }, { name = "viewer_teleport_clock", reason = "The viewer's teleport timestamps use the Reference Server process clock. Compare their elapsed time within one 100 ms map tick.", character = "viewer", opcode = 197, path = ["timestamp"], tolerance_ms = 100 }]
+packet_timing = [
+  { name = "actor_create_delivery", reason = "The timed connection can shift a CREATE by one extra 100 ms map tick. VALUES delivery keeps the base 150 ms bound.", character = "actor", opcode = 169, path = ["objects", "0", "kind"], creates_only = true, tolerance_ms = 250 },
+  { name = "viewer_create_delivery", reason = "The timed connection can shift a CREATE by one extra 100 ms map tick. VALUES delivery keeps the base 150 ms bound.", character = "viewer", opcode = 169, path = ["objects", "0", "kind"], creates_only = true, tolerance_ms = 250 },
+]
+unexpected_packets = [{ name = "ambient_node_emote", reason = "Nearby creature emotes are independent of the taxi-node reply.", checkpoint = "nodes", opcode = 259, subject_guid_high = 61744 }]
+viewer = { verb = "character", name = "Taxiviewer", race = "human", class = "warrior", level = 1, at = { map = 0, x = -10628.9, y = 1036.68, z = 34.06, orientation = 0.0 } }
+
+
+[[variants.tolerances]]
+name = "create_elapsed"
+reason = "The moving CREATE samples the rider within two 100 ms map ticks and 50 ms local jitter. At 32 units per second the position bound is 8 units."
+opcode = 169
+path = ["objects", "0", "movement", "elapsed"]
+tolerance = 250.0
+
+[[variants.tolerances]]
+name = "create_orientation"
+reason = "The moving CREATE samples the rider within two 100 ms map ticks and 50 ms local jitter. At 32 units per second the position bound is 8 units."
+opcode = 169
+path = ["objects", "0", "movement", "orientation"]
+tolerance = 0.1
+
+[[variants.tolerances]]
+name = "create_position_x"
+reason = "The moving CREATE samples the rider within two 100 ms map ticks and 50 ms local jitter. At 32 units per second the position bound is 8 units."
+opcode = 169
+path = ["objects", "0", "movement", "position", "x"]
+tolerance = 8.0
+
+[[variants.tolerances]]
+name = "create_position_y"
+reason = "The moving CREATE samples the rider within two 100 ms map ticks and 50 ms local jitter. At 32 units per second the position bound is 8 units."
+opcode = 169
+path = ["objects", "0", "movement", "position", "y"]
+tolerance = 8.0
+
+[[variants.tolerances]]
+name = "create_position_z"
+reason = "The moving CREATE samples the rider within two 100 ms map ticks and 50 ms local jitter. At 32 units per second the position bound is 8 units."
+opcode = 169
+path = ["objects", "0", "movement", "position", "z"]
+tolerance = 8.0
+
+[[variants]]
+axis = "reconnect"
+unexpected_packets = [{ name = "ambient_node_emote", reason = "Nearby creature emotes are independent of the taxi-node reply.", checkpoint = "nodes", opcode = 259, subject_guid_high = 61744 }]
+exclude_create_values = [{ name = "reconnect_skill_slots", reason = "Login assigns the same skills to different slots between recordings. Skill-slot layout is outside the taxi check; CREATE flight fields and all VALUES remain compared.", character = "actor", first = 718, last = 1101 }]
+values_only_assertions = true
+identities = [
+  { name = "reconnect_item_492", reason = "The login snapshot contains a newly allocated item GUID word. Identity consistency is unchecked: single sample.", opcode = 169, path = ["objects", "0", "values", "field_492"] },
+  { name = "reconnect_item_498", reason = "The login snapshot contains a newly allocated item GUID word. Identity consistency is unchecked: single sample.", opcode = 169, path = ["objects", "0", "values", "field_498"] },
+  { name = "reconnect_item_500", reason = "The login snapshot contains a newly allocated item GUID word. Identity consistency is unchecked: single sample.", opcode = 169, path = ["objects", "0", "values", "field_500"] },
+  { name = "reconnect_item_516", reason = "The login snapshot contains a newly allocated item GUID word. Identity consistency is unchecked: single sample.", opcode = 169, path = ["objects", "0", "values", "field_516"] },
+  { name = "reconnect_item_518", reason = "The login snapshot contains a newly allocated item GUID word. Identity consistency is unchecked: single sample.", opcode = 169, path = ["objects", "0", "values", "field_518"] },
+  { name = "reconnect_item_532", reason = "The login snapshot contains a newly allocated item GUID word. Identity consistency is unchecked: single sample.", opcode = 169, path = ["objects", "0", "values", "field_532"] },
+  { name = "reconnect_item_534", reason = "The login snapshot contains a newly allocated item GUID word. Identity consistency is unchecked: single sample.", opcode = 169, path = ["objects", "0", "values", "field_534"] },
+  { name = "create_guid_word", reason = "CREATE field_0 repeats the server-assigned Character GUID word. Identity consistency is unchecked: single sample.", opcode = 169, path = ["objects", "0", "values", "field_0"] },
+]
+step = "flight"
+after_ms = 40000
+clocks = [{ name = "create_clock", reason = "CREATE timestamps use the process clock. Clock consistency is unchecked: single sample.", opcode = 169, path = ["objects", "0", "movement", "timestamp"], tolerance_ms = 250 }]
+replies = [334, 430, 366, 221, 366, 221, 367, 334, 199]
+
+[[variants.tolerances]]
+name = "resumed_spline_duration"
+reason = "The resumed duration may shift by two 100 ms map ticks plus 50 ms local login jitter. The first spline remains exact."
+character = "actor"
+opcode = 221
+packet_index = 5
+path = ["duration"]
+tolerance = 250.0
+
+[[variants.tolerances]]
+name = "resumed_spline_x"
+reason = "At 32 units per second, 250 ms login jitter moves the rider at most 8 units. The first spline and route remain exact."
+character = "actor"
+opcode = 221
+packet_index = 5
+path = ["position", "x"]
+tolerance = 8.0
+
+[[variants.tolerances]]
+name = "resumed_spline_y"
+reason = "At 32 units per second, 250 ms login jitter moves the rider at most 8 units. The first spline and route remain exact."
+character = "actor"
+opcode = 221
+packet_index = 5
+path = ["position", "y"]
+tolerance = 8.0
+
+[[variants.tolerances]]
+name = "resumed_spline_z"
+reason = "At 32 units per second, 250 ms login jitter moves the rider at most 8 units. The first spline and route remain exact."
+character = "actor"
+opcode = 221
+packet_index = 5
+path = ["position", "z"]
+tolerance = 8.0
+
+[[variants.packet_timing]]
+name = "reconnected_mount_delivery"
+reason = "The reconnect can shift the rider's unit-flags update by a 1000 ms zone poll. Other VALUES fields retain the base delivery bound."
+character = "actor"
+opcode = 169
+path = ["objects", "0", "values", "field_46"]
+values_only = true
+tolerance_ms = 1150
+
+[[variants.tolerances]]
+name = "create_orientation"
+reason = "The moving CREATE samples the rider within two 100 ms map ticks and 50 ms local jitter. At 32 units per second the position bound is 8 units."
+opcode = 169
+path = ["objects", "0", "movement", "orientation"]
+tolerance = 0.1
+
+[[variants.tolerances]]
+name = "create_position_x"
+reason = "The moving CREATE samples the rider within two 100 ms map ticks and 50 ms local jitter. At 32 units per second the position bound is 8 units."
+opcode = 169
+path = ["objects", "0", "movement", "position", "x"]
+tolerance = 8.0
+
+[[variants.tolerances]]
+name = "create_position_y"
+reason = "The moving CREATE samples the rider within two 100 ms map ticks and 50 ms local jitter. At 32 units per second the position bound is 8 units."
+opcode = 169
+path = ["objects", "0", "movement", "position", "y"]
+tolerance = 8.0
+
+[[variants.tolerances]]
+name = "create_position_z"
+reason = "The moving CREATE samples the rider within two 100 ms map ticks and 50 ms local jitter. At 32 units per second the position bound is 8 units."
+opcode = 169
+path = ["objects", "0", "movement", "position", "z"]
+tolerance = 8.0
+
+[[variants.packet_timing]]
+name = "reconnected_landing_delivery"
+reason = "Reopening the World Session adds up to 250 ms of login time, one 100 ms landing tick and 50 ms delivery jitter. The original takeoff and fare bounds remain unchanged."
+character = "actor"
+opcode = 199
+path = ["guid"]
+tolerance_ms = 400
+
+[[variants.packet_timing]]
+name = "reconnected_dismount_delivery"
+reason = "Dismount follows the resumed flight's landing: 250 ms login time, one 100 ms landing tick and 50 ms delivery jitter. Other VALUES keep their inherited bounds."
+character = "actor"
+opcode = 169
+path = ["objects", "0", "values", "field_133"]
+values_only = true
+tolerance_ms = 400

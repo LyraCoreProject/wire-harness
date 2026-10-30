@@ -8,6 +8,7 @@ const MODULES: &[&str] = &[
     "trace",
     "values_mask",
     "spatial",
+    "variants",
 ];
 
 #[derive(Default)]

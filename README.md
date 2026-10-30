@@ -91,6 +91,9 @@ Schema 4 adds named Characters, per-recipient checkpoints and a shared-clock run
 flight master. The schema-3 scenarios still include `taxi_single_hop`; see
 [scenario contracts](docs/scenarios.md), [trace rules](docs/traces.md) and
 [the taxi evidence](docs/taxi.md). Golden Traces are embedded in `wire_client::catalogue`.
+Companion declarations generate [scenario variants](docs/scenarios.md#generated-variants) for
+observers, connection changes, opposite factions and creature spawns beside a viewer. Each
+checked variant has its own Golden Trace and catalogue id. The base files stay unchanged.
 
 ## Commands
 
@@ -99,6 +102,7 @@ vanilla-wire smoke --host HOST --account USER --password-stdin --character NAME
 vanilla-wire compare SCENARIO GOLDEN CANDIDATE [DEVIATIONS_JSON]
 vanilla-wire strictness SCENARIO [--json]
 vanilla-wire strictness-gate
+cargo run --bin generate_variants -- --check
 vanilla-wire record SCENARIO PROVENANCE_JSON OUTPUT --account USER --password-stdin
 vanilla-wire candidate SCENARIO OUTPUT --account USER --password-stdin
 vanilla-wire scenario-file PATH --account USER --password-stdin

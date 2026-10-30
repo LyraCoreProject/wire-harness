@@ -39,9 +39,12 @@ each serialized `f64` value, including decoded `f32` coordinates widened to `f64
 no extra feature to avoid differences caused by rounding.
 
 The opening records every frame from the final fixture login until the first step. Opening packets
-are scrubbed but are excluded from comparison and GUID mappings. They must form a prefix of the
+are scrubbed and usually excluded from comparison. A scenario's `opening.fixture_creates` checks
+that a connected viewer received each named creature fixture's CREATE, kind and object type;
+the actor's opening packets bind the creature GUID. Opening packets must form a prefix of the
 schema 3 trace. In schema 4, a `connect` or `reconnect` step also records undeclared handshake
-packets as opening packets for that Character. Declared checkpoint opcodes still compare. Every
+packets as opening packets for that Character. A timed connection keeps undeclared packets in
+opening for the scenario's opening window after it connects. Declared checkpoint opcodes still compare. Every
 packet has `received_after_ms`. It is null in the initial opening and otherwise measures time
 since the step began.
 
@@ -141,7 +144,8 @@ supply a replacement tolerance or random range to `compare`. General rule kinds 
 - Nonzero reference GUIDs map bijectively to candidate GUIDs across the whole trace, including all
   schema 4 Character streams. Zero maps only
   to zero. A nonzero Character GUID in each header establishes the first pair; aligned fields
-  establish further mappings. Opening packets cannot establish mappings.
+  establish further mappings. A bank-open request targeting a creature fixture binds its reply GUID
+  to that fixture in opening packets, identified by its creature entry.
 - `time_ms` fields use the scenario's inclusive `time_tolerance_ms` for comparable elapsed times.
 - `wall_clock_ms` fields, including `SMSG_QUERY_TIME_RESPONSE`, must be within the scenario's
   `wall_clock_tolerance_ms` of their own trace's `recorded_at_unix_ms`. Recordings on different days
@@ -187,6 +191,7 @@ supply a replacement tolerance or random range to `compare`. General rule kinds 
   own inclusive tolerance. An optional `path` restricts a rule to packets containing that field;
   the longest matching path takes precedence over the whole-opcode rule. This gives the taxi
   passenger's zone-driven `PLAYER_FLAGS` a polling bound without relaxing fare delivery.
+  Matching default rules remain valid when a more specific field rule takes precedence.
   Missing arrival times fail. Unused rules fail unless an unmatched packet
   already accounts for their absence. Field-rule suppression requires that the unmatched packet
   actually contains the named path; a misspelled path still fails.
@@ -199,10 +204,20 @@ supply a replacement tolerance or random range to `compare`. General rule kinds 
   sequence and preserves the original `received_after_ms` on every update. Packet batching may vary;
   field multiplicity and any `packet_timing` bound still apply. A delayed fare therefore fails even
   when the final balance matches. Other updates naming the Character remain strict.
+  Schema 4 `exclude_self_for` can omit selected recipients' own object updates while retaining
+  their peer updates. `exclude_create_values` entries name a reason, recipient and inclusive
+  `field_<first>` through `field_<last>` range to exclude only from CREATE values. VALUES updates,
+  movement, CREATE kind and object type remain checked.
   Opening, malformed, unknown-checkpoint and mislabeled packets cannot bypass their normal checks.
-  CREATE updates for selected Characters retain all decoded fields for comparison. Every original
+  CREATE updates for selected Characters retain all fields outside named exclusions. Every original
   packet remains in the trace. This scopes a Behavior's outcome when nearby entities
   differ with world data.
+- Named `tolerances` compare a scalar's absolute difference with a finite nonnegative `tolerance`.
+  They accept matching `time_ms`, `unsigned` or `float` types; GUIDs, wall clocks, missing fields and
+  changed types fail. Each rule names its reason, opcode and path, with optional `character` and
+  `packet_index`. The index is zero-based within the recipient's scoped checkpoint stream.
+  Scoped object tolerances cannot select packet indices because scope splits object batches.
+  Unused rules fail. These are rule comparisons and never classify timing jitter as world data.
 - Named `data_fields` rules classify changed values as data only at their declared opcode and field
   path. Each needs a reason. Presence, scalar types and object keys still compare; catalogue lists may differ in
   length; when both lists have items, their item shapes must match. These rules cannot cover a GUID or

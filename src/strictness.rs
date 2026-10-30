@@ -270,6 +270,25 @@ impl Analyzer<'_> {
                 return Ok(());
             }
         }
+        if id.ends_with("/swap_neighbour") {
+            let changed: Vec<_> = self
+                .golden
+                .trace()
+                .packets
+                .iter()
+                .zip(&candidate.packets)
+                .filter(|(before, after)| before != after)
+                .map(|(before, _)| before)
+                .collect();
+            if changed.len() == 2
+                && (changed[0].checkpoint != changed[1].checkpoint
+                    || changed[0].character != changed[1].character
+                    || changed[0].stream != changed[1].stream)
+            {
+                self.excuse("stream_interleaving".into(), id);
+                return Ok(());
+            }
+        }
         self.report
             .unexplained_survivors
             .push(Survivor { id, description });
@@ -289,6 +308,14 @@ fn scoped_packet(golden: &GoldenTrace, packet: RecordedPacket) -> Result<Trace> 
 }
 
 fn remove_rule(rules: &mut EquivalenceRules, name: &str) {
+    // Removing a field tolerance must also disable the fallback scenario-wide time bound.
+    if name == "time_tolerance_ms" || rules.tolerances.iter().any(|rule| rule.name == name) {
+        rules.time_tolerance_ms = 0;
+    }
+    rules.tolerances.retain(|rule| rule.name != name);
+    if let Some(scope) = &mut rules.character_scope {
+        scope.exclude_create_values.retain(|rule| rule.name != name);
+    }
     rules.random.retain(|rule| rule.name != name);
     rules.identities.retain(|rule| rule.name != name);
     rules.clocks.retain(|rule| rule.name != name);
@@ -319,6 +346,9 @@ fn timing_applies(rule: &PacketTimingRule, packet: &RecordedPacket) -> bool {
     }
     if at(&packet.fields, &rule.path).is_none() {
         return false;
+    }
+    if rule.creates_only {
+        return matches!(at(&packet.fields, &rule.path), Some(Field::Unsigned(2 | 3)));
     }
     if !rule.values_only {
         return true;
@@ -387,6 +417,11 @@ fn scope_intends(golden: &GoldenTrace, packet: &RecordedPacket, change: &Change)
         .and_then(|id| golden.trace().header.characters.get(id))
         .copied()
         .unwrap_or(golden.trace().header.character_guid);
+    let exclude_self = scope.creates_only
+        || packet
+            .character
+            .as_ref()
+            .is_some_and(|id| scope.exclude_self_for.contains(id));
     let in_scope = |guid| {
         guid == character_guid
             || (scope.all_characters
@@ -406,7 +441,7 @@ fn scope_intends(golden: &GoldenTrace, packet: &RecordedPacket, change: &Change)
         }
         match fields.get("guid") {
             Some(Field::Guid(guid)) => {
-                !in_scope(*guid) || (scope.creates_only && *guid == character_guid)
+                !in_scope(*guid) || (exclude_self && *guid == character_guid)
             }
             _ => {
                 matches!(fields.get("guids"), Some(Field::List(guids)) if guids.iter().all(|guid| matches!(guid, Field::Guid(value) if !in_scope(*value))))
@@ -464,6 +499,21 @@ fn field_contains_guid(field: &Field, guid: u64) -> bool {
 fn candidate_rules(golden: &GoldenTrace, packet: &RecordedPacket, change: &Change) -> Vec<String> {
     let rules = &golden.scenario().rules;
     let mut names = Vec::new();
+    let stream_index = golden
+        .trace()
+        .packets
+        .iter()
+        .position(|source| std::ptr::eq(source, packet))
+        .map(|index| {
+            golden.trace().packets[..index]
+                .iter()
+                .filter(|source| {
+                    source.checkpoint == packet.checkpoint
+                        && source.character == packet.character
+                        && source.stream == packet.stream
+                })
+                .count()
+        });
     match change {
         Change::Field(path) => {
             let mut path = path.clone();
@@ -476,9 +526,53 @@ fn candidate_rules(golden: &GoldenTrace, packet: &RecordedPacket, change: &Chang
             {
                 path[1] = "0".into();
             }
+            if let Some(scope) = &rules.character_scope {
+                if path.len() == 4 && path[0] == "objects" && path[2] == "values" {
+                    let raw_path = match change {
+                        Change::Field(path) => path,
+                        _ => unreachable!(),
+                    };
+                    if matches!(
+                        at(
+                            &packet.fields,
+                            &["objects".into(), raw_path[1].clone(), "kind".into()]
+                        ),
+                        Some(Field::Unsigned(2 | 3))
+                    ) {
+                        for rule in &scope.exclude_create_values {
+                            if rule.contains(packet.character.as_deref(), &path[3]) {
+                                names.push(rule.name.clone());
+                            }
+                        }
+                    }
+                }
+            }
             for rule in rules.identities.iter().chain(&rules.data_fields) {
                 if rule.opcode == packet.opcode
                     && rule_character_applies(&rule.character, packet)
+                    && path.starts_with(&rule.path)
+                {
+                    names.push(rule.name.clone());
+                }
+            }
+            if matches!(
+                at(
+                    &packet.fields,
+                    match change {
+                        Change::Field(path) => path,
+                        _ => unreachable!(),
+                    }
+                ),
+                Some(Field::TimeMs(_))
+            ) {
+                names.push("time_tolerance_ms".into());
+            }
+            for rule in &rules.tolerances {
+                if rule.opcode == packet.opcode
+                    && rule_character_applies(&rule.character, packet)
+                    && rule
+                        .packet_index
+                        .map_or(true, |index| stream_index == Some(index))
                     && path.starts_with(&rule.path)
                 {
                     names.push(rule.name.clone());
@@ -550,6 +644,27 @@ fn candidate_rules(golden: &GoldenTrace, packet: &RecordedPacket, change: &Chang
 fn rule_intents(golden: &GoldenTrace) -> BTreeMap<String, String> {
     let rules = &golden.scenario().rules;
     let mut intents = BTreeMap::new();
+    intents.insert(
+        "time_tolerance_ms".into(),
+        format!(
+            "Decoded time fields may differ by {} ms",
+            rules.time_tolerance_ms
+        ),
+    );
+    for rule in &rules.tolerances {
+        intents.insert(
+            rule.name.clone(),
+            format!(
+                "opcode {}, field {}, Character {}, packet {:?}, tolerance {}",
+                rule.opcode,
+                rule.path.join("."),
+                rule.character.as_deref().unwrap_or("any"),
+                rule.packet_index,
+                rule.tolerance
+            ),
+        );
+    }
+
     for rule in rules.identities.iter().chain(&rules.data_fields) {
         intents.insert(
             rule.name.clone(),
@@ -619,6 +734,15 @@ fn rule_intents(golden: &GoldenTrace) -> BTreeMap<String, String> {
         );
     }
     if let Some(scope) = &rules.character_scope {
+        for rule in &scope.exclude_create_values {
+            intents.insert(
+                rule.name.clone(),
+                format!(
+                    "CREATE values field_{} through field_{} for {}: {}",
+                    rule.first, rule.last, rule.character, rule.reason
+                ),
+            );
+        }
         let subjects = scope
             .packets
             .iter()
@@ -639,8 +763,8 @@ fn rule_intents(golden: &GoldenTrace) -> BTreeMap<String, String> {
         intents.insert(
             scope.name.clone(),
             format!(
-                "opcode 169 object GUIDs and subject paths {{{subjects}}}; outside recorded Character GUIDs; all Characters {}, CREATE only {}",
-                scope.all_characters, scope.creates_only
+                "opcode 169 object GUIDs and subject paths {{{subjects}}}; outside recorded Character GUIDs; all Characters {}, CREATE only {}, excluded self recipients {:?}",
+                scope.all_characters, scope.creates_only, scope.exclude_self_for
             ),
         );
     }
@@ -851,6 +975,15 @@ fn with_subject(packet: &RecordedPacket, guid: u64) -> Option<RecordedPacket> {
     None
 }
 
+fn fixture_create(object: &Field, entry: u32) -> bool {
+    let Field::Object(fields) = object else {
+        return false;
+    };
+    matches!(fields.get("kind"), Some(Field::Unsigned(2 | 3)))
+        && matches!(fields.get("values"), Some(Field::Object(values))
+            if values.get("field_3") == Some(&Field::Unsigned(u64::from(entry))))
+}
+
 pub fn analyze(golden: &GoldenTrace) -> Result<StrictnessReport> {
     ensure!(
         compare(golden, golden.trace(), &[])?.is_match(),
@@ -859,6 +992,11 @@ pub fn analyze(golden: &GoldenTrace) -> Result<StrictnessReport> {
     let trace = golden.trace();
     let scenario = golden.scenario();
     let known = guids(trace);
+    let mut intents = rule_intents(golden);
+    intents.insert(
+        "stream_interleaving".into(),
+        "Packet order is compared within each Character, checkpoint, and stream".into(),
+    );
     let mut analyzer = Analyzer {
         golden,
         report: StrictnessReport {
@@ -870,13 +1008,83 @@ pub fn analyze(golden: &GoldenTrace) -> Result<StrictnessReport> {
             detected_mutations: Vec::new(),
             excused_by_rule: BTreeMap::new(),
             excused_mutations: BTreeMap::new(),
-            rule_intents: rule_intents(golden),
+            rule_intents: intents,
             unexplained_survivors: Vec::new(),
         },
         without_rule: BTreeMap::new(),
         seen: BTreeSet::new(),
         scoped: scoped_trace(scenario, trace, &scenario.rules)?,
     };
+    for create in &scenario.opening.fixture_creates {
+        let entry = scenario
+            .characters
+            .iter()
+            .find(|character| character.id == create.actor)
+            .context("opening CREATE actor")?
+            .fixtures
+            .iter()
+            .find_map(|fixture| match fixture {
+                crate::scenario::FixtureVerb::Creature { id, entry, .. }
+                    if *id == create.fixture =>
+                {
+                    Some(*entry)
+                }
+                _ => None,
+            })
+            .context("opening CREATE creature fixture")?;
+        let index = trace
+            .packets
+            .iter()
+            .position(|packet| {
+                packet.character.as_deref() == Some(create.recipient.as_str())
+                    && packet.stream == Stream::Opening
+                    && matches!(packet.fields.get("objects"), Some(Field::List(objects))
+                        if objects.iter().any(|object| fixture_create(object, entry)))
+            })
+            .context("opening fixture CREATE packet")?;
+        let mut candidate = trace.clone();
+        candidate.packets.remove(index);
+        analyzer.run(
+            format!("opening_{}_{}_drop", create.recipient, create.fixture),
+            "viewer loses the creature fixture CREATE".into(),
+            candidate,
+            &trace.packets[index],
+            Change::Packet,
+        )?;
+        let packet = &trace.packets[index];
+        for path in paths(&packet.fields).into_iter().filter(|path| {
+            path.len() == 3
+                && path[0] == "objects"
+                && matches!(path[2].as_str(), "guid" | "kind" | "object_type")
+                && path[1]
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|object| match packet.fields.get("objects") {
+                        Some(Field::List(objects)) => objects.get(object),
+                        _ => None,
+                    })
+                    .is_some_and(|object| fixture_create(object, entry))
+        }) {
+            let value = at(&packet.fields, &path).expect("enumerated fixture field");
+            for (name, value) in replacements(value, &known) {
+                let mut changed = packet.clone();
+                *at_mut(&mut changed.fields, &path).unwrap() = value;
+                analyzer.run_field(
+                    format!(
+                        "opening_{}_{}/field_{}/{name}",
+                        create.recipient,
+                        create.fixture,
+                        path.join(".")
+                    ),
+                    "change fixture CREATE identity or kind".into(),
+                    index,
+                    packet,
+                    changed,
+                    path.clone(),
+                )?;
+            }
+        }
+    }
     for (index, packet) in trace.packets.iter().enumerate() {
         if matches!(
             packet.stream,
@@ -1037,6 +1245,56 @@ pub fn analyze(golden: &GoldenTrace) -> Result<StrictnessReport> {
                 path.clone(),
             )?;
             let value = at(&packet.fields, &path).expect("enumerated field");
+            let mut normalized = path.clone();
+            if scenario.rules.character_scope.is_some()
+                && packet.opcode == 169
+                && normalized.first().is_some_and(|field| field == "objects")
+                && normalized.len() > 1
+            {
+                normalized[1] = "0".into();
+            }
+            let stream_index = trace.packets[..index]
+                .iter()
+                .filter(|source| {
+                    source.character == packet.character
+                        && source.checkpoint == packet.checkpoint
+                        && source.stream == packet.stream
+                })
+                .count();
+            if let Some(rule) = scenario.rules.tolerances.iter().find(|rule| {
+                rule.opcode == packet.opcode
+                    && rule_character_applies(&rule.character, packet)
+                    && rule.path == normalized
+                    && rule
+                        .packet_index
+                        .map_or(true, |expected| expected == stream_index)
+            }) {
+                for (name, offset) in [
+                    ("at_bound", rule.tolerance),
+                    ("past_bound", rule.tolerance + 1.0),
+                ] {
+                    let value = match value {
+                        Field::TimeMs(value) => value.checked_add(offset as u64).map(Field::TimeMs),
+                        Field::Unsigned(value) => {
+                            value.checked_add(offset as u64).map(Field::Unsigned)
+                        }
+                        Field::Float(value) => Some(Field::Float(value + offset)),
+                        _ => None,
+                    };
+                    if let Some(value) = value {
+                        let mut changed = packet.clone();
+                        *at_mut(&mut changed.fields, &path).unwrap() = value;
+                        analyzer.run_field(
+                            format!("{base}/field_{label}/{name}"),
+                            describe(&format!("change {label} by {offset}")),
+                            index,
+                            packet,
+                            changed,
+                            path.clone(),
+                        )?;
+                    }
+                }
+            }
             for (name, replacement) in replacements(value, &known) {
                 let mut changed = packet.clone();
                 *at_mut(&mut changed.fields, &path).expect("enumerated field") = replacement;
@@ -1076,10 +1334,14 @@ pub fn analyze(golden: &GoldenTrace) -> Result<StrictnessReport> {
                 packet.checkpoint = step.id.clone();
                 packet.character = recipient.map(str::to_owned);
                 packet.stream = stream_for(scenario, &step.id, recipient, *opcode);
-                if matches!(
+                if ((matches!(
                     step.action.as_ref(),
                     Some(SessionAction::Connect | SessionAction::Reconnect)
-                ) && step.character.as_deref() == recipient
+                ) && step.character.as_deref() == recipient)
+                    || step
+                        .events
+                        .iter()
+                        .any(|event| Some(event.character.as_str()) == recipient))
                     && packet.stream != Stream::Unexpected
                 {
                     let mut opening = packet.clone();

@@ -13,6 +13,7 @@ pub mod spatial;
 pub mod strictness;
 pub mod trace;
 pub mod values_mask;
+pub mod variants;
 
 pub use cli::{endpoints, set_endpoints, Endpoints};
 
