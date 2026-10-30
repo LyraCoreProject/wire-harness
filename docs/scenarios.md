@@ -258,8 +258,11 @@ Setup and recording instructions are in [adapters/vmangos/](../adapters/vmangos/
 through `SMSG_LOGIN_VERIFY_WORLD`; the runner records these and all subsequent frames during the
 opening window. They have checkpoint `opening` and stream `opening`. Supported bodies are decoded
 and text is scrubbed. Unsupported bodies are discarded, with the opcode retained. Opening packets
-never take part in comparison or seed GUID mappings. Comparison starts when the first step is sent.
-Opening packets after a step are invalid; the opening has the same 4,096-frame cap as a checkpoint.
+are not compared, but they can bind a fixture GUID: `bank_slot_purchase` binds its banker to the
+creature first seen in the opening, so an adapter must keep opening observations. Comparison starts
+when the first step is sent. A Character that connects after the first step, such as a late
+observer, has its own opening; any other opening packet after a step is invalid. The opening has the
+same 4,096-frame cap as a checkpoint.
 
 Each step sends a typed packet, then receives for `window_ms`, at most 180,000 ms. `replies` lists
 numeric reply opcodes in order, including repeated replies. A broadcast has an opcode and a named
