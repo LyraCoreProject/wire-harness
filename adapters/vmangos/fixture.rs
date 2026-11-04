@@ -337,10 +337,6 @@ mod tests {
     #[test]
     fn item_command_sets_the_requested_stack_count() {
         assert_eq!(item_command(2589, 2), ".additem 2589 2");
-}
-
-    fn spell_command_names_the_declared_spell() {
-        assert_eq!(spell_command(5504), ".learn 5504");
     }
 
     #[test]
