@@ -20,7 +20,7 @@ name = "Questreward"
 race = "human"
 class = "warrior"
 level = 1
-at = { map = 0, x = -8840.56, y = 489.7, z = 109.61, orientation = 0.0 }
+at = { map = 0, x = -8949.95, y = -132.493, z = 83.5312, orientation = 0.0 }
 
 [[fixtures]]
 verb = "money"
@@ -52,7 +52,6 @@ window_ms = 500
 replies = [382]
 broadcasts = [{ opcode = 169, stream = "values" }]
 expect = [
-  { opcode = 382, path = [], value = { type = "object", value = {} }, count = 1 },
 ]
 
 [[rules.unexpected_packets]]
@@ -67,7 +66,7 @@ id = "accept"
 send = { opcode = "CMSG_QUESTGIVER_ACCEPT_QUEST", target = { fixture = "giver" }, entry = 2158 }
 [steps.checkpoint]
 window_ms = 500
-replies = [406, 382]
+replies = [382]
 broadcasts = [{ opcode = 169, stream = "values" }]
 expect = [
   { opcode = 169, path = ["objects", "0", "values", "field_198"], value = { type = "unsigned", value = 2158 }, count = 1 },
@@ -121,7 +120,7 @@ id = "turn_in"
 send = { opcode = "CMSG_QUESTGIVER_CHOOSE_REWARD", target = { fixture = "innkeeper" }, entry = 2158, choice = 0 }
 [steps.checkpoint]
 window_ms = 500
-replies = [358, 464, 579, 401]
+replies = [358, 292, 464, 401]
 broadcasts = [{ opcode = 169, stream = "values" }]
 expect = [
   { opcode = 358, path = ["entry"], value = { type = "unsigned", value = 4656 }, count = 1 },

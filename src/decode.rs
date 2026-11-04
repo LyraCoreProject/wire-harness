@@ -306,10 +306,7 @@ pub fn decode(opcode: u16, body: &[u8]) -> Result<Packet> {
                 body.records(rewards, &["entry", "count"])?,
             );
         }
-        0x0196 => {
-            fields.insert("entry".into(), Field::Unsigned(body.u32()?.into()));
-        }
-        0x0243 => {
+        0x0124 => {
             let count = body.u32()?;
             ensure!(count <= 256, "too many faction standings");
             let mut standings = Vec::new();

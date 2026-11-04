@@ -55,3 +55,10 @@ Register both scenario ids in their existing Behavior ledger entries and add tie
 and rewards. `quest_log` needs templates 7 and 15 with their real kill objectives. Advance the
 harness revision, dependency revision and lockfile together, then generate and inspect the new
 baselines. These recordings make no claim that core currently passes either scenario.
+
+`quest_reward` accepts quest 2158 through the wire from Falkhaan Isenstrider (6774), then turns it
+in to Innkeeper Farley (295), selecting the first choice: five Small Pumpkins (4656). The recorder
+requires the completed log flag after acceptance, an empty log slot and 110 XP after turn-in,
+and exact item, reputation and XP notifications. Acceptance at the wrong giver, choice index 6,
+and repeated turn-in must grant nothing. The final repeat still returns the reward offer, as the
+pinned Reference Server does. No quest or item Fixture Verb is needed by this scenario.

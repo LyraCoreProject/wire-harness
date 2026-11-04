@@ -937,10 +937,10 @@ impl ClientPacket {
             Self::TaxiQueryAvailableNodes { .. } => Some(0x01a9),
             Self::ActivateTaxi { .. } => Some(0x01ae),
             Self::QuestgiverStatus { .. } => Some(0x0183),
+            Self::QuestgiverAccept { .. } => Some(0x017e),
             Self::QuestQuery { .. } => Some(0x005d),
             Self::QuestgiverHello { .. }
             | Self::QuestgiverQuery { .. }
-            | Self::QuestgiverAccept { .. }
             | Self::QuestgiverRequestReward { .. }
             | Self::QuestgiverChooseReward { .. } => None,
             Self::BankerActivate { .. } => Some(0x01b8),
