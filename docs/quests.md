@@ -70,3 +70,8 @@ quest. Verify 0x01000000 in the quest state word, with zero objective progress a
 not a facility for setting arbitrary kill or exploration credit. Seed quest 7's ten entry-6 kills,
 quest 2158's two item choices (4656 and 159, five each), their templates and the respective end-giver
 relations to creatures 197 and 295. Register the scenario and its tier 1 test, then generate its baseline.
+
+World-text fields are data comparisons. Tier 1 authors fixture text locally and seeds only numeric
+ids and values from the pinned world. Quest titles, details, objectives and menu text remain hashed
+in the Reference Server recording. A text value difference is data; a missing field, changed type,
+packet shape, numeric value or giver identity remains a rule difference.

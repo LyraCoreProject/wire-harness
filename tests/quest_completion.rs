@@ -86,3 +86,43 @@ fn complete_and_incomplete_replies_bind_their_giver() {
         .iter()
         .any(|difference| difference.rule == "fixture_guid"));
 }
+
+#[test]
+fn world_text_is_data_but_presence_and_type_stay_rules() {
+    use wire_client::trace::{RecordedField, Sha256Digest};
+    let golden = wire_client::catalogue::get("quest_completion").unwrap();
+    for opcode in [395, 397] {
+        let mut candidate = golden.trace().clone();
+        let packet = candidate
+            .packets
+            .iter_mut()
+            .find(|packet| packet.opcode == opcode)
+            .unwrap();
+        packet.fields.insert(
+            "title".into(),
+            RecordedField::TextSha256(Sha256Digest::of(b"Authored fixture title")),
+        );
+        let result = wire_client::compare::compare(&golden, &candidate, &[]).unwrap();
+        assert_eq!(result.rule_difference_count(), 0);
+        assert_eq!(result.data_difference_count(), 1);
+        for replacement in [None, Some(RecordedField::Unsigned(0))] {
+            let mut candidate = golden.trace().clone();
+            let packet = candidate
+                .packets
+                .iter_mut()
+                .find(|packet| packet.opcode == opcode)
+                .unwrap();
+            if let Some(value) = replacement {
+                packet.fields.insert("title".into(), value);
+            } else {
+                packet.fields.remove("title");
+            }
+            assert!(
+                wire_client::compare::compare(&golden, &candidate, &[])
+                    .unwrap()
+                    .rule_difference_count()
+                    > 0
+            );
+        }
+    }
+}

@@ -117,3 +117,27 @@ reason = "Nearby creature movement is independent of quest completion."
 checkpoint = "request_reward"
 opcode = 221
 subject_guid_high = 61744
+
+[[rules.data_fields]]
+name = "world_text_395_text"
+reason = "Tier 1 authors fixture text locally; Reference Server world text remains a data comparison. Presence and shape stay strict."
+opcode = 395
+path = ["text"]
+
+[[rules.data_fields]]
+name = "world_text_395_title"
+reason = "Tier 1 authors fixture text locally; Reference Server world text remains a data comparison. Presence and shape stay strict."
+opcode = 395
+path = ["title"]
+
+[[rules.data_fields]]
+name = "world_text_397_text"
+reason = "Tier 1 authors fixture text locally; Reference Server world text remains a data comparison. Presence and shape stay strict."
+opcode = 397
+path = ["text"]
+
+[[rules.data_fields]]
+name = "world_text_397_title"
+reason = "Tier 1 authors fixture text locally; Reference Server world text remains a data comparison. Presence and shape stay strict."
+opcode = 397
+path = ["title"]
