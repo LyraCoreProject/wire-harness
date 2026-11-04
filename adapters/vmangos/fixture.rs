@@ -298,6 +298,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn complete_quest_uses_the_normal_add_command() {
+        assert_eq!(
+            quest_command(2158, "Questfinish"),
+            ".quest add 2158 Questfinish"
+        );
+    }
+
+    #[test]
     fn quest_command_names_the_gameplay_character() {
         assert_eq!(quest_command(7, "Questlogger"), ".quest add 7 Questlogger");
     }

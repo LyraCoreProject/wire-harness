@@ -387,10 +387,9 @@ fn quest_snapshot_matches(
                     _ => bail!("quest log field has the wrong type"),
                 }
             };
-            ensure!(
-                word(0)? == u64::from(quests.get(slot).map_or(0, |quest| quest.0)),
-                "quest fixture did not occupy the expected log slot {slot}"
-            );
+            let expected_entry = u64::from(quests.get(slot).map_or(0, |quest| quest.0));
+            let actual_entry = word(0)?;
+            ensure!(actual_entry == expected_entry, "quest fixture slot {slot}: expected entry {expected_entry}, received {actual_entry}");
             ensure!(
                 word(1)? == quests.get(slot).map_or(0, |quest| quest.1) && word(2)? == 0,
                 "quest fixture state did not apply or has objective progress or a timer"
@@ -637,6 +636,47 @@ mod tests {
         for (entry, progress) in [(0, 0), (15, 0), (7, 1), (7, 0x01000000)] {
             assert!(
                 super::quest_snapshot_matches(&snapshot(9, entry, progress), 9, &fixtures).is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn completed_quest_fixture_requires_only_the_complete_flag() {
+        use std::collections::BTreeMap;
+        use wire_client::decode::{Field, Packet};
+        use wire_client::scenario::{FixtureVerb, Observation, QuestState, Stream};
+        let fixture = [FixtureVerb::Quest {
+            entry: 2158,
+            state: QuestState::Complete,
+        }];
+        let snapshot = |progress, timer| Observation {
+            character: None,
+            received_after_ms: None,
+            checkpoint: "opening".into(),
+            stream: Stream::Opening,
+            packet: Packet {
+                opcode: 169,
+                fields: BTreeMap::from([(
+                    "objects".into(),
+                    Field::List(vec![Field::Object(BTreeMap::from([
+                        ("guid".into(), Field::Guid(9)),
+                        ("kind".into(), Field::Unsigned(3)),
+                        (
+                            "values".into(),
+                            Field::Object(BTreeMap::from([
+                                ("field_198".into(), Field::Unsigned(2158)),
+                                ("field_199".into(), Field::Unsigned(progress)),
+                                ("field_200".into(), Field::Unsigned(timer)),
+                            ])),
+                        ),
+                    ]))]),
+                )]),
+            },
+        };
+        assert!(super::quest_snapshot_matches(&snapshot(0x01000000, 0), 9, &fixture).unwrap());
+        for (progress, timer) in [(0, 0), (0x01000001, 0), (0x02000000, 0), (0x01000000, 1)] {
+            assert!(
+                super::quest_snapshot_matches(&snapshot(progress, timer), 9, &fixture).is_err()
             );
         }
     }

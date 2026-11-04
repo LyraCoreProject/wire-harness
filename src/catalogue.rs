@@ -68,6 +68,11 @@ pub const ENTRIES: &[Entry] = &[
         ),
         trace: include_str!("../traces/two_character_visibility__opposite_faction.json"),
     },
+    Entry {
+        id: "quest_completion",
+        scenario: include_str!("../scenarios/quest_completion.toml"),
+        trace: include_str!("../traces/quest_completion.json"),
+    },
 ];
 
 pub fn get(id: &str) -> Result<GoldenTrace> {
