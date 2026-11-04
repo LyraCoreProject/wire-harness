@@ -433,6 +433,124 @@ fn verify_quest_fixtures(prepared: &mut PreparedClient, fixtures: &[FixtureVerb]
     bail!("quest fixture verification did not receive the Character CREATE")
 }
 
+fn item_fixture_bindings(
+    opening: &[Observation],
+    guid: u64,
+    fixtures: &[FixtureVerb],
+) -> Result<Option<BTreeMap<String, u64>>> {
+    use wire_client::decode::Field;
+    let mut inventory = None;
+    let mut items = BTreeMap::new();
+    for observation in opening {
+        let Some(Field::List(objects)) = observation.packet.fields.get("objects") else {
+            continue;
+        };
+        for object in objects {
+            let Field::Object(object) = object else {
+                continue;
+            };
+            if !matches!(object.get("kind"), Some(Field::Unsigned(2 | 3))) {
+                continue;
+            }
+            let (Some(Field::Guid(subject)), Some(Field::Object(values))) =
+                (object.get("guid"), object.get("values"))
+            else {
+                continue;
+            };
+            if *subject == guid {
+                inventory = Some(values);
+            }
+            if *subject >> 48 == 0x4000 {
+                items.insert(*subject, values);
+            }
+        }
+    }
+    let Some(inventory) = inventory else {
+        return Ok(None);
+    };
+    let word = |values: &BTreeMap<String, Field>, index| -> Result<u64> {
+        match values.get(&format!("field_{index}")) {
+            Some(Field::Unsigned(value)) => Ok(*value),
+            None => Ok(0),
+            _ => bail!("item fixture field has the wrong type"),
+        }
+    };
+    let mut bindings = BTreeMap::new();
+    for fixture in fixtures {
+        let FixtureVerb::Item { id, entry, count } = fixture else {
+            continue;
+        };
+        let mut matching = Vec::new();
+        // Build 5875 backpack slots 23..39 use GUID pairs starting at field 486.
+        for slot in 23..39 {
+            let item_guid =
+                word(inventory, 486 + slot * 2)? | (word(inventory, 487 + slot * 2)? << 32);
+            let Some(values) = items.get(&item_guid) else {
+                continue;
+            };
+            if word(values, 3)? != u64::from(*entry) {
+                continue;
+            }
+            ensure!(
+                word(values, 6)? | (word(values, 7)? << 32) == guid,
+                "item fixture has the wrong owner"
+            );
+            ensure!(
+                word(values, 14)? == u64::from(*count),
+                "item fixture has the wrong count"
+            );
+            matching.push(item_guid);
+        }
+        ensure!(
+            matching.len() <= 1,
+            "item fixture must occupy one backpack stack"
+        );
+        let Some(item_guid) = matching.first() else {
+            return Ok(None);
+        };
+        bindings.insert(id.clone(), *item_guid);
+    }
+    Ok(Some(bindings))
+}
+
+fn verify_item_fixtures(
+    prepared: &mut PreparedClient,
+    fixtures: &[FixtureVerb],
+) -> Result<BTreeMap<String, u64>> {
+    if !fixtures
+        .iter()
+        .any(|fixture| matches!(fixture, FixtureVerb::Item { .. }))
+    {
+        return Ok(BTreeMap::new());
+    }
+    prepared
+        .client
+        .set_recv_timeout(Duration::from_millis(100))?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(bindings) =
+            item_fixture_bindings(&prepared.opening, prepared.client.self_guid, fixtures)?
+        {
+            return Ok(bindings);
+        }
+        ensure!(
+            Instant::now() < deadline,
+            "item fixture missing from final login backpack snapshot"
+        );
+        match prepared.client.recv_raw() {
+            Ok((opcode, body)) => {
+                ensure!(
+                    prepared.opening.len() < 4096,
+                    "item fixture verification exceeded 4096 frames"
+                );
+                prepared.opening.push(Observation::opening(opcode, &body));
+            }
+            Err(error) if wire_client::is_read_timeout(&error) => (),
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 fn new_creature(
     client: &mut WireClient,
     before: &[u64],

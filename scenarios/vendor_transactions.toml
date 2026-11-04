@@ -1,0 +1,205 @@
+schema_version = 3
+id = "vendor_transactions"
+behavior = "vendor_transactions"
+
+[opening]
+window_ms = 1000
+
+[rules]
+time_tolerance_ms = 100
+wall_clock_tolerance_ms = 2000
+
+[rules.character_scope]
+name = "character_vendor_state"
+reason = "Compare every Character field, including money and inventory links; item object bodies and unrelated creatures are outside this transaction scenario."
+packets = []
+
+[[fixtures]]
+verb = "character"
+name = "Vendorbuyer"
+race = "human"
+class = "warrior"
+level = 1
+at = { map = 0, x = -8949.95, y = -132.493, z = 83.5312, orientation = 0.0 }
+
+[[fixtures]]
+verb = "money"
+copper = 10
+
+[[fixtures]]
+verb = "item"
+id = "linen"
+entry = 2589
+count = 2
+
+[[fixtures]]
+verb = "creature"
+id = "vendor"
+entry = 66
+offset = 2.0
+
+[[steps]]
+id = "browse"
+send = { opcode = "CMSG_LIST_INVENTORY", target = { fixture = "vendor" } }
+[steps.checkpoint]
+window_ms = 500
+replies = [415]
+broadcasts = [{ opcode = 169, stream = "values" }]
+expect = [
+  { opcode = 415, path = ["items", "0", "entry"], value = { type = "unsigned", value = 7005 }, count = 1 },
+]
+
+[[rules.unexpected_packets]]
+name = "ambient_movement_browse"
+reason = "Nearby creature movement is independent of vendor transactions."
+checkpoint = "browse"
+opcode = 221
+subject_guid_high = 61744
+
+[[steps]]
+id = "too_little_money"
+send = { opcode = "CMSG_BUY_ITEM", target = { fixture = "vendor" }, entry = 2320, count = 2 }
+[steps.checkpoint]
+window_ms = 500
+replies = [421]
+broadcasts = [{ opcode = 169, stream = "values" }]
+expect = [
+  { opcode = 421, path = ["reason"], value = { type = "unsigned", value = 2 }, count = 1 },
+]
+
+[[rules.unexpected_packets]]
+name = "ambient_movement_too_little_money"
+reason = "Nearby creature movement is independent of vendor transactions."
+checkpoint = "too_little_money"
+opcode = 221
+subject_guid_high = 61744
+
+[[steps]]
+id = "buy"
+send = { opcode = "CMSG_BUY_ITEM", target = { fixture = "vendor" }, entry = 2320, count = 1 }
+[steps.checkpoint]
+window_ms = 500
+replies = [420, 358]
+broadcasts = [{ opcode = 169, stream = "values" }]
+expect = [
+  { opcode = 169, path = ["objects", "0", "values", "field_1176"], value = { type = "unsigned", value = 0 }, count = 1 },
+  { opcode = 358, path = ["entry"], value = { type = "unsigned", value = 2320 }, count = 1 },
+  { opcode = 358, path = ["count"], value = { type = "unsigned", value = 1 }, count = 1 },
+]
+
+[[rules.unexpected_packets]]
+name = "ambient_movement_buy"
+reason = "Nearby creature movement is independent of vendor transactions."
+checkpoint = "buy"
+opcode = 221
+subject_guid_high = 61744
+
+[[steps]]
+id = "sell_too_many"
+send = { opcode = "CMSG_SELL_ITEM", target = { fixture = "vendor" }, item = "linen", count = 3 }
+[steps.checkpoint]
+window_ms = 500
+replies = [417]
+broadcasts = [{ opcode = 169, stream = "values" }]
+expect = [
+  { opcode = 417, path = ["reason"], value = { type = "unsigned", value = 2 }, count = 1 },
+]
+
+[[rules.unexpected_packets]]
+name = "ambient_movement_sell_too_many"
+reason = "Nearby creature movement is independent of vendor transactions."
+checkpoint = "sell_too_many"
+opcode = 221
+subject_guid_high = 61744
+
+[[steps]]
+id = "sell"
+send = { opcode = "CMSG_SELL_ITEM", target = { fixture = "vendor" }, item = "linen", count = 0 }
+[steps.checkpoint]
+window_ms = 500
+replies = []
+broadcasts = [{ opcode = 169, stream = "values" }]
+expect = [
+  { opcode = 169, path = ["objects", "0", "values", "field_1176"], value = { type = "unsigned", value = 26 }, count = 1 },
+]
+
+[[rules.unexpected_packets]]
+name = "ambient_movement_sell"
+reason = "Nearby creature movement is independent of vendor transactions."
+checkpoint = "sell"
+opcode = 221
+subject_guid_high = 61744
+
+[[steps]]
+id = "buyback"
+send = { opcode = "CMSG_BUYBACK_ITEM", target = { fixture = "vendor" }, slot = 74 }
+[steps.checkpoint]
+window_ms = 500
+replies = []
+broadcasts = [{ opcode = 169, stream = "values" }]
+expect = [
+  { opcode = 169, path = ["objects", "0", "values", "field_1176"], value = { type = "unsigned", value = 0 }, count = 1 },
+]
+
+[[rules.unexpected_packets]]
+name = "ambient_movement_buyback"
+reason = "Nearby creature movement is independent of vendor transactions."
+checkpoint = "buyback"
+opcode = 221
+subject_guid_high = 61744
+
+[[steps]]
+id = "buyback_empty"
+send = { opcode = "CMSG_BUYBACK_ITEM", target = { fixture = "vendor" }, slot = 74 }
+[steps.checkpoint]
+window_ms = 500
+replies = [421]
+broadcasts = [{ opcode = 169, stream = "values" }]
+expect = [
+  { opcode = 421, path = ["reason"], value = { type = "unsigned", value = 0 }, count = 1 },
+]
+
+[[rules.unexpected_packets]]
+name = "ambient_movement_buyback_empty"
+reason = "Nearby creature movement is independent of vendor transactions."
+checkpoint = "buyback_empty"
+opcode = 221
+subject_guid_high = 61744
+
+[[steps]]
+id = "sell_again"
+send = { opcode = "CMSG_SELL_ITEM", target = { fixture = "vendor" }, item = "linen", count = 0 }
+[steps.checkpoint]
+window_ms = 500
+replies = []
+broadcasts = [{ opcode = 169, stream = "values" }]
+expect = [
+  { opcode = 169, path = ["objects", "0", "values", "field_1176"], value = { type = "unsigned", value = 26 }, count = 1 },
+]
+
+[[rules.unexpected_packets]]
+name = "ambient_movement_sell_again"
+reason = "Nearby creature movement is independent of vendor transactions."
+checkpoint = "sell_again"
+opcode = 221
+subject_guid_high = 61744
+
+[[steps]]
+id = "buy_in_slot"
+send = { opcode = "CMSG_BUY_ITEM_IN_SLOT", target = { fixture = "vendor" }, entry = 2320, slot = 30, count = 1 }
+[steps.checkpoint]
+window_ms = 500
+replies = [420, 358]
+broadcasts = [{ opcode = 169, stream = "values" }]
+expect = [
+  { opcode = 169, path = ["objects", "0", "values", "field_1176"], value = { type = "unsigned", value = 16 }, count = 1 },
+  { opcode = 358, path = ["slot"], value = { type = "unsigned", value = 30 }, count = 1 },
+  { opcode = 358, path = ["count"], value = { type = "unsigned", value = 1 }, count = 1 },
+]
+
+[[rules.unexpected_packets]]
+name = "ambient_movement_buy_in_slot"
+reason = "Nearby creature movement is independent of vendor transactions."
+checkpoint = "buy_in_slot"
+opcode = 221
+subject_guid_high = 61744

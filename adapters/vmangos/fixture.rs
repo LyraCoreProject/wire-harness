@@ -116,6 +116,11 @@ impl FixtureAdapter for Adapter {
                     self.1.pop();
                     discovered?;
                 }
+                FixtureVerb::Item { entry, count, .. } => {
+                    gm.set_selection(client.self_guid)?;
+                    command(gm, item_command(*entry, *count))?;
+                    drain(gm, &mut client)?;
+                }
                 FixtureVerb::Quest { entry, .. } => {
                     command(gm, quest_command(*entry, name))?;
                     drain(gm, &mut client)?;
@@ -150,6 +155,7 @@ impl FixtureAdapter for Adapter {
 
         let mut prepared = super::reconnect_checked(&self.0, fixture)?;
         super::verify_quest_fixtures(&mut prepared, fixtures)?;
+        bindings.extend(super::verify_item_fixtures(&mut prepared, fixtures)?);
         prepared.fixtures = bindings;
         Ok(prepared)
     }
@@ -181,6 +187,10 @@ impl FixtureAdapter for Adapter {
         self.1.clear();
         Ok(())
     }
+}
+
+fn item_command(entry: u32, count: u32) -> String {
+    format!(".additem {entry} {count}")
 }
 
 fn quest_command(entry: u32, name: &str) -> String {
