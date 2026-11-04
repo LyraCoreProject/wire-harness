@@ -214,6 +214,7 @@ remain separate per recipient; GUID mapping remains shared across all recipients
 | Verb | Fields | Meaning |
 | --- | --- | --- |
 | `character` | `name`, `race`, `class`, `level`, `at` | Create the Character; `at` has map, x/y/z in yards and orientation in radians. |
+| `spell` | `spell_id` | Learn a spell from 1 through 65535; no duplicates. Both adapters require it in the final login spell list. |
 | `money` | `copper` | Set the exact balance, from 0 through 2,147,483,647; at most once. |
 | `quest` | `entry`, `state = "incomplete"` | Add a quest to the next log slot, with no objective progress or timer. Entries are nonzero and unique; at most 20. |
 | `known_flight_node` | `node_id` | Learn one node, from 1 through 256; no duplicates. |
@@ -307,3 +308,9 @@ WIRE_ADAPTER=vmangos vanilla-wire scenario-file scenarios/connection_identity.to
   --host 127.0.0.1 --logon-port 13724 --world-port 18085 \
   --account ACCOUNT --password-stdin
 ```
+
+`CMSG_CAST_SPELL` takes `spell_id` and an optional `target`. Omit `target` for a self effect
+such as Conjure Water; this sends an empty target mask. An explicit target uses the unit mask
+and a packed GUID. `CMSG_CANCEL_CAST` takes `spell_id`. The `cast_and_interrupt` scenario learns
+Conjure Water (5504), interrupts it, completes a second cast to create two items 5350, and requires
+Fireball (133) on self to fail with bad-target reason 10. Its compared packets have no world-text fields.

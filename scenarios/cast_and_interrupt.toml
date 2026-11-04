@@ -28,7 +28,7 @@ spell_id = 5504
 
 [[steps]]
 id = "begin"
-send = { opcode = "CMSG_CAST_SPELL", target = "character", spell_id = 5504 }
+send = { opcode = "CMSG_CAST_SPELL", spell_id = 5504 }
 [steps.checkpoint]
 window_ms = 500
 replies = [305]
@@ -66,10 +66,10 @@ subject_guid_high = 61744
 
 [[steps]]
 id = "finish"
-send = { opcode = "CMSG_CAST_SPELL", target = "character", spell_id = 5504 }
+send = { opcode = "CMSG_CAST_SPELL", spell_id = 5504 }
 [steps.checkpoint]
 window_ms = 3500
-replies = [305, 306, 358]
+replies = [305, 304, 306, 358, 588]
 broadcasts = [{ opcode = 169, stream = "values" }]
 expect = [
   { opcode = 358, path = ["entry"], value = { type = "unsigned", value = 5350 }, count = 1 },
@@ -101,3 +101,16 @@ reason = "Nearby creature movement is independent of casting."
 checkpoint = "bad_target"
 opcode = 221
 subject_guid_high = 61744
+
+[[rules.unexpected_packets]]
+name = "ambient_creature_despawn"
+reason = "Unrelated creatures can leave view during the completed cast."
+checkpoint = "finish"
+opcode = 170
+subject_guid_high = 61744
+
+[[rules.identities]]
+name = "conjured_stack_guid"
+reason = "The new backpack stack has an allocated item GUID low word. Identity consistency is unchecked: single sample."
+opcode = 169
+path = ["objects", "0", "values", "field_538"]

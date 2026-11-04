@@ -54,3 +54,7 @@ Only `state = "incomplete"` is supported. Both adapters verify every quest slot 
 Character CREATE: the declared entries in order, zero objective progress, zero state flags and
 no timer. Missing, completed, timed or pre-progressed quests fail setup. The core tier 1 Transport
 must handle `FixtureVerb::Quest` at the next pin, calling this reducer in fixture order.
+
+The `spell` Fixture Verb calls `debug_learn_spell(character_guid: u64, spell_id: u32)`.
+Both adapters check the private final-login `SMSG_INITIAL_SPELLS` list for every declared spell.
+Missing spells fail setup. Core tier 1 needs the same verb application and final-login check.

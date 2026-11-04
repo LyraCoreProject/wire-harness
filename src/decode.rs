@@ -308,9 +308,27 @@ pub fn decode(opcode: u16, body: &[u8]) -> Result<Packet> {
             }
             fields.insert("cooldowns".into(), Field::List(cooldowns));
         }
+        0x024c => {
+            fields.insert("caster".into(), body.packed_guid()?);
+            fields.insert("spell".into(), Field::Unsigned(body.u32()?.into()));
+            let count = body.u32()?;
+            ensure!(count <= 3, "too many spell execute effects");
+            let mut effects = Vec::new();
+            for _ in 0..count {
+                let kind = body.u32()?;
+                ensure!(kind == 24, "unsupported spell execute effect");
+                let count = body.u32()?;
+                effects.push(Field::Object(BTreeMap::from([
+                    ("kind".into(), Field::Unsigned(kind.into())),
+                    ("items".into(), body.records(count, &["entry"])?),
+                ])));
+            }
+            fields.insert("effects".into(), Field::List(effects));
+        }
         0x0130 => {
             fields.insert("spell".into(), Field::Unsigned(body.u32()?.into()));
             let result = body.u8()?;
+            ensure!(result <= 2, "invalid cast result");
             fields.insert("result".into(), Field::Unsigned(result.into()));
             if result == 2 {
                 fields.insert("reason".into(), Field::Unsigned(body.u8()?.into()));

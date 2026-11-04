@@ -86,6 +86,7 @@ impl FixtureAdapter for Adapter {
         drain(gm, &mut client)?;
         if *level > 1 {
             command(gm, format!(".levelup {name} {}", level - 1))?;
+            drain(gm, &mut client)?;
         }
         let mut bindings = std::collections::BTreeMap::new();
         for verb in &fixtures[1..] {
@@ -118,6 +119,7 @@ impl FixtureAdapter for Adapter {
                 }
                 FixtureVerb::Spell { spell_id } => {
                     gm.set_selection(client.self_guid)?;
+                    drain(gm, &mut client)?;
                     command(gm, spell_command(*spell_id))?;
                     drain(gm, &mut client)?;
                 }
@@ -127,6 +129,7 @@ impl FixtureAdapter for Adapter {
                 }
                 FixtureVerb::Money { copper } => {
                     gm.set_selection(client.self_guid)?;
+                    drain(gm, &mut client)?;
                     command(gm, ".modify money -2147483647".into())?;
                     drain(gm, &mut client)?;
                     command(gm, format!(".modify money {copper}"))?;
@@ -306,6 +309,11 @@ impl Drop for Adapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spell_command_names_the_declared_spell() {
+        assert_eq!(spell_command(5504), ".learn 5504");
+    }
 
     #[test]
     fn quest_command_names_the_gameplay_character() {

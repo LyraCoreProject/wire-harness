@@ -443,7 +443,11 @@ fn spell_snapshot_matches(observation: &Observation, fixtures: &[FixtureVerb]) -
     };
     for fixture in fixtures {
         if let FixtureVerb::Spell { spell_id } = fixture {
-            ensure!(spells.iter().any(|spell| matches!(spell,Field::Object(fields) if fields.get("id")==Some(&Field::Unsigned((*spell_id).into())))), "spell fixture {spell_id} missing from final login spell list");
+            let present = spells.iter().any(|spell| matches!(spell, Field::Object(fields) if fields.get("id") == Some(&Field::Unsigned((*spell_id).into()))));
+            ensure!(
+                present,
+                "spell fixture {spell_id} missing from final login spell list"
+            );
         }
     }
     Ok(true)
@@ -686,6 +690,32 @@ mod tests {
                 super::quest_snapshot_matches(&snapshot(9, entry, progress), 9, &fixtures).is_err()
             );
         }
+    }
+
+    #[test]
+    fn spell_fixture_requires_the_declared_spell_in_final_login() {
+        use std::collections::BTreeMap;
+        use wire_client::decode::{Field, Packet};
+        use wire_client::scenario::{FixtureVerb, Observation, Stream};
+        let fixtures = [FixtureVerb::Spell { spell_id: 5504 }];
+        let snapshot = |id| Observation {
+            character: None,
+            received_after_ms: None,
+            checkpoint: "opening".into(),
+            stream: Stream::Opening,
+            packet: Packet {
+                opcode: 298,
+                fields: BTreeMap::from([(
+                    "spells".into(),
+                    Field::List(vec![Field::Object(BTreeMap::from([(
+                        "id".into(),
+                        Field::Unsigned(id),
+                    )]))]),
+                )]),
+            },
+        };
+        assert!(super::spell_snapshot_matches(&snapshot(5504), &fixtures).unwrap());
+        assert!(super::spell_snapshot_matches(&snapshot(133), &fixtures).is_err());
     }
 
     #[test]

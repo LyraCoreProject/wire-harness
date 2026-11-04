@@ -156,6 +156,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn spell_fixture_uses_the_existing_learn_reducer() {
+        assert_eq!(
+            reducer_calls(17, &[FixtureVerb::Spell { spell_id: 5504 }]),
+            vec![("debug_learn_spell", serde_json::json!([17, 5504]))]
+        );
+    }
+
+    #[test]
     fn incomplete_quest_uses_the_grant_reducer() {
         let fixtures = [FixtureVerb::Quest {
             entry: 7,

@@ -171,7 +171,11 @@ pub enum ClientPacket {
     #[serde(rename = "CMSG_QUESTLOG_REMOVE_QUEST")]
     QuestLogRemove { slot: u8 },
     #[serde(rename = "CMSG_CAST_SPELL")]
-    CastSpell { target: Target, spell_id: u32 },
+    CastSpell {
+        #[serde(default)]
+        target: Option<Target>,
+        spell_id: u32,
+    },
     #[serde(rename = "CMSG_CANCEL_CAST")]
     CancelCast { spell_id: u32 },
     #[serde(rename = "CMSG_BUY_BANK_SLOT")]
@@ -957,13 +961,13 @@ impl ClientPacket {
             | Self::QuestLogSwap { .. }
             | Self::QuestLogRemove { .. }
             | Self::CancelCast { .. } => None,
+            Self::CastSpell { target, .. } => target.as_ref(),
             Self::NameQuery { target }
             | Self::TaxiNodeStatusQuery { target }
             | Self::TaxiQueryAvailableNodes { target }
             | Self::QuestgiverStatus { target }
             | Self::QuestgiverHello { target }
             | Self::QuestgiverQuery { target, .. }
-            | Self::CastSpell { target, .. }
             | Self::BankerActivate { target }
             | Self::BuyBankSlot { target }
             | Self::ActivateTaxi { target, .. } => Some(target),
@@ -1014,14 +1018,16 @@ impl ClientPacket {
                 body.extend(entry.to_le_bytes());
                 (0x0186, body)
             }
-            Self::CastSpell { spell_id, .. } => {
+            Self::CastSpell { spell_id, target } => {
                 let mut body = spell_id.to_le_bytes().to_vec();
-                body.extend(2u16.to_le_bytes());
-                let bytes = guid.to_le_bytes();
-                body.push(bytes.iter().enumerate().fold(0u8, |mask, (index, byte)| {
-                    mask | (u8::from(*byte != 0) << index)
-                }));
-                body.extend(bytes.into_iter().filter(|byte| *byte != 0));
+                body.extend(if target.is_some() { 2u16 } else { 0u16 }.to_le_bytes());
+                if target.is_some() {
+                    let bytes = guid.to_le_bytes();
+                    body.push(bytes.iter().enumerate().fold(0u8, |mask, (index, byte)| {
+                        mask | (u8::from(*byte != 0) << index)
+                    }));
+                    body.extend(bytes.into_iter().filter(|byte| *byte != 0));
+                }
                 (0x012e, body)
             }
             Self::CancelCast { spell_id } => (0x012f, spell_id.to_le_bytes().to_vec()),
