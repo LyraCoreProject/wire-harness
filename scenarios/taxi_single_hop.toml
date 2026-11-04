@@ -30,6 +30,13 @@ packets = [
   { opcode = 782, paths = [["guid"]] },
 ]
 
+[[rules.unexpected_packets]]
+name = "ambient_node_emote"
+reason = "Nearby creature emotes are independent of the taxi-node reply."
+checkpoint = "nodes"
+opcode = 259
+subject_guid_high = 61744
+
 [[rules.identities]]
 name = "spline_identity"
 reason = "Require unsigned 32-bit spline ids and preserve a bijection across samples. The number is a server-local sequence, not elapsed time. Identity consistency is unchecked: single sample."

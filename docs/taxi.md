@@ -48,6 +48,7 @@ All parameters and reasons are in the scenario and covered by its hash.
 | Duration tolerance | 1 ms covers final integer rounding of a floating-point spline length. Route points, flags, fare and landing position remain exact. |
 | Wall clock | 2,000 ms is the schema's clock bound; this scenario's wall-clock samples occur only in its excluded opening. |
 | `passenger_and_taxi_state` | Nearby entities differ with world data. Explicit subject paths exclude their packets. Every passenger field remains, including `PLAYER_FLAGS` at field 190; no passenger field is excused. VALUES updates compare per field with their original arrival times. |
+| `ambient_node_emote` | Only opcode 259 during `nodes`, with a decoded creature subject (`0xF130`). Character subjects, other GUID types, missing subjects and malformed packets remain differences. |
 | `spline_identity` | Spline ids are unsigned 32-bit server-local sequence numbers. A bijection preserves identity across samples. One sample establishes the mapping and checks its shape; identity consistency is unchecked with that sample alone. |
 | `teleport_counter` | Require unsigned 32-bit counters, including zero. Connection-local identity consistency is `unchecked: single sample`. The runner echoes the received counter. |
 | `landing_clock_origin` | Require an unsigned 32-bit monotonic timestamp. Clock consistency is `unchecked: single sample`. Further samples compare elapsed differences with wraparound and this rule's own 100 ms tolerance, one map tick. |
