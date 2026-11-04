@@ -327,6 +327,7 @@ from the pinned world. Its elevated Stormwind position keeps nearby ground creat
 fixture's view during the 61-second wait. The scenario makes no movement or collision claim.
 The chat decoder checks counted strings and retains sender identity before the recorder hashes text;
 the restock wait permits only creature-subject chat and despawns, in addition to creature movement.
+
 `CMSG_CAST_SPELL` takes `spell_id` and an optional `target`. Omit `target` for a self effect
 such as Conjure Water; this sends an empty target mask. An explicit target uses the unit mask
 and a packed GUID. `CMSG_CANCEL_CAST` takes `spell_id`. The `cast_and_interrupt` scenario learns

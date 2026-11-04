@@ -61,6 +61,7 @@ The `item` Fixture Verb uses `debug_grant_item(character_guid: u64, entry: u32, 
 Both adapters require one owned backpack stack with the declared entry and count in the final
 login snapshot, then bind its full GUID to the fixture id for sell requests. Core tier 1 must
 apply the verb and populate the same binding at the next harness pin.
+
 The `spell` Fixture Verb calls `debug_learn_spell(character_guid: u64, spell_id: u32)`.
 Both adapters check the private final-login `SMSG_INITIAL_SPELLS` list for every declared spell.
 Missing spells fail setup. Core tier 1 needs the same verb application and final-login check.
