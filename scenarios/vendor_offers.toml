@@ -20,7 +20,7 @@ name = "Vendoroffers"
 race = "human"
 class = "warrior"
 level = 1
-at = { map = 0, x = -8949.95, y = -132.493, z = 83.5312, orientation = 0.0 }
+at = { map = 0, x = -8840.56, y = 489.7, z = 2000.0, orientation = 0.0 }
 
 [[fixtures]]
 verb = "money"
@@ -189,4 +189,18 @@ name = "ambient_movement_restocked_list"
 reason = "Nearby creature movement is independent of vendor offers."
 checkpoint = "restocked_list"
 opcode = 221
+subject_guid_high = 61744
+
+[[rules.unexpected_packets]]
+name = "ambient_creature_chat"
+reason = "Creature speech during the restock wait is independent of vendor offers."
+checkpoint = "restock_wait"
+opcode = 150
+subject_guid_high = 61744
+
+[[rules.unexpected_packets]]
+name = "ambient_creature_despawn"
+reason = "Unrelated creatures can leave view during the restock wait."
+checkpoint = "restock_wait"
+opcode = 170
 subject_guid_high = 61744
