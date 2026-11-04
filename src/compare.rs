@@ -651,7 +651,7 @@ fn subject(fields: &BTreeMap<String, Field>) -> Option<u64> {
     None
 }
 
-fn opening_creature_guid(trace: &Trace, character: Option<&str>, entry: u32) -> Option<u64> {
+fn opening_fixture_guid(trace: &Trace, character: Option<&str>, entry: u32) -> Option<u64> {
     let mut matches = trace
         .packets
         .iter()
@@ -1940,6 +1940,72 @@ pub(crate) fn compare_with_rules(
                 }
                 (id, 392)
             }
+            Some(
+                ClientPacket::QuestgiverComplete {
+                    target: Target::Fixture(id),
+                    ..
+                }
+                | ClientPacket::QuestgiverChooseReward {
+                    target: Target::Fixture(id),
+                    ..
+                }
+                | ClientPacket::QuestgiverRequestReward {
+                    target: Target::Fixture(id),
+                    ..
+                },
+            ) => {
+                let replies = if let Some(actor) = step.character.as_deref() {
+                    &step
+                        .checkpoint
+                        .for_character(actor)
+                        .context("quest actor checkpoint")?
+                        .replies
+                } else {
+                    &step.checkpoint.replies
+                };
+                let Some(opcode) = replies.iter().find(|opcode| matches!(opcode, 395 | 397)) else {
+                    continue;
+                };
+                (id, *opcode)
+            }
+            Some(ClientPacket::ListInventory {
+                target: Target::Fixture(id),
+            }) => (id, 415),
+            Some(
+                ClientPacket::BuyItem {
+                    target: Target::Fixture(id),
+                    ..
+                }
+                | ClientPacket::BuyItemInSlot {
+                    target: Target::Fixture(id),
+                    ..
+                }
+                | ClientPacket::SellItem {
+                    target: Target::Fixture(id),
+                    ..
+                }
+                | ClientPacket::BuybackItem {
+                    target: Target::Fixture(id),
+                    ..
+                },
+            ) => {
+                let replies = if let Some(actor) = step.character.as_deref() {
+                    &step
+                        .checkpoint
+                        .for_character(actor)
+                        .context("vendor actor checkpoint")?
+                        .replies
+                } else {
+                    &step.checkpoint.replies
+                };
+                let Some(opcode) = replies
+                    .iter()
+                    .find(|opcode| matches!(opcode, 417 | 420 | 421))
+                else {
+                    continue;
+                };
+                (id, *opcode)
+            }
             _ => continue,
         };
         let character = step.character.as_deref();
@@ -1953,60 +2019,73 @@ pub(crate) fn compare_with_rules(
         } else {
             &scenario.fixtures
         };
-        let entry = fixtures
-            .iter()
-            .find_map(|fixture| match fixture {
-                FixtureVerb::Creature {
-                    id: fixture_id,
-                    entry,
-                    ..
-                } if fixture_id == id => Some(*entry),
-                _ => None,
-            })
-            .context("creature fixture")?;
-        let expected_guid = opening_creature_guid(expected, character, entry);
-        let actual_guid = opening_creature_guid(actual, character, entry);
-        let location = Location {
-            character: character.map(str::to_owned),
-            checkpoint: step.id.clone(),
-            stream: Some(Stream::Reply(step.id.clone())),
-            packet_index: None,
-            path: vec!["guid".into()],
-            opcode: Some(opcode),
-        };
-        match (expected_guid, actual_guid) {
-            (Some(expected_guid), Some(actual_guid)) => {
-                comparator.field(
-                    opcode,
-                    &location,
-                    &Field::Guid(expected_guid),
-                    &Field::Guid(actual_guid),
-                );
-                for (trace, guid) in [(expected, expected_guid), (actual, actual_guid)] {
-                    for packet in trace.packets.iter().filter(|packet| {
-                        packet.checkpoint == step.id
-                            && packet.character.as_deref() == character
-                            && packet.opcode == opcode
-                    }) {
-                        if packet.fields.get("guid") != Some(&Field::Guid(guid)) {
-                            comparator.difference(
-                                &location,
-                                "fixture_guid",
-                                "reply must name its creature fixture",
-                                Some(&Field::Guid(guid)),
-                                packet.fields.get("guid"),
-                            );
+        let mut bindings = vec![(id, opcode, "guid")];
+        if let Some(ClientPacket::SellItem { item, .. }) = &step.send {
+            if opcode == 417 {
+                bindings.push((item, opcode, "item"));
+            }
+        }
+        for (id, opcode, field) in bindings {
+            let entry = fixtures
+                .iter()
+                .find_map(|fixture| match fixture {
+                    FixtureVerb::Creature {
+                        id: fixture_id,
+                        entry,
+                        ..
+                    }
+                    | FixtureVerb::Item {
+                        id: fixture_id,
+                        entry,
+                        ..
+                    } if fixture_id == id => Some(*entry),
+                    _ => None,
+                })
+                .context("bound fixture")?;
+            let expected_guid = opening_fixture_guid(expected, character, entry);
+            let actual_guid = opening_fixture_guid(actual, character, entry);
+            let location = Location {
+                character: character.map(str::to_owned),
+                checkpoint: step.id.clone(),
+                stream: Some(Stream::Reply(step.id.clone())),
+                packet_index: None,
+                path: vec![field.into()],
+                opcode: Some(opcode),
+            };
+            match (expected_guid, actual_guid) {
+                (Some(expected_guid), Some(actual_guid)) => {
+                    comparator.field(
+                        opcode,
+                        &location,
+                        &Field::Guid(expected_guid),
+                        &Field::Guid(actual_guid),
+                    );
+                    for (trace, guid) in [(expected, expected_guid), (actual, actual_guid)] {
+                        for packet in trace.packets.iter().filter(|packet| {
+                            packet.checkpoint == step.id
+                                && packet.character.as_deref() == character
+                                && packet.opcode == opcode
+                        }) {
+                            if packet.fields.get(field) != Some(&Field::Guid(guid)) {
+                                comparator.difference(
+                                    &location,
+                                    "fixture_guid",
+                                    "reply must name its bound fixture",
+                                    Some(&Field::Guid(guid)),
+                                    packet.fields.get(field),
+                                );
+                            }
                         }
                     }
                 }
+                _ => comparator.difference(
+                    &location,
+                    "fixture_guid",
+                    "The reply must name its fixture from opening",
+                    expected_guid.map(Field::Guid).as_ref(),
+                    actual_guid.map(Field::Guid).as_ref(),
+                ),
             }
-            _ => comparator.difference(
-                &location,
-                "fixture_guid",
-                "The reply must name the creature created during opening",
-                expected_guid.map(Field::Guid).as_ref(),
-                actual_guid.map(Field::Guid).as_ref(),
-            ),
         }
     }
     for create in &scenario.opening.fixture_creates {
@@ -2023,9 +2102,9 @@ pub(crate) fn compare_with_rules(
                 _ => None,
             })
             .context("opening CREATE fixture")?;
-        let expected_create = opening_creature_guid(expected, Some(&create.actor), entry)
+        let expected_create = opening_fixture_guid(expected, Some(&create.actor), entry)
             .and_then(|guid| opening_fixture_create(expected, &create.recipient, guid));
-        let actual_create = opening_creature_guid(actual, Some(&create.actor), entry)
+        let actual_create = opening_fixture_guid(actual, Some(&create.actor), entry)
             .and_then(|guid| opening_fixture_create(actual, &create.recipient, guid));
         let location = Location {
             character: Some(create.recipient.clone()),

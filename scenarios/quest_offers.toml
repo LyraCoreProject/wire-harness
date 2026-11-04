@@ -116,3 +116,69 @@ reason = "Nearby creature movement is independent of reading quest offers."
 checkpoint = "unrelated_quest"
 opcode = 221
 subject_guid_high = 61744
+
+[[rules.data_fields]]
+name = "world_text_93_details"
+reason = "Tier 1 authors fixture text locally; Reference Server world text remains a data comparison. Presence and shape stay strict."
+opcode = 93
+path = ["details"]
+
+[[rules.data_fields]]
+name = "world_text_93_end"
+reason = "Tier 1 authors fixture text locally; Reference Server world text remains a data comparison. Presence and shape stay strict."
+opcode = 93
+path = ["end"]
+
+[[rules.data_fields]]
+name = "world_text_93_objective_text_0"
+reason = "Tier 1 authors fixture text locally; Reference Server world text remains a data comparison. Presence and shape stay strict."
+opcode = 93
+path = ["objective_text", "0"]
+
+[[rules.data_fields]]
+name = "world_text_93_objective_text_1"
+reason = "Tier 1 authors fixture text locally; Reference Server world text remains a data comparison. Presence and shape stay strict."
+opcode = 93
+path = ["objective_text", "1"]
+
+[[rules.data_fields]]
+name = "world_text_93_objective_text_2"
+reason = "Tier 1 authors fixture text locally; Reference Server world text remains a data comparison. Presence and shape stay strict."
+opcode = 93
+path = ["objective_text", "2"]
+
+[[rules.data_fields]]
+name = "world_text_93_objective_text_3"
+reason = "Tier 1 authors fixture text locally; Reference Server world text remains a data comparison. Presence and shape stay strict."
+opcode = 93
+path = ["objective_text", "3"]
+
+[[rules.data_fields]]
+name = "world_text_93_objectives"
+reason = "Tier 1 authors fixture text locally; Reference Server world text remains a data comparison. Presence and shape stay strict."
+opcode = 93
+path = ["objectives"]
+
+[[rules.data_fields]]
+name = "world_text_93_title"
+reason = "Tier 1 authors fixture text locally; Reference Server world text remains a data comparison. Presence and shape stay strict."
+opcode = 93
+path = ["title"]
+
+[[rules.data_fields]]
+name = "world_text_392_details"
+reason = "Tier 1 authors fixture text locally; Reference Server world text remains a data comparison. Presence and shape stay strict."
+opcode = 392
+path = ["details"]
+
+[[rules.data_fields]]
+name = "world_text_392_objectives"
+reason = "Tier 1 authors fixture text locally; Reference Server world text remains a data comparison. Presence and shape stay strict."
+opcode = 392
+path = ["objectives"]
+
+[[rules.data_fields]]
+name = "world_text_392_title"
+reason = "Tier 1 authors fixture text locally; Reference Server world text remains a data comparison. Presence and shape stay strict."
+opcode = 392
+path = ["title"]

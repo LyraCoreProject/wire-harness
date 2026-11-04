@@ -86,6 +86,7 @@ impl FixtureAdapter for Adapter {
         drain(gm, &mut client)?;
         if *level > 1 {
             command(gm, format!(".levelup {name} {}", level - 1))?;
+            drain(gm, &mut client)?;
         }
         let mut bindings = std::collections::BTreeMap::new();
         for verb in &fixtures[1..] {
@@ -116,12 +117,25 @@ impl FixtureAdapter for Adapter {
                     self.1.pop();
                     discovered?;
                 }
+                FixtureVerb::Item { entry, count, .. } => {
+                    gm.set_selection(client.self_guid)?;
+                    drain(gm, &mut client)?;
+                    command(gm, item_command(*entry, *count))?;
+                    drain(gm, &mut client)?;
+                }
+                FixtureVerb::Spell { spell_id } => {
+                    gm.set_selection(client.self_guid)?;
+                    drain(gm, &mut client)?;
+                    command(gm, spell_command(*spell_id))?;
+                    drain(gm, &mut client)?;
+                }
                 FixtureVerb::Quest { entry, .. } => {
                     command(gm, quest_command(*entry, name))?;
                     drain(gm, &mut client)?;
                 }
                 FixtureVerb::Money { copper } => {
                     gm.set_selection(client.self_guid)?;
+                    drain(gm, &mut client)?;
                     command(gm, ".modify money -2147483647".into())?;
                     drain(gm, &mut client)?;
                     command(gm, format!(".modify money {copper}"))?;
@@ -150,6 +164,8 @@ impl FixtureAdapter for Adapter {
 
         let mut prepared = super::reconnect_checked(&self.0, fixture)?;
         super::verify_quest_fixtures(&mut prepared, fixtures)?;
+        bindings.extend(super::verify_item_fixtures(&mut prepared, fixtures)?);
+        super::verify_spell_fixtures(&mut prepared, fixtures)?;
         prepared.fixtures = bindings;
         Ok(prepared)
     }
@@ -181,6 +197,14 @@ impl FixtureAdapter for Adapter {
         self.1.clear();
         Ok(())
     }
+}
+
+fn item_command(entry: u32, count: u32) -> String {
+    format!(".additem {entry} {count}")
+}
+
+fn spell_command(spell_id: u32) -> String {
+    format!(".learn {spell_id}")
 }
 
 fn quest_command(entry: u32, name: &str) -> String {
@@ -296,6 +320,24 @@ impl Drop for Adapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spell_command_names_the_declared_spell() {
+        assert_eq!(spell_command(5504), ".learn 5504");
+    }
+
+    #[test]
+    fn complete_quest_uses_the_normal_add_command() {
+        assert_eq!(
+            quest_command(2158, "Questfinish"),
+            ".quest add 2158 Questfinish"
+        );
+    }
+
+    #[test]
+    fn item_command_sets_the_requested_stack_count() {
+        assert_eq!(item_command(2589, 2), ".additem 2589 2");
+    }
 
     #[test]
     fn quest_command_names_the_gameplay_character() {

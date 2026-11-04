@@ -93,6 +93,10 @@ fn reducer_calls(guid: u64, fixtures: &[FixtureVerb]) -> Vec<(&'static str, serd
                     json!([guid, at.map, at.x, at.y, at.z, at.orientation]),
                 ),
             ],
+            FixtureVerb::Item { entry, count, .. } => {
+                vec![("debug_grant_item", json!([guid, entry, count]))]
+            }
+            FixtureVerb::Spell { spell_id } => vec![("debug_learn_spell", json!([guid, spell_id]))],
             FixtureVerb::Quest { entry, .. } => vec![("debug_grant_quest", json!([guid, entry]))],
             FixtureVerb::Money { copper } => vec![("debug_set_money", json!([guid, copper]))],
             FixtureVerb::KnownFlightNode { node_id } => {
@@ -140,6 +144,8 @@ impl FixtureAdapter for Adapter {
         drop(client);
         let mut prepared = super::reconnect_checked(&self.invocation, fixture)?;
         super::verify_quest_fixtures(&mut prepared, fixtures)?;
+        bindings.extend(super::verify_item_fixtures(&mut prepared, fixtures)?);
+        super::verify_spell_fixtures(&mut prepared, fixtures)?;
         prepared.fixtures = bindings;
         Ok(prepared)
     }
@@ -152,6 +158,39 @@ impl FixtureAdapter for Adapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spell_fixture_uses_the_existing_learn_reducer() {
+        assert_eq!(
+            reducer_calls(17, &[FixtureVerb::Spell { spell_id: 5504 }]),
+            vec![("debug_learn_spell", serde_json::json!([17, 5504]))]
+        );
+    }
+
+    #[test]
+    fn complete_quest_uses_the_same_normal_grant_path() {
+        let fixtures = [FixtureVerb::Quest {
+            entry: 2158,
+            state: wire_client::scenario::QuestState::Complete,
+        }];
+        assert_eq!(
+            reducer_calls(17, &fixtures),
+            vec![("debug_grant_quest", serde_json::json!([17, 2158]))]
+        );
+    }
+
+    #[test]
+    fn item_fixture_passes_entry_and_count_to_the_grant_reducer() {
+        let fixtures = [FixtureVerb::Item {
+            id: "linen".into(),
+            entry: 2589,
+            count: 2,
+        }];
+        assert_eq!(
+            reducer_calls(17, &fixtures),
+            vec![("debug_grant_item", serde_json::json!([17, 2589, 2]))]
+        );
+    }
 
     #[test]
     fn incomplete_quest_uses_the_grant_reducer() {

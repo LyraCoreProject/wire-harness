@@ -212,6 +212,17 @@ impl Body<'_> {
         Ok(Field::Object(fields))
     }
 
+    fn counted_text(&mut self) -> Result<Field> {
+        let size = self.u32()? as usize;
+        let before = self.0.len();
+        let text = self.text()?;
+        ensure!(
+            before - self.0.len() == size,
+            "chat text length differs from its prefix"
+        );
+        Ok(Field::Text(text))
+    }
+
     fn text(&mut self) -> Result<String> {
         let end = self
             .0
@@ -258,6 +269,288 @@ pub fn decode(opcode: u16, body: &[u8]) -> Result<Packet> {
     let mut body = Body(body);
     let mut fields = BTreeMap::new();
     match opcode {
+        0x019f => {
+            fields.insert(
+                "guid".into(),
+                Field::Guid(u64::from_le_bytes(body.bytes()?)),
+            );
+            let count = body.u8()?;
+            fields.insert(
+                "items".into(),
+                body.records(
+                    u32::from(count),
+                    &[
+                        "slot",
+                        "entry",
+                        "display",
+                        "stock",
+                        "price",
+                        "durability",
+                        "buy_count",
+                    ],
+                )?,
+            );
+            if count == 0 {
+                fields.insert("reason".into(), Field::Unsigned(body.u8()?.into()));
+            }
+        }
+        0x01a4 => {
+            fields.insert(
+                "guid".into(),
+                Field::Guid(u64::from_le_bytes(body.bytes()?)),
+            );
+            for name in ["slot", "stock", "count"] {
+                fields.insert(name.into(), Field::Unsigned(body.u32()?.into()));
+            }
+        }
+        0x01a5 => {
+            fields.insert(
+                "guid".into(),
+                Field::Guid(u64::from_le_bytes(body.bytes()?)),
+            );
+            fields.insert("entry".into(), Field::Unsigned(body.u32()?.into()));
+            fields.insert("reason".into(), Field::Unsigned(body.u8()?.into()));
+        }
+        0x01a1 => {
+            fields.insert(
+                "guid".into(),
+                Field::Guid(u64::from_le_bytes(body.bytes()?)),
+            );
+            fields.insert(
+                "item".into(),
+                Field::Guid(u64::from_le_bytes(body.bytes()?)),
+            );
+            fields.insert("reason".into(), Field::Unsigned(body.u8()?.into()));
+        }
+        0x0166 => {
+            fields.insert(
+                "guid".into(),
+                Field::Guid(u64::from_le_bytes(body.bytes()?)),
+            );
+            for name in ["received", "created", "show"] {
+                fields.insert(name.into(), Field::Unsigned(body.u32()?.into()));
+            }
+            fields.insert("bag".into(), Field::Unsigned(body.u8()?.into()));
+            for name in ["slot", "entry", "suffix", "random_property", "count"] {
+                fields.insert(name.into(), Field::Unsigned(body.u32()?.into()));
+            }
+        }
+        0x0096 => {
+            let kind = body.u8()?;
+            fields.insert("kind".into(), Field::Unsigned(kind.into()));
+            fields.insert("language".into(), Field::Unsigned(body.u32()?.into()));
+            match kind {
+                0 | 1 | 5 => {
+                    fields.insert(
+                        "guid".into(),
+                        Field::Guid(u64::from_le_bytes(body.bytes()?)),
+                    );
+                    fields.insert(
+                        "sender".into(),
+                        Field::Guid(u64::from_le_bytes(body.bytes()?)),
+                    );
+                }
+                0x0b | 0x0c => {
+                    fields.insert(
+                        "guid".into(),
+                        Field::Guid(u64::from_le_bytes(body.bytes()?)),
+                    );
+                    fields.insert("name".into(), body.counted_text()?);
+                    fields.insert(
+                        "target".into(),
+                        Field::Guid(u64::from_le_bytes(body.bytes()?)),
+                    );
+                }
+                0x0d | 0x1a => {
+                    fields.insert("name".into(), body.counted_text()?);
+                    fields.insert(
+                        "target".into(),
+                        Field::Guid(u64::from_le_bytes(body.bytes()?)),
+                    );
+                }
+                0x0e => {
+                    fields.insert("channel".into(), Field::Text(body.text()?));
+                    fields.insert("rank".into(), Field::Unsigned(body.u32()?.into()));
+                    fields.insert(
+                        "guid".into(),
+                        Field::Guid(u64::from_le_bytes(body.bytes()?)),
+                    );
+                }
+                _ => {
+                    fields.insert(
+                        "guid".into(),
+                        Field::Guid(u64::from_le_bytes(body.bytes()?)),
+                    );
+                }
+            }
+            fields.insert("text".into(), body.counted_text()?);
+            fields.insert("tag".into(), Field::Unsigned(body.u8()?.into()));
+        }
+        0x018d => {
+            fields.insert(
+                "guid".into(),
+                Field::Guid(u64::from_le_bytes(body.bytes()?)),
+            );
+            fields.insert("entry".into(), Field::Unsigned(body.u32()?.into()));
+            fields.insert("title".into(), Field::Text(body.text()?));
+            fields.insert("text".into(), Field::Text(body.text()?));
+            fields.insert("auto_finish".into(), Field::Unsigned(body.u32()?.into()));
+            let emotes = body.u32()?;
+            fields.insert("emotes".into(), body.records(emotes, &["delay", "emote"])?);
+            let choices = body.u32()?;
+            fields.insert(
+                "choices".into(),
+                body.records(choices, &["entry", "count", "display"])?,
+            );
+            let rewards = body.u32()?;
+            fields.insert(
+                "rewards".into(),
+                body.records(rewards, &["entry", "count", "display"])?,
+            );
+            for name in ["money", "flags", "spell"] {
+                fields.insert(name.into(), Field::Unsigned(body.u32()?.into()));
+            }
+        }
+        0x018b => {
+            fields.insert(
+                "guid".into(),
+                Field::Guid(u64::from_le_bytes(body.bytes()?)),
+            );
+            fields.insert("entry".into(), Field::Unsigned(body.u32()?.into()));
+            fields.insert("title".into(), Field::Text(body.text()?));
+            fields.insert("text".into(), Field::Text(body.text()?));
+            for name in ["delay", "emote", "close_on_cancel", "money"] {
+                fields.insert(name.into(), Field::Unsigned(body.u32()?.into()));
+            }
+            let items = body.u32()?;
+            fields.insert(
+                "items".into(),
+                body.records(items, &["entry", "count", "display"])?,
+            );
+            for name in [
+                "completion_1",
+                "completion_2",
+                "completion_3",
+                "completion_4",
+            ] {
+                fields.insert(name.into(), Field::Unsigned(body.u32()?.into()));
+            }
+        }
+        0x0191 => {
+            for name in ["entry", "unknown", "xp", "money"] {
+                fields.insert(name.into(), Field::Unsigned(body.u32()?.into()));
+            }
+            let rewards = body.u32()?;
+            fields.insert(
+                "rewards".into(),
+                body.records(rewards, &["entry", "count"])?,
+            );
+        }
+        0x0124 => {
+            let count = body.u32()?;
+            ensure!(count <= 256, "too many faction standings");
+            let mut standings = Vec::new();
+            for _ in 0..count {
+                standings.push(Field::Object(BTreeMap::from([
+                    ("index".into(), Field::Unsigned(body.u32()?.into())),
+                    (
+                        "standing".into(),
+                        Field::Signed(i32::from_le_bytes(body.bytes()?).into()),
+                    ),
+                ])));
+            }
+            fields.insert("standings".into(), Field::List(standings));
+        }
+        0x01d0 => {
+            fields.insert(
+                "guid".into(),
+                Field::Guid(u64::from_le_bytes(body.bytes()?)),
+            );
+            fields.insert("xp".into(), Field::Unsigned(body.u32()?.into()));
+            let kind = body.u8()?;
+            ensure!(kind <= 1, "invalid XP gain kind");
+            fields.insert("kind".into(), Field::Unsigned(kind.into()));
+            if kind == 0 {
+                fields.insert("base_xp".into(), Field::Unsigned(body.u32()?.into()));
+                fields.insert("group_bonus".into(), body.float()?);
+            }
+        }
+        0x012a => {
+            fields.insert("spec".into(), Field::Unsigned(body.u8()?.into()));
+            let count = u16::from_le_bytes(body.bytes()?);
+            let mut spells = Vec::new();
+            for _ in 0..count {
+                spells.push(Field::Object(BTreeMap::from([
+                    (
+                        "id".into(),
+                        Field::Unsigned(u16::from_le_bytes(body.bytes()?).into()),
+                    ),
+                    (
+                        "slot".into(),
+                        Field::Signed(i16::from_le_bytes(body.bytes()?).into()),
+                    ),
+                ])));
+            }
+            fields.insert("spells".into(), Field::List(spells));
+            let count = u16::from_le_bytes(body.bytes()?);
+            let mut cooldowns = Vec::new();
+            for _ in 0..count {
+                let mut cooldown = BTreeMap::new();
+                for name in ["spell", "item", "category"] {
+                    cooldown.insert(
+                        name.into(),
+                        Field::Unsigned(u16::from_le_bytes(body.bytes()?).into()),
+                    );
+                }
+                for name in ["recovery", "category_recovery"] {
+                    cooldown.insert(
+                        name.into(),
+                        Field::Signed(i32::from_le_bytes(body.bytes()?).into()),
+                    );
+                }
+                cooldowns.push(Field::Object(cooldown));
+            }
+            fields.insert("cooldowns".into(), Field::List(cooldowns));
+        }
+        0x024c => {
+            fields.insert("caster".into(), body.packed_guid()?);
+            fields.insert("spell".into(), Field::Unsigned(body.u32()?.into()));
+            let count = body.u32()?;
+            ensure!(count <= 3, "too many spell execute effects");
+            let mut effects = Vec::new();
+            for _ in 0..count {
+                let kind = body.u32()?;
+                ensure!(kind == 24, "unsupported spell execute effect");
+                let count = body.u32()?;
+                effects.push(Field::Object(BTreeMap::from([
+                    ("kind".into(), Field::Unsigned(kind.into())),
+                    ("items".into(), body.records(count, &["entry"])?),
+                ])));
+            }
+            fields.insert("effects".into(), Field::List(effects));
+        }
+        0x0130 => {
+            fields.insert("spell".into(), Field::Unsigned(body.u32()?.into()));
+            let result = body.u8()?;
+            ensure!(result <= 2, "invalid cast result");
+            fields.insert("result".into(), Field::Unsigned(result.into()));
+            if result == 2 {
+                fields.insert("reason".into(), Field::Unsigned(body.u8()?.into()));
+                if !body.0.is_empty() {
+                    fields.insert("argument_1".into(), Field::Unsigned(body.u32()?.into()));
+                }
+                if !body.0.is_empty() {
+                    fields.insert("argument_2".into(), Field::Unsigned(body.u32()?.into()));
+                }
+            }
+        }
+        0x02a6 => {
+            fields.insert(
+                "guid".into(),
+                Field::Guid(u64::from_le_bytes(body.bytes()?)),
+            );
+            fields.insert("spell".into(), Field::Unsigned(body.u32()?.into()));
+        }
         0x017e => (),
         0x0183 => {
             fields.insert(

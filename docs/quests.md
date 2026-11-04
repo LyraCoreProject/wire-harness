@@ -4,7 +4,8 @@
 world relates that giver to quest 433: kill ten creatures of entry 1117. The scenario requires
 available status 5, the offer from the greeting, a direct details query and the numeric objective
 in the quest query response. Querying quest 7 at this unrelated giver must close gossip. Giver
-GUIDs must name the creature bound from opening CREATE updates. Text is compared as recorder hashes.
+GUIDs must name the creature bound from opening CREATE updates. World text is recorded as hashes and compared under leaf data rules. Tier 1 authors fixture text
+locally; missing text, changed types, numeric values, packet structure and giver identities stay rule checks.
 
 `quest_log` grants quests 7 and 15 to a level-1 human warrior. Both are incomplete kill quests.
 The fixture deliberately bypasses their prerequisite chain: this scenario tests log operations,
@@ -20,6 +21,14 @@ field remains compared. No quest field has a tolerance or exclusion.
 Both scenarios permit only creature-subject monster movement at each named checkpoint. They
 retain packet presence, reply order and field values. The object scope excludes unrelated creatures
 while retaining every Character field. Neither scenario permits arbitrary unexpected packets.
+
+`quest_completion` stages incomplete quest 7 followed by completed quest 2158. The latter has
+no objectives, so normal acceptance completes it in both adapters; no objective mutation is used.
+The final login must contain the entries in slots 0 and 1, progress words 0 and 0x01000000,
+and no timers. The adapters refuse any other progress or state flag. Its Stormwind position keeps
+the spawned Marshal McBride (197) distinct from his imported Northshire spawn. Innkeeper Farley
+(295) offers the completion reward for quest 2158. The scenario compares an incomplete completion
+menu, silence on an incomplete reward request, and both complete reward-offer request paths.
 
 ## Sources
 
@@ -55,3 +64,29 @@ Register both scenario ids in their existing Behavior ledger entries and add tie
 and rewards. `quest_log` needs templates 7 and 15 with their real kill objectives. Advance the
 harness revision, dependency revision and lockfile together, then generate and inspect the new
 baselines. These recordings make no claim that core currently passes either scenario.
+
+At the pin that adds `quest_completion`, both tier 1 paths must also accept `QuestState::Complete`.
+Continue to call `debug_grant_quest`; complete means the ordinary grant effects already satisfy the
+quest. Verify 0x01000000 in the quest state word, with zero objective progress and timer. This is
+not a facility for setting arbitrary kill or exploration credit. Seed quest 7's ten entry-6 kills,
+quest 2158's two item choices (4656 and 159, five each), their templates and the respective end-giver
+relations to creatures 197 and 295. Register the scenario and its tier 1 test, then generate its baseline.
+
+World-text fields are data comparisons. Tier 1 authors fixture text locally and seeds only numeric
+ids and values from the pinned world. Quest titles, details, objectives and menu text remain hashed
+in the Reference Server recording. A text value difference is data; a missing field, changed type,
+packet shape, numeric value or giver identity remains a rule difference.
+
+`quest_reward` accepts quest 2158 through the wire from Falkhaan Isenstrider (6774), then turns it
+in to Innkeeper Farley (295), selecting the first choice: five Small Pumpkins (4656). The recorder
+requires the completed log flag after acceptance, an empty log slot and 110 XP after turn-in,
+and exact item, reputation and XP notifications. Acceptance at the wrong giver, choice index 6,
+and repeated turn-in must grant nothing. The final repeat still returns the reward offer, as the
+pinned Reference Server does. No quest or item Fixture Verb is needed by this scenario.
+
+Reward-offer title and menu text use leaf data rules. Core tier 1 supplies locally authored text
+and numeric world ids/values only; text presence, type, reply structure and giver identity stay strict.
+
+The reward scenario uses a dwarf at the real dwarf starting position. Human Diplomacy would
+multiply the 25 reputation reward to 27.5, which the pinned CalculateReputationGain dithers to
+27 or 28. The dwarf keeps the numeric reputation result at exactly 25 without a range rule.

@@ -50,7 +50,18 @@ required reducers already exist. Fixture creatures in LyraCore live for the disp
 lifetime; use a fresh Realm when resetting them.
 
 The `quest` Fixture Verb uses `debug_grant_quest(character_guid: u64, quest_entry: u32)`.
-Only `state = "incomplete"` is supported. Both adapters verify every quest slot in the final
-Character CREATE: the declared entries in order, zero objective progress, zero state flags and
-no timer. Missing, completed, timed or pre-progressed quests fail setup. The core tier 1 Transport
+Both `state = "incomplete"` and `state = "complete"` use the normal grant path. Both adapters verify
+every quest slot in the final Character CREATE: declared entries in order, zero objective progress,
+no timer, and either zero state flags or exactly the complete flag 0x01000000. A complete fixture
+must reach that state through ordinary grant effects, as quest 2158 does without objectives.
+Missing quests, the wrong completion state, timers or objective progress fail setup. The core tier 1 Transport
 must handle `FixtureVerb::Quest` at the next pin, calling this reducer in fixture order.
+
+The `item` Fixture Verb uses `debug_grant_item(character_guid: u64, entry: u32, count: u32)`.
+Both adapters require one owned backpack stack with the declared entry and count in the final
+login snapshot, then bind its full GUID to the fixture id for sell requests. Core tier 1 must
+apply the verb and populate the same binding at the next harness pin.
+
+The `spell` Fixture Verb calls `debug_learn_spell(character_guid: u64, spell_id: u32)`.
+Both adapters check the private final-login `SMSG_INITIAL_SPELLS` list for every declared spell.
+Missing spells fail setup. Core tier 1 needs the same verb application and final-login check.

@@ -1,0 +1,169 @@
+schema_version = 3
+id = "quest_reward"
+behavior = "quest_reward"
+
+[opening]
+window_ms = 1000
+
+[rules]
+time_tolerance_ms = 100
+wall_clock_tolerance_ms = 2000
+
+[rules.character_scope]
+name = "character_quest_reward"
+reason = "Retain every Character field, including XP and inventory links; nearby creatures and item bodies are outside the reward transaction."
+packets = []
+
+[[fixtures]]
+verb = "character"
+name = "Questreward"
+race = "dwarf"
+class = "warrior"
+level = 1
+at = { map = 0, x = -6240.32, y = 331.033, z = 382.758, orientation = 0.0 }
+
+[[fixtures]]
+verb = "money"
+copper = 0
+
+[[fixtures]]
+verb = "creature"
+id = "giver"
+entry = 6774
+offset = 2.0
+
+[[fixtures]]
+verb = "creature"
+id = "innkeeper"
+entry = 295
+offset = -2.0
+
+[[rules.identities]]
+name = "reward_stack_guid"
+reason = "The backpack link is an allocated item GUID low word. Identity consistency is unchecked: single sample."
+opcode = 169
+path = ["objects", "0", "values", "field_536"]
+
+[[steps]]
+id = "wrong_giver"
+send = { opcode = "CMSG_QUESTGIVER_ACCEPT_QUEST", target = { fixture = "innkeeper" }, entry = 2158 }
+[steps.checkpoint]
+window_ms = 500
+replies = [382]
+broadcasts = [{ opcode = 169, stream = "values" }]
+expect = [
+]
+
+[[rules.unexpected_packets]]
+name = "ambient_movement_wrong_giver"
+reason = "Nearby creature movement is independent of quest rewards."
+checkpoint = "wrong_giver"
+opcode = 221
+subject_guid_high = 61744
+
+[[steps]]
+id = "accept"
+send = { opcode = "CMSG_QUESTGIVER_ACCEPT_QUEST", target = { fixture = "giver" }, entry = 2158 }
+[steps.checkpoint]
+window_ms = 500
+replies = [382]
+broadcasts = [{ opcode = 169, stream = "values" }]
+expect = [
+  { opcode = 169, path = ["objects", "0", "values", "field_198"], value = { type = "unsigned", value = 2158 }, count = 1 },
+  { opcode = 169, path = ["objects", "0", "values", "field_199"], value = { type = "unsigned", value = 16777216 }, count = 1 },
+]
+
+[[rules.unexpected_packets]]
+name = "ambient_movement_accept"
+reason = "Nearby creature movement is independent of quest rewards."
+checkpoint = "accept"
+opcode = 221
+subject_guid_high = 61744
+
+[[steps]]
+id = "offer"
+send = { opcode = "CMSG_QUESTGIVER_REQUEST_REWARD", target = { fixture = "innkeeper" }, entry = 2158 }
+[steps.checkpoint]
+window_ms = 500
+replies = [397]
+broadcasts = [{ opcode = 169, stream = "values" }]
+expect = [
+  { opcode = 397, path = ["choices", "0", "entry"], value = { type = "unsigned", value = 4656 }, count = 1 },
+]
+
+[[rules.unexpected_packets]]
+name = "ambient_movement_offer"
+reason = "Nearby creature movement is independent of quest rewards."
+checkpoint = "offer"
+opcode = 221
+subject_guid_high = 61744
+
+[[steps]]
+id = "invalid_choice"
+send = { opcode = "CMSG_QUESTGIVER_CHOOSE_REWARD", target = { fixture = "innkeeper" }, entry = 2158, choice = 6 }
+[steps.checkpoint]
+window_ms = 500
+replies = []
+broadcasts = [{ opcode = 169, stream = "values" }]
+expect = [
+]
+
+[[rules.unexpected_packets]]
+name = "ambient_movement_invalid_choice"
+reason = "Nearby creature movement is independent of quest rewards."
+checkpoint = "invalid_choice"
+opcode = 221
+subject_guid_high = 61744
+
+[[steps]]
+id = "turn_in"
+send = { opcode = "CMSG_QUESTGIVER_CHOOSE_REWARD", target = { fixture = "innkeeper" }, entry = 2158, choice = 0 }
+[steps.checkpoint]
+window_ms = 500
+replies = [358, 292, 464, 401]
+broadcasts = [{ opcode = 169, stream = "values" }]
+expect = [
+  { opcode = 358, path = ["entry"], value = { type = "unsigned", value = 4656 }, count = 1 },
+  { opcode = 358, path = ["count"], value = { type = "unsigned", value = 5 }, count = 1 },
+  { opcode = 401, path = ["entry"], value = { type = "unsigned", value = 2158 }, count = 1 },
+  { opcode = 401, path = ["xp"], value = { type = "unsigned", value = 110 }, count = 1 },
+  { opcode = 169, path = ["objects", "0", "values", "field_198"], value = { type = "unsigned", value = 0 }, count = 1 },
+  { opcode = 169, path = ["objects", "0", "values", "field_716"], value = { type = "unsigned", value = 110 }, count = 1 },
+]
+
+[[rules.unexpected_packets]]
+name = "ambient_movement_turn_in"
+reason = "Nearby creature movement is independent of quest rewards."
+checkpoint = "turn_in"
+opcode = 221
+subject_guid_high = 61744
+
+[[steps]]
+id = "repeat"
+send = { opcode = "CMSG_QUESTGIVER_CHOOSE_REWARD", target = { fixture = "innkeeper" }, entry = 2158, choice = 0 }
+[steps.checkpoint]
+window_ms = 500
+replies = [397]
+broadcasts = [{ opcode = 169, stream = "values" }]
+expect = [
+  { opcode = 397, path = ["entry"], value = { type = "unsigned", value = 2158 }, count = 1 },
+]
+
+[[rules.unexpected_packets]]
+name = "ambient_movement_repeat"
+reason = "Nearby creature movement is independent of quest rewards."
+checkpoint = "repeat"
+opcode = 221
+subject_guid_high = 61744
+
+[[rules.data_fields]]
+name = "world_text_397_text"
+reason = "Tier 1 authors fixture text locally; Reference Server world text remains a data comparison. Presence and shape stay strict."
+opcode = 397
+path = ["text"]
+
+[[rules.data_fields]]
+name = "world_text_397_title"
+reason = "Tier 1 authors fixture text locally; Reference Server world text remains a data comparison. Presence and shape stay strict."
+opcode = 397
+path = ["title"]

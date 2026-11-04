@@ -184,6 +184,18 @@ DOCKER
 remain. Never use this fixture adapter against a production or shared Realm.
 
 The `quest` Fixture Verb uses `.quest add ENTRY CHARACTER`. The final login snapshot verifies
-the declared log entries and incomplete state through the same check as the LyraCore adapter.
+the declared log entries and incomplete or complete state through the same check as the LyraCore
+adapter. Complete state must follow from the normal add command; quest 2158 needs no objectives.
 The command is defined by `ChatHandler::HandleQuestAddCommand` in the pinned
+[CharacterCommands.cpp](https://raw.githubusercontent.com/vmangos/core/d9173eca3ea08dd985c52dabbcc826898d1d0b77/src/game/Commands/CharacterCommands.cpp).
+
+The `item` Fixture Verb selects the gameplay Character and sends `.additem ENTRY COUNT`.
+Both adapters verify and bind the owned backpack stack from the final login snapshot before capture.
+The command is `ChatHandler::HandleAddItemCommand` in the pinned
+[CharacterCommands.cpp](https://raw.githubusercontent.com/vmangos/core/d9173eca3ea08dd985c52dabbcc826898d1d0b77/src/game/Commands/CharacterCommands.cpp).
+
+The `spell` Fixture Verb selects the gameplay Character, drains pending setup frames, then sends
+`.learn SPELL`. Selection must settle before a GM command reads it; the same ordering applies to
+money setup. Both adapters require each declared spell in the final-login `SMSG_INITIAL_SPELLS`.
+The pinned command is `HandleLearnCommand` in
 [CharacterCommands.cpp](https://raw.githubusercontent.com/vmangos/core/d9173eca3ea08dd985c52dabbcc826898d1d0b77/src/game/Commands/CharacterCommands.cpp).

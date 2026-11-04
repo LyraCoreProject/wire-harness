@@ -68,6 +68,31 @@ pub const ENTRIES: &[Entry] = &[
         ),
         trace: include_str!("../traces/two_character_visibility__opposite_faction.json"),
     },
+    Entry {
+        id: "vendor_transactions",
+        scenario: include_str!("../scenarios/vendor_transactions.toml"),
+        trace: include_str!("../traces/vendor_transactions.json"),
+    },
+    Entry {
+        id: "vendor_offers",
+        scenario: include_str!("../scenarios/vendor_offers.toml"),
+        trace: include_str!("../traces/vendor_offers.json"),
+    },
+    Entry {
+        id: "quest_completion",
+        scenario: include_str!("../scenarios/quest_completion.toml"),
+        trace: include_str!("../traces/quest_completion.json"),
+    },
+    Entry {
+        id: "quest_reward",
+        scenario: include_str!("../scenarios/quest_reward.toml"),
+        trace: include_str!("../traces/quest_reward.json"),
+    },
+    Entry {
+        id: "cast_and_interrupt",
+        scenario: include_str!("../scenarios/cast_and_interrupt.toml"),
+        trace: include_str!("../traces/cast_and_interrupt.json"),
+    },
 ];
 
 pub fn get(id: &str) -> Result<GoldenTrace> {

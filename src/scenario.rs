@@ -63,6 +63,14 @@ pub enum FixtureVerb {
     Money {
         copper: u32,
     },
+    Item {
+        id: String,
+        entry: u32,
+        count: u32,
+    },
+    Spell {
+        spell_id: u32,
+    },
     Quest {
         entry: u32,
         state: QuestState,
@@ -81,6 +89,7 @@ pub enum FixtureVerb {
 #[serde(rename_all = "snake_case")]
 pub enum QuestState {
     Incomplete,
+    Complete,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -167,6 +176,49 @@ pub enum ClientPacket {
     QuestLogSwap { first: u8, second: u8 },
     #[serde(rename = "CMSG_QUESTLOG_REMOVE_QUEST")]
     QuestLogRemove { slot: u8 },
+    #[serde(rename = "CMSG_LIST_INVENTORY")]
+    ListInventory { target: Target },
+    #[serde(rename = "CMSG_BUY_ITEM")]
+    BuyItem {
+        target: Target,
+        entry: u32,
+        count: u8,
+    },
+    #[serde(rename = "CMSG_BUY_ITEM_IN_SLOT")]
+    BuyItemInSlot {
+        target: Target,
+        entry: u32,
+        slot: u8,
+        count: u8,
+    },
+    #[serde(rename = "CMSG_SELL_ITEM")]
+    SellItem {
+        target: Target,
+        item: String,
+        count: u8,
+    },
+    #[serde(rename = "CMSG_BUYBACK_ITEM")]
+    BuybackItem { target: Target, slot: u32 },
+    #[serde(rename = "CMSG_QUESTGIVER_COMPLETE_QUEST")]
+    QuestgiverComplete { target: Target, entry: u32 },
+    #[serde(rename = "CMSG_QUESTGIVER_REQUEST_REWARD")]
+    QuestgiverRequestReward { target: Target, entry: u32 },
+    #[serde(rename = "CMSG_QUESTGIVER_ACCEPT_QUEST")]
+    QuestgiverAccept { target: Target, entry: u32 },
+    #[serde(rename = "CMSG_QUESTGIVER_CHOOSE_REWARD")]
+    QuestgiverChooseReward {
+        target: Target,
+        entry: u32,
+        choice: u32,
+    },
+    #[serde(rename = "CMSG_CAST_SPELL")]
+    CastSpell {
+        #[serde(default)]
+        target: Option<Target>,
+        spell_id: u32,
+    },
+    #[serde(rename = "CMSG_CANCEL_CAST")]
+    CancelCast { spell_id: u32 },
     #[serde(rename = "CMSG_BUY_BANK_SLOT")]
     BuyBankSlot { target: Target },
 }
@@ -385,6 +437,7 @@ impl Scenario {
                     "taxi endpoints must be distinct known-node fixtures"
                 );
             }
+            send.validate_items(&self.fixtures)?;
             let expected = send.reply_opcode();
             if let Some(expected) = expected {
                 ensure!(
@@ -399,6 +452,8 @@ impl Scenario {
                             ClientPacket::QuestLogSwap { .. }
                                 | ClientPacket::QuestLogRemove { .. }
                                 | ClientPacket::QuestgiverQuery { .. }
+                                | ClientPacket::QuestgiverRequestReward { .. }
+                                | ClientPacket::QuestgiverChooseReward { .. }
                         ),
                     "request without a success reply needs a checkpoint assertion"
                 );
@@ -671,6 +726,14 @@ impl Scenario {
                         "request names an unknown creature fixture"
                     );
                 }
+                send.validate_items(
+                    &self
+                        .characters
+                        .iter()
+                        .find(|c| c.id == actor)
+                        .context("step actor")?
+                        .fixtures,
+                )?;
                 if let Some(reply) = send.reply_opcode() {
                     ensure!(
                         step.checkpoint
@@ -693,6 +756,8 @@ impl Scenario {
                                 ClientPacket::QuestLogSwap { .. }
                                     | ClientPacket::QuestLogRemove { .. }
                                     | ClientPacket::QuestgiverQuery { .. }
+                                    | ClientPacket::QuestgiverRequestReward { .. }
+                                    | ClientPacket::QuestgiverChooseReward { .. }
                             ),
                         "request without a success reply needs a checkpoint assertion"
                     );
@@ -879,9 +944,28 @@ fn validate_fixtures(fixtures: &[FixtureVerb]) -> Result<(BTreeSet<String>, BTre
     let mut nodes = BTreeSet::new();
     let mut money = false;
     let mut quests = BTreeSet::new();
+    let mut spells = BTreeSet::new();
+    let mut items = BTreeSet::new();
+    let mut binding_ids = BTreeSet::new();
     for fixture in &fixtures[1..] {
         match fixture {
             FixtureVerb::Character { .. } => anyhow::bail!("duplicate Character fixture"),
+            FixtureVerb::Spell { spell_id } => {
+                ensure!(
+                    (1..=65535).contains(spell_id) && spells.insert(*spell_id),
+                    "invalid or duplicate spell fixture"
+                );
+            }
+            FixtureVerb::Item { id, entry, count } => {
+                ensure!(
+                    identifier(id) && binding_ids.insert(id.clone()),
+                    "invalid or duplicate fixture id"
+                );
+                ensure!(
+                    *entry != 0 && (1..=255).contains(count) && items.insert(*entry),
+                    "invalid or duplicate item fixture"
+                );
+            }
             FixtureVerb::Quest { entry, .. } => {
                 ensure!(
                     *entry != 0 && quests.insert(*entry) && quests.len() <= 20,
@@ -903,7 +987,9 @@ fn validate_fixtures(fixtures: &[FixtureVerb]) -> Result<(BTreeSet<String>, BTre
             }
             FixtureVerb::Creature { id, entry, offset } => {
                 ensure!(
-                    identifier(id) && fixture_ids.insert(id.clone()),
+                    identifier(id)
+                        && binding_ids.insert(id.clone())
+                        && fixture_ids.insert(id.clone()),
                     "invalid or duplicate creature fixture id"
                 );
                 ensure!(
@@ -917,6 +1003,18 @@ fn validate_fixtures(fixtures: &[FixtureVerb]) -> Result<(BTreeSet<String>, BTre
 }
 
 impl ClientPacket {
+    fn validate_items(&self, fixtures: &[FixtureVerb]) -> Result<()> {
+        if let Self::SellItem { item, .. } = self {
+            ensure!(
+                fixtures
+                    .iter()
+                    .any(|fixture| matches!(fixture, FixtureVerb::Item { id, .. } if id == item)),
+                "sell request names an unknown item fixture"
+            );
+        }
+        Ok(())
+    }
+
     fn reply_opcode(&self) -> Option<u16> {
         match self {
             Self::Ping { .. } => Some(0x01dd),
@@ -925,8 +1023,20 @@ impl ClientPacket {
             Self::TaxiQueryAvailableNodes { .. } => Some(0x01a9),
             Self::ActivateTaxi { .. } => Some(0x01ae),
             Self::QuestgiverStatus { .. } => Some(0x0183),
+            Self::QuestgiverAccept { .. } => Some(0x017e),
             Self::QuestQuery { .. } => Some(0x005d),
-            Self::QuestgiverHello { .. } | Self::QuestgiverQuery { .. } => None,
+            Self::ListInventory { .. }
+            | Self::BuyItem { .. }
+            | Self::BuyItemInSlot { .. }
+            | Self::SellItem { .. }
+            | Self::BuybackItem { .. }
+            | Self::QuestgiverComplete { .. }
+            | Self::QuestgiverRequestReward { .. }
+            | Self::QuestgiverChooseReward { .. }
+            | Self::CastSpell { .. }
+            | Self::CancelCast { .. }
+            | Self::QuestgiverHello { .. }
+            | Self::QuestgiverQuery { .. } => None,
             Self::BankerActivate { .. } => Some(0x01b8),
             Self::BuyBankSlot { .. } | Self::QuestLogSwap { .. } | Self::QuestLogRemove { .. } => {
                 None
@@ -938,13 +1048,24 @@ impl ClientPacket {
             Self::Ping { .. }
             | Self::QuestQuery { .. }
             | Self::QuestLogSwap { .. }
-            | Self::QuestLogRemove { .. } => None,
+            | Self::QuestLogRemove { .. }
+            | Self::CancelCast { .. } => None,
+            Self::CastSpell { target, .. } => target.as_ref(),
             Self::NameQuery { target }
             | Self::TaxiNodeStatusQuery { target }
             | Self::TaxiQueryAvailableNodes { target }
             | Self::QuestgiverStatus { target }
             | Self::QuestgiverHello { target }
             | Self::QuestgiverQuery { target, .. }
+            | Self::ListInventory { target }
+            | Self::BuyItem { target, .. }
+            | Self::BuyItemInSlot { target, .. }
+            | Self::SellItem { target, .. }
+            | Self::BuybackItem { target, .. }
+            | Self::QuestgiverComplete { target, .. }
+            | Self::QuestgiverRequestReward { target, .. }
+            | Self::QuestgiverAccept { target, .. }
+            | Self::QuestgiverChooseReward { target, .. }
             | Self::BankerActivate { target }
             | Self::BuyBankSlot { target }
             | Self::ActivateTaxi { target, .. } => Some(target),
@@ -995,9 +1116,69 @@ impl ClientPacket {
                 body.extend(entry.to_le_bytes());
                 (0x0186, body)
             }
+            Self::QuestgiverComplete { entry, .. }
+            | Self::QuestgiverAccept { entry, .. }
+            | Self::QuestgiverRequestReward { entry, .. }
+            | Self::QuestgiverChooseReward { entry, .. } => {
+                let mut body = guid.to_le_bytes().to_vec();
+                body.extend(entry.to_le_bytes());
+                let opcode = match self {
+                    Self::QuestgiverComplete { .. } => 0x018a,
+                    Self::QuestgiverAccept { .. } => 0x0189,
+                    Self::QuestgiverRequestReward { .. } => 0x018c,
+                    Self::QuestgiverChooseReward { choice, .. } => {
+                        body.extend(choice.to_le_bytes());
+                        0x018e
+                    }
+                    _ => unreachable!(),
+                };
+                (opcode, body)
+            }
+            Self::CastSpell { spell_id, target } => {
+                let mut body = spell_id.to_le_bytes().to_vec();
+                body.extend(if target.is_some() { 2u16 } else { 0u16 }.to_le_bytes());
+                if target.is_some() {
+                    let bytes = guid.to_le_bytes();
+                    body.push(bytes.iter().enumerate().fold(0u8, |mask, (index, byte)| {
+                        mask | (u8::from(*byte != 0) << index)
+                    }));
+                    body.extend(bytes.into_iter().filter(|byte| *byte != 0));
+                }
+                (0x012e, body)
+            }
+            Self::CancelCast { spell_id } => (0x012f, spell_id.to_le_bytes().to_vec()),
             Self::QuestQuery { entry } => (0x005c, entry.to_le_bytes().to_vec()),
             Self::QuestLogSwap { first, second } => (0x0193, vec![*first, *second]),
             Self::QuestLogRemove { slot } => (0x0194, vec![*slot]),
+            Self::ListInventory { .. } => (0x019e, guid.to_le_bytes().to_vec()),
+            Self::BuyItem { entry, count, .. } => {
+                let mut body = guid.to_le_bytes().to_vec();
+                body.extend(entry.to_le_bytes());
+                body.extend([*count, 0]);
+                (0x01a2, body)
+            }
+            Self::BuyItemInSlot {
+                entry, slot, count, ..
+            } => {
+                let mut body = guid.to_le_bytes().to_vec();
+                body.extend(entry.to_le_bytes());
+                body.extend(character_guid.to_le_bytes());
+                body.extend([*slot, *count]);
+                (0x01a3, body)
+            }
+            Self::SellItem { item, count, .. } => {
+                let mut body = guid.to_le_bytes().to_vec();
+                let item_guid = fixtures.get(item).context("unbound item fixture")?;
+                ensure!(*item_guid != 0, "item GUID must be nonzero");
+                body.extend(item_guid.to_le_bytes());
+                body.push(*count);
+                (0x01a0, body)
+            }
+            Self::BuybackItem { slot, .. } => {
+                let mut body = guid.to_le_bytes().to_vec();
+                body.extend(slot.to_le_bytes());
+                (0x0290, body)
+            }
             Self::BankerActivate { .. } => (0x01b7, guid.to_le_bytes().to_vec()),
             Self::BuyBankSlot { .. } => (0x01b9, guid.to_le_bytes().to_vec()),
             Self::ActivateTaxi {
