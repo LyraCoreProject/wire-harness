@@ -86,6 +86,7 @@ pub enum FixtureVerb {
 #[serde(rename_all = "snake_case")]
 pub enum QuestState {
     Incomplete,
+    Complete,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -195,6 +196,10 @@ pub enum ClientPacket {
     },
     #[serde(rename = "CMSG_BUYBACK_ITEM")]
     BuybackItem { target: Target, slot: u32 },
+    #[serde(rename = "CMSG_QUESTGIVER_COMPLETE_QUEST")]
+    QuestgiverComplete { target: Target, entry: u32 },
+    #[serde(rename = "CMSG_QUESTGIVER_REQUEST_REWARD")]
+    QuestgiverRequestReward { target: Target, entry: u32 },
     #[serde(rename = "CMSG_BUY_BANK_SLOT")]
     BuyBankSlot { target: Target },
 }
@@ -428,6 +433,7 @@ impl Scenario {
                             ClientPacket::QuestLogSwap { .. }
                                 | ClientPacket::QuestLogRemove { .. }
                                 | ClientPacket::QuestgiverQuery { .. }
+                                | ClientPacket::QuestgiverRequestReward { .. }
                         ),
                     "request without a success reply needs a checkpoint assertion"
                 );
@@ -730,6 +736,7 @@ impl Scenario {
                                 ClientPacket::QuestLogSwap { .. }
                                     | ClientPacket::QuestLogRemove { .. }
                                     | ClientPacket::QuestgiverQuery { .. }
+                                    | ClientPacket::QuestgiverRequestReward { .. }
                             ),
                         "request without a success reply needs a checkpoint assertion"
                     );
@@ -994,6 +1001,8 @@ impl ClientPacket {
             | Self::BuyItemInSlot { .. }
             | Self::SellItem { .. }
             | Self::BuybackItem { .. }
+            | Self::QuestgiverComplete { .. }
+            | Self::QuestgiverRequestReward { .. }
             | Self::QuestgiverHello { .. }
             | Self::QuestgiverQuery { .. } => None,
             Self::BankerActivate { .. } => Some(0x01b8),
@@ -1019,6 +1028,8 @@ impl ClientPacket {
             | Self::BuyItemInSlot { target, .. }
             | Self::SellItem { target, .. }
             | Self::BuybackItem { target, .. }
+            | Self::QuestgiverComplete { target, .. }
+            | Self::QuestgiverRequestReward { target, .. }
             | Self::BankerActivate { target }
             | Self::BuyBankSlot { target }
             | Self::ActivateTaxi { target, .. } => Some(target),
@@ -1068,6 +1079,19 @@ impl ClientPacket {
                 let mut body = guid.to_le_bytes().to_vec();
                 body.extend(entry.to_le_bytes());
                 (0x0186, body)
+            }
+            Self::QuestgiverComplete { entry, .. }
+            | Self::QuestgiverRequestReward { entry, .. } => {
+                let mut body = guid.to_le_bytes().to_vec();
+                body.extend(entry.to_le_bytes());
+                (
+                    if matches!(self, Self::QuestgiverComplete { .. }) {
+                        0x018a
+                    } else {
+                        0x018c
+                    },
+                    body,
+                )
             }
             Self::QuestQuery { entry } => (0x005c, entry.to_le_bytes().to_vec()),
             Self::QuestLogSwap { first, second } => (0x0193, vec![*first, *second]),

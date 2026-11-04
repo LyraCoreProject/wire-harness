@@ -216,7 +216,7 @@ remain separate per recipient; GUID mapping remains shared across all recipients
 | `character` | `name`, `race`, `class`, `level`, `at` | Create the Character; `at` has map, x/y/z in yards and orientation in radians. |
 | `item` | `id`, `entry`, `count` | Grant one backpack stack, with nonzero entry and count from 1 through 255; entries and binding ids are unique. Setup fails if the item template cannot hold this count in one stack. |
 | `money` | `copper` | Set the exact balance, from 0 through 2,147,483,647; at most once. |
-| `quest` | `entry`, `state = "incomplete"` | Add a quest to the next log slot, with no objective progress or timer. Entries are nonzero and unique; at most 20. |
+| `quest` | `entry`, `state = "incomplete"` or `"complete"` | Add a quest to the next log slot, with no objective progress or timer. The normal grant path must produce the declared state. Entries are nonzero and unique; at most 20. |
 | `known_flight_node` | `node_id` | Learn one node, from 1 through 256; no duplicates. |
 | `creature` | `id`, `entry`, `offset` | Spawn a creature at a signed forward offset in yards, at most 100 from the Character. |
 

@@ -21,6 +21,14 @@ Both scenarios permit only creature-subject monster movement at each named check
 retain packet presence, reply order and field values. The object scope excludes unrelated creatures
 while retaining every Character field. Neither scenario permits arbitrary unexpected packets.
 
+`quest_completion` stages incomplete quest 7 followed by completed quest 2158. The latter has
+no objectives, so normal acceptance completes it in both adapters; no objective mutation is used.
+The final login must contain the entries in slots 0 and 1, progress words 0 and 0x01000000,
+and no timers. The adapters refuse any other progress or state flag. Its Stormwind position keeps
+the spawned Marshal McBride (197) distinct from his imported Northshire spawn. Innkeeper Farley
+(295) offers the completion reward for quest 2158. The scenario compares an incomplete completion
+menu, silence on an incomplete reward request, and both complete reward-offer request paths.
+
 ## Sources
 
 These sources were read through raw URLs at the Reference Server's pinned commit:
@@ -55,3 +63,15 @@ Register both scenario ids in their existing Behavior ledger entries and add tie
 and rewards. `quest_log` needs templates 7 and 15 with their real kill objectives. Advance the
 harness revision, dependency revision and lockfile together, then generate and inspect the new
 baselines. These recordings make no claim that core currently passes either scenario.
+
+At the pin that adds `quest_completion`, both tier 1 paths must also accept `QuestState::Complete`.
+Continue to call `debug_grant_quest`; complete means the ordinary grant effects already satisfy the
+quest. Verify 0x01000000 in the quest state word, with zero objective progress and timer. This is
+not a facility for setting arbitrary kill or exploration credit. Seed quest 7's ten entry-6 kills,
+quest 2158's two item choices (4656 and 159, five each), their templates and the respective end-giver
+relations to creatures 197 and 295. Register the scenario and its tier 1 test, then generate its baseline.
+
+World-text fields are data comparisons. Tier 1 authors fixture text locally and seeds only numeric
+ids and values from the pinned world. Quest titles, details, objectives and menu text remain hashed
+in the Reference Server recording. A text value difference is data; a missing field, changed type,
+packet shape, numeric value or giver identity remains a rule difference.

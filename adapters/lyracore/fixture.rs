@@ -158,6 +158,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn complete_quest_uses_the_same_normal_grant_path() {
+        let fixtures = [FixtureVerb::Quest {
+            entry: 2158,
+            state: wire_client::scenario::QuestState::Complete,
+        }];
+        assert_eq!(
+            reducer_calls(17, &fixtures),
+            vec![("debug_grant_quest", serde_json::json!([17, 2158]))]
+        );
+    }
+
+    #[test]
     fn item_fixture_passes_entry_and_count_to_the_grant_reducer() {
         let fixtures = [FixtureVerb::Item {
             id: "linen".into(),

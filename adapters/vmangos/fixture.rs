@@ -310,6 +310,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn complete_quest_uses_the_normal_add_command() {
+        assert_eq!(
+            quest_command(2158, "Questfinish"),
+            ".quest add 2158 Questfinish"
+        );
+    }
+
+    #[test]
     fn item_command_sets_the_requested_stack_count() {
         assert_eq!(item_command(2589, 2), ".additem 2589 2");
     }

@@ -1,0 +1,143 @@
+schema_version = 3
+id = "quest_completion"
+behavior = "quest_completion"
+
+[opening]
+window_ms = 1000
+
+[rules]
+time_tolerance_ms = 100
+wall_clock_tolerance_ms = 2000
+
+[rules.character_scope]
+name = "character_quest_completion"
+reason = "Compare every Character field; nearby creatures are independent of quest completion."
+packets = []
+
+[[fixtures]]
+verb = "character"
+name = "Questfinish"
+race = "human"
+class = "warrior"
+level = 1
+at = { map = 0, x = -8840.56, y = 489.7, z = 109.61, orientation = 0.0 }
+
+[[fixtures]]
+verb = "quest"
+entry = 7
+state = "incomplete"
+
+[[fixtures]]
+verb = "quest"
+entry = 2158
+state = "complete"
+
+[[fixtures]]
+verb = "creature"
+id = "innkeeper"
+entry = 295
+offset = 2.0
+
+[[fixtures]]
+verb = "creature"
+id = "marshal"
+entry = 197
+offset = -2.0
+
+[[steps]]
+id = "incomplete"
+send = { opcode = "CMSG_QUESTGIVER_COMPLETE_QUEST", target = { fixture = "marshal" }, entry = 7 }
+[steps.checkpoint]
+window_ms = 500
+replies = [395]
+broadcasts = [{ opcode = 169, stream = "values" }]
+expect = [
+  { opcode = 395, path = ["entry"], value = { type = "unsigned", value = 7 }, count = 1 },
+  { opcode = 395, path = ["completion_2"], value = { type = "unsigned", value = 0 }, count = 1 },
+]
+
+[[rules.unexpected_packets]]
+name = "ambient_movement_incomplete"
+reason = "Nearby creature movement is independent of quest completion."
+checkpoint = "incomplete"
+opcode = 221
+subject_guid_high = 61744
+
+[[steps]]
+id = "refuse_reward"
+send = { opcode = "CMSG_QUESTGIVER_REQUEST_REWARD", target = { fixture = "marshal" }, entry = 7 }
+[steps.checkpoint]
+window_ms = 500
+replies = []
+broadcasts = [{ opcode = 169, stream = "values" }]
+expect = [
+]
+
+[[rules.unexpected_packets]]
+name = "ambient_movement_refuse_reward"
+reason = "Nearby creature movement is independent of quest completion."
+checkpoint = "refuse_reward"
+opcode = 221
+subject_guid_high = 61744
+
+[[steps]]
+id = "complete"
+send = { opcode = "CMSG_QUESTGIVER_COMPLETE_QUEST", target = { fixture = "innkeeper" }, entry = 2158 }
+[steps.checkpoint]
+window_ms = 500
+replies = [397]
+broadcasts = [{ opcode = 169, stream = "values" }]
+expect = [
+  { opcode = 397, path = ["entry"], value = { type = "unsigned", value = 2158 }, count = 1 },
+  { opcode = 397, path = ["choices", "0", "entry"], value = { type = "unsigned", value = 4656 }, count = 1 },
+  { opcode = 397, path = ["choices", "1", "entry"], value = { type = "unsigned", value = 159 }, count = 1 },
+]
+
+[[rules.unexpected_packets]]
+name = "ambient_movement_complete"
+reason = "Nearby creature movement is independent of quest completion."
+checkpoint = "complete"
+opcode = 221
+subject_guid_high = 61744
+
+[[steps]]
+id = "request_reward"
+send = { opcode = "CMSG_QUESTGIVER_REQUEST_REWARD", target = { fixture = "innkeeper" }, entry = 2158 }
+[steps.checkpoint]
+window_ms = 500
+replies = [397]
+broadcasts = [{ opcode = 169, stream = "values" }]
+expect = [
+  { opcode = 397, path = ["entry"], value = { type = "unsigned", value = 2158 }, count = 1 },
+]
+
+[[rules.unexpected_packets]]
+name = "ambient_movement_request_reward"
+reason = "Nearby creature movement is independent of quest completion."
+checkpoint = "request_reward"
+opcode = 221
+subject_guid_high = 61744
+
+[[rules.data_fields]]
+name = "world_text_395_text"
+reason = "Tier 1 authors fixture text locally; Reference Server world text remains a data comparison. Presence and shape stay strict."
+opcode = 395
+path = ["text"]
+
+[[rules.data_fields]]
+name = "world_text_395_title"
+reason = "Tier 1 authors fixture text locally; Reference Server world text remains a data comparison. Presence and shape stay strict."
+opcode = 395
+path = ["title"]
+
+[[rules.data_fields]]
+name = "world_text_397_text"
+reason = "Tier 1 authors fixture text locally; Reference Server world text remains a data comparison. Presence and shape stay strict."
+opcode = 397
+path = ["text"]
+
+[[rules.data_fields]]
+name = "world_text_397_title"
+reason = "Tier 1 authors fixture text locally; Reference Server world text remains a data comparison. Presence and shape stay strict."
+opcode = 397
+path = ["title"]
