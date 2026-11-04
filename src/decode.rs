@@ -258,6 +258,86 @@ pub fn decode(opcode: u16, body: &[u8]) -> Result<Packet> {
     let mut body = Body(body);
     let mut fields = BTreeMap::new();
     match opcode {
+        0x018d => {
+            fields.insert(
+                "guid".into(),
+                Field::Guid(u64::from_le_bytes(body.bytes()?)),
+            );
+            fields.insert("entry".into(), Field::Unsigned(body.u32()?.into()));
+            fields.insert("title".into(), Field::Text(body.text()?));
+            fields.insert("text".into(), Field::Text(body.text()?));
+            fields.insert("auto_finish".into(), Field::Unsigned(body.u32()?.into()));
+            let emotes = body.u32()?;
+            fields.insert("emotes".into(), body.records(emotes, &["delay", "emote"])?);
+            let choices = body.u32()?;
+            fields.insert(
+                "choices".into(),
+                body.records(choices, &["entry", "count", "display"])?,
+            );
+            let rewards = body.u32()?;
+            fields.insert(
+                "rewards".into(),
+                body.records(rewards, &["entry", "count", "display"])?,
+            );
+            for name in ["money", "flags", "spell"] {
+                fields.insert(name.into(), Field::Unsigned(body.u32()?.into()));
+            }
+        }
+        0x0166 => {
+            fields.insert(
+                "guid".into(),
+                Field::Guid(u64::from_le_bytes(body.bytes()?)),
+            );
+            for name in ["received", "created", "show"] {
+                fields.insert(name.into(), Field::Unsigned(body.u32()?.into()));
+            }
+            fields.insert("bag".into(), Field::Unsigned(body.u8()?.into()));
+            for name in ["slot", "entry", "suffix", "random_property", "count"] {
+                fields.insert(name.into(), Field::Unsigned(body.u32()?.into()));
+            }
+        }
+        0x0191 => {
+            for name in ["entry", "unknown", "xp", "money"] {
+                fields.insert(name.into(), Field::Unsigned(body.u32()?.into()));
+            }
+            let rewards = body.u32()?;
+            fields.insert(
+                "rewards".into(),
+                body.records(rewards, &["entry", "count"])?,
+            );
+        }
+        0x0196 => {
+            fields.insert("entry".into(), Field::Unsigned(body.u32()?.into()));
+        }
+        0x0243 => {
+            let count = body.u32()?;
+            ensure!(count <= 256, "too many faction standings");
+            let mut standings = Vec::new();
+            for _ in 0..count {
+                standings.push(Field::Object(BTreeMap::from([
+                    ("index".into(), Field::Unsigned(body.u32()?.into())),
+                    (
+                        "standing".into(),
+                        Field::Signed(i32::from_le_bytes(body.bytes()?).into()),
+                    ),
+                ])));
+            }
+            fields.insert("standings".into(), Field::List(standings));
+        }
+        0x01d0 => {
+            fields.insert(
+                "guid".into(),
+                Field::Guid(u64::from_le_bytes(body.bytes()?)),
+            );
+            fields.insert("xp".into(), Field::Unsigned(body.u32()?.into()));
+            let kind = body.u8()?;
+            ensure!(kind <= 1, "invalid XP gain kind");
+            fields.insert("kind".into(), Field::Unsigned(kind.into()));
+            if kind == 0 {
+                fields.insert("base_xp".into(), Field::Unsigned(body.u32()?.into()));
+                fields.insert("group_bonus".into(), body.float()?);
+            }
+        }
         0x017e => (),
         0x0183 => {
             fields.insert(
