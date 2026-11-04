@@ -118,6 +118,7 @@ impl FixtureAdapter for Adapter {
                 }
                 FixtureVerb::Item { entry, count, .. } => {
                     gm.set_selection(client.self_guid)?;
+                    drain(gm, &mut client)?;
                     command(gm, item_command(*entry, *count))?;
                     drain(gm, &mut client)?;
                 }
@@ -127,6 +128,7 @@ impl FixtureAdapter for Adapter {
                 }
                 FixtureVerb::Money { copper } => {
                     gm.set_selection(client.self_guid)?;
+                    drain(gm, &mut client)?;
                     command(gm, ".modify money -2147483647".into())?;
                     drain(gm, &mut client)?;
                     command(gm, format!(".modify money {copper}"))?;
