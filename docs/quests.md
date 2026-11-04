@@ -62,3 +62,10 @@ requires the completed log flag after acceptance, an empty log slot and 110 XP a
 and exact item, reputation and XP notifications. Acceptance at the wrong giver, choice index 6,
 and repeated turn-in must grant nothing. The final repeat still returns the reward offer, as the
 pinned Reference Server does. No quest or item Fixture Verb is needed by this scenario.
+
+Reward-offer title and menu text use leaf data rules. Core tier 1 supplies locally authored text
+and numeric world ids/values only; text presence, type, reply structure and giver identity stay strict.
+
+The reward scenario uses a dwarf at the real dwarf starting position. Human Diplomacy would
+multiply the 25 reputation reward to 27.5, which the pinned CalculateReputationGain dithers to
+27 or 28. The dwarf keeps the numeric reputation result at exactly 25 without a range rule.
