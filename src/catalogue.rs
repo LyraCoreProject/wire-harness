@@ -32,6 +32,16 @@ pub const ENTRIES: &[Entry] = &[
         trace: include_str!("../traces/connection_identity.json"),
     },
     Entry {
+        id: "quest_log",
+        scenario: include_str!("../scenarios/quest_log.toml"),
+        trace: include_str!("../traces/quest_log.json"),
+    },
+    Entry {
+        id: "quest_offers",
+        scenario: include_str!("../scenarios/quest_offers.toml"),
+        trace: include_str!("../traces/quest_offers.json"),
+    },
+    Entry {
         id: "taxi_single_hop",
         scenario: include_str!("../scenarios/taxi_single_hop.toml"),
         trace: include_str!("../traces/taxi_single_hop.json"),

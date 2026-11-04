@@ -116,6 +116,10 @@ impl FixtureAdapter for Adapter {
                     self.1.pop();
                     discovered?;
                 }
+                FixtureVerb::Quest { entry, .. } => {
+                    command(gm, quest_command(*entry, name))?;
+                    drain(gm, &mut client)?;
+                }
                 FixtureVerb::Money { copper } => {
                     gm.set_selection(client.self_guid)?;
                     command(gm, ".modify money -2147483647".into())?;
@@ -145,6 +149,7 @@ impl FixtureAdapter for Adapter {
         drop(client);
 
         let mut prepared = super::reconnect_checked(&self.0, fixture)?;
+        super::verify_quest_fixtures(&mut prepared, fixtures)?;
         prepared.fixtures = bindings;
         Ok(prepared)
     }
@@ -176,6 +181,10 @@ impl FixtureAdapter for Adapter {
         self.1.clear();
         Ok(())
     }
+}
+
+fn quest_command(entry: u32, name: &str) -> String {
+    format!(".quest add {entry} {name}")
 }
 
 fn taxi_node_position(node: u32) -> Result<wire_client::scenario::Position> {
@@ -287,6 +296,11 @@ impl Drop for Adapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quest_command_names_the_gameplay_character() {
+        assert_eq!(quest_command(7, "Questlogger"), ".quest add 7 Questlogger");
+    }
 
     #[test]
     fn teleport_ack_keeps_the_full_guid_on_the_wire() {

@@ -215,6 +215,7 @@ remain separate per recipient; GUID mapping remains shared across all recipients
 | --- | --- | --- |
 | `character` | `name`, `race`, `class`, `level`, `at` | Create the Character; `at` has map, x/y/z in yards and orientation in radians. |
 | `money` | `copper` | Set the exact balance, from 0 through 2,147,483,647; at most once. |
+| `quest` | `entry`, `state = "incomplete"` | Add a quest to the next log slot, with no objective progress or timer. Entries are nonzero and unique; at most 20. |
 | `known_flight_node` | `node_id` | Learn one node, from 1 through 256; no duplicates. |
 | `creature` | `id`, `entry`, `offset` | Spawn a creature at a signed forward offset in yards, at most 100 from the Character. |
 
@@ -269,7 +270,9 @@ numeric reply opcodes in order, including repeated replies. A broadcast has an o
 stream. `expect` can require an exact decoded field value and occurrence count; its path is evaluated
 after scenario scoping. The recorder checks these assertions before accepting a Golden Trace.
 `replies` may be empty when a successful request has no reply. Such a step must assert a declared
-broadcast field. vmangos sends a Character VALUES update, without `SMSG_BUY_BANK_SLOT_RESULT`,
+broadcast field, except quest-log requests, whose no-op and out-of-range cases have no reply or
+state update. An empty quest-log checkpoint compares the absence of updates. A quest-giver query may instead
+assert its fieldless gossip-close reply when the giver has no relation to the requested quest. vmangos sends a Character VALUES update, without `SMSG_BUY_BANK_SLOT_RESULT`,
 when it sells a bank bag slot. It sends that result opcode for refusals.
 
 Every received opcode is recorded. Undeclared packets normally retain no body and become `unexpected_packet`

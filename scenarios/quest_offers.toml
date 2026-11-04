@@ -1,0 +1,118 @@
+schema_version = 3
+id = "quest_offers"
+behavior = "quest_offers"
+
+[opening]
+window_ms = 1000
+
+[rules]
+time_tolerance_ms = 100
+wall_clock_tolerance_ms = 2000
+
+[rules.character_scope]
+name = "quest_reader"
+reason = "Compare every Character field; nearby creatures are independent of reading the quest offer."
+packets = []
+
+[[fixtures]]
+verb = "character"
+name = "Questreader"
+race = "human"
+class = "warrior"
+level = 6
+at = { map = 0, x = -8949.95, y = -132.493, z = 83.5312, orientation = 0.0 }
+
+[[fixtures]]
+verb = "creature"
+id = "giver"
+entry = 1977
+offset = 2.0
+
+[[steps]]
+id = "status"
+send = { opcode = "CMSG_QUESTGIVER_STATUS_QUERY", target = { fixture = "giver" } }
+[steps.checkpoint]
+window_ms = 500
+replies = [387]
+broadcasts = [{ opcode = 169, stream = "values" }]
+expect = [
+  { opcode = 387, path = ["status"], value = { type = "unsigned", value = 5 }, count = 1 },
+]
+
+[[rules.unexpected_packets]]
+name = "ambient_movement_status"
+reason = "Nearby creature movement is independent of reading quest offers."
+checkpoint = "status"
+opcode = 221
+subject_guid_high = 61744
+
+[[steps]]
+id = "hello"
+send = { opcode = "CMSG_QUESTGIVER_HELLO", target = { fixture = "giver" } }
+[steps.checkpoint]
+window_ms = 500
+replies = [392]
+broadcasts = [{ opcode = 169, stream = "values" }]
+expect = [
+  { opcode = 392, path = ["entry"], value = { type = "unsigned", value = 433 }, count = 1 },
+]
+
+[[rules.unexpected_packets]]
+name = "ambient_movement_hello"
+reason = "Nearby creature movement is independent of reading quest offers."
+checkpoint = "hello"
+opcode = 221
+subject_guid_high = 61744
+
+[[steps]]
+id = "details"
+send = { opcode = "CMSG_QUESTGIVER_QUERY_QUEST", target = { fixture = "giver" }, entry = 433 }
+[steps.checkpoint]
+window_ms = 500
+replies = [392]
+broadcasts = [{ opcode = 169, stream = "values" }]
+expect = [
+  { opcode = 392, path = ["entry"], value = { type = "unsigned", value = 433 }, count = 1 },
+]
+
+[[rules.unexpected_packets]]
+name = "ambient_movement_details"
+reason = "Nearby creature movement is independent of reading quest offers."
+checkpoint = "details"
+opcode = 221
+subject_guid_high = 61744
+
+[[steps]]
+id = "requirements"
+send = { opcode = "CMSG_QUEST_QUERY", entry = 433 }
+[steps.checkpoint]
+window_ms = 500
+replies = [93]
+broadcasts = [{ opcode = 169, stream = "values" }]
+expect = [
+  { opcode = 93, path = ["entry"], value = { type = "unsigned", value = 433 }, count = 1 },
+  { opcode = 93, path = ["requirements", "0", "creature"], value = { type = "unsigned", value = 1117 }, count = 1 },
+  { opcode = 93, path = ["requirements", "0", "creature_count"], value = { type = "unsigned", value = 10 }, count = 1 },
+]
+
+[[rules.unexpected_packets]]
+name = "ambient_movement_requirements"
+reason = "Nearby creature movement is independent of reading quest offers."
+checkpoint = "requirements"
+opcode = 221
+subject_guid_high = 61744
+
+[[steps]]
+id = "unrelated_quest"
+send = { opcode = "CMSG_QUESTGIVER_QUERY_QUEST", target = { fixture = "giver" }, entry = 7 }
+[steps.checkpoint]
+window_ms = 500
+replies = [382]
+broadcasts = [{ opcode = 169, stream = "values" }]
+
+[[rules.unexpected_packets]]
+name = "ambient_movement_unrelated_quest"
+reason = "Nearby creature movement is independent of reading quest offers."
+checkpoint = "unrelated_quest"
+opcode = 221
+subject_guid_high = 61744

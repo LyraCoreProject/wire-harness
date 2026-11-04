@@ -400,3 +400,38 @@ fn transport_clock_must_not_move_backwards_between_packets() {
     let error = run_on(&scenario, &mut connection).unwrap_err();
     assert_eq!(error.to_string(), "transport clock moved backwards");
 }
+
+#[test]
+fn quest_fixtures_reject_invalid_entries_states_and_duplicates() {
+    let text = include_str!("../scenarios/quest_log.toml");
+    assert!(Scenario::parse(text).is_ok());
+    for invalid in [
+        text.replace("entry = 7", "entry = 0"),
+        text.replace("entry = 15", "entry = 7"),
+        text.replace(r#"state = "incomplete""#, r#"state = "complete""#),
+        text.replace(r#"state = "incomplete""#, r#"state = "unknown""#),
+    ] {
+        assert!(Scenario::parse(&invalid).is_err());
+    }
+}
+
+#[test]
+fn quest_log_requests_encode_slots_in_wire_order() {
+    use wire_client::scenario::ClientPacket;
+    let fixtures = Default::default();
+    assert_eq!(
+        ClientPacket::QuestLogSwap {
+            first: 0,
+            second: 19
+        }
+        .encode(7, &fixtures)
+        .unwrap(),
+        (0x0193, vec![0, 19])
+    );
+    assert_eq!(
+        ClientPacket::QuestLogRemove { slot: 1 }
+            .encode(7, &fixtures)
+            .unwrap(),
+        (0x0194, vec![1])
+    );
+}

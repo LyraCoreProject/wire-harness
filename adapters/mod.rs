@@ -344,6 +344,95 @@ fn connect_character(
     })
 }
 
+fn quest_snapshot_matches(
+    observation: &Observation,
+    guid: u64,
+    fixtures: &[FixtureVerb],
+) -> Result<bool> {
+    use wire_client::decode::Field;
+    let Some(Field::List(objects)) = observation.packet.fields.get("objects") else {
+        return Ok(false);
+    };
+    for object in objects {
+        let Field::Object(object) = object else {
+            continue;
+        };
+        if object.get("guid") != Some(&Field::Guid(guid))
+            || !matches!(object.get("kind"), Some(Field::Unsigned(2 | 3)))
+        {
+            continue;
+        }
+        let Some(Field::Object(values)) = object.get("values") else {
+            bail!("Character CREATE has no values");
+        };
+        let quests: Vec<_> = fixtures
+            .iter()
+            .filter_map(|fixture| match fixture {
+                FixtureVerb::Quest { entry, .. } => Some(*entry),
+                _ => None,
+            })
+            .collect();
+        // Build 5875 has 20 quest slots, three words each, beginning at field 198.
+        for slot in 0..20 {
+            let word = |offset| -> Result<u64> {
+                match values.get(&format!("field_{}", 198 + slot * 3 + offset)) {
+                    Some(Field::Unsigned(value)) => Ok(*value),
+                    None => Ok(0),
+                    _ => bail!("quest log field has the wrong type"),
+                }
+            };
+            ensure!(
+                word(0)? == u64::from(quests.get(slot).copied().unwrap_or(0)),
+                "quest fixture did not occupy the expected log slot {slot}"
+            );
+            ensure!(
+                word(1)? == 0 && word(2)? == 0,
+                "quest fixture must be incomplete, without progress or a timer"
+            );
+        }
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+fn verify_quest_fixtures(prepared: &mut PreparedClient, fixtures: &[FixtureVerb]) -> Result<()> {
+    if !fixtures
+        .iter()
+        .any(|fixture| matches!(fixture, FixtureVerb::Quest { .. }))
+    {
+        return Ok(());
+    }
+    for observation in &prepared.opening {
+        if quest_snapshot_matches(observation, prepared.client.self_guid, fixtures)? {
+            return Ok(());
+        }
+    }
+    prepared
+        .client
+        .set_recv_timeout(Duration::from_millis(100))?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        match prepared.client.recv_raw() {
+            Ok((opcode, body)) => {
+                let observation = Observation::opening(opcode, &body);
+                let verified =
+                    quest_snapshot_matches(&observation, prepared.client.self_guid, fixtures)?;
+                ensure!(
+                    prepared.opening.len() < 4096,
+                    "fixture verification exceeded 4096 frames"
+                );
+                prepared.opening.push(observation);
+                if verified {
+                    return Ok(());
+                }
+            }
+            Err(error) if wire_client::is_read_timeout(&error) => (),
+            Err(error) => return Err(error),
+        }
+    }
+    bail!("quest fixture verification did not receive the Character CREATE")
+}
+
 fn new_creature(
     client: &mut WireClient,
     before: &[u64],
@@ -504,6 +593,47 @@ pub fn record(invocation: &Invocation, path: &str, golden: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::prepare_recording;
+
+    #[test]
+    fn quest_fixture_requires_the_full_incomplete_log_in_order() {
+        use std::collections::BTreeMap;
+        use wire_client::decode::{Field, Packet};
+        use wire_client::scenario::{FixtureVerb, Observation, QuestState, Stream};
+        let fixtures = [FixtureVerb::Quest {
+            entry: 7,
+            state: QuestState::Incomplete,
+        }];
+        let snapshot = |guid, entry, progress| Observation {
+            character: None,
+            received_after_ms: None,
+            checkpoint: "opening".into(),
+            stream: Stream::Opening,
+            packet: Packet {
+                opcode: 169,
+                fields: BTreeMap::from([(
+                    "objects".into(),
+                    Field::List(vec![Field::Object(BTreeMap::from([
+                        ("guid".into(), Field::Guid(guid)),
+                        ("kind".into(), Field::Unsigned(3)),
+                        (
+                            "values".into(),
+                            Field::Object(BTreeMap::from([
+                                ("field_198".into(), Field::Unsigned(entry)),
+                                ("field_199".into(), Field::Unsigned(progress)),
+                            ])),
+                        ),
+                    ]))]),
+                )]),
+            },
+        };
+        assert!(super::quest_snapshot_matches(&snapshot(9, 7, 0), 9, &fixtures).unwrap());
+        assert!(!super::quest_snapshot_matches(&snapshot(10, 7, 0), 9, &fixtures).unwrap());
+        for (entry, progress) in [(0, 0), (15, 0), (7, 1), (7, 0x01000000)] {
+            assert!(
+                super::quest_snapshot_matches(&snapshot(9, entry, progress), 9, &fixtures).is_err()
+            );
+        }
+    }
 
     #[test]
     fn recording_time_follows_fixture_setup_for_each_schema() {

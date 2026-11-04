@@ -93,6 +93,7 @@ fn reducer_calls(guid: u64, fixtures: &[FixtureVerb]) -> Vec<(&'static str, serd
                     json!([guid, at.map, at.x, at.y, at.z, at.orientation]),
                 ),
             ],
+            FixtureVerb::Quest { entry, .. } => vec![("debug_grant_quest", json!([guid, entry]))],
             FixtureVerb::Money { copper } => vec![("debug_set_money", json!([guid, copper]))],
             FixtureVerb::KnownFlightNode { node_id } => {
                 vec![("debug_learn_taxi_node", json!([guid, node_id]))]
@@ -138,6 +139,7 @@ impl FixtureAdapter for Adapter {
         }
         drop(client);
         let mut prepared = super::reconnect_checked(&self.invocation, fixture)?;
+        super::verify_quest_fixtures(&mut prepared, fixtures)?;
         prepared.fixtures = bindings;
         Ok(prepared)
     }
@@ -150,6 +152,18 @@ impl FixtureAdapter for Adapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn incomplete_quest_uses_the_grant_reducer() {
+        let fixtures = [FixtureVerb::Quest {
+            entry: 7,
+            state: wire_client::scenario::QuestState::Incomplete,
+        }];
+        assert_eq!(
+            reducer_calls(17, &fixtures),
+            vec![("debug_grant_quest", serde_json::json!([17, 7]))]
+        );
+    }
 
     #[test]
     fn taxi_fixtures_call_the_agreed_debug_reducers() {

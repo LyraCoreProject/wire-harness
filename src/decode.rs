@@ -42,6 +42,24 @@ impl Body<'_> {
         Ok(self.bytes::<1>()?[0])
     }
 
+    fn records(&mut self, count: u32, names: &[&str]) -> Result<Field> {
+        ensure!(
+            count <= 256 && count as usize <= self.0.len() / (names.len() * 4),
+            "invalid record count"
+        );
+        Ok(Field::List(
+            (0..count)
+                .map(|_| {
+                    let mut fields = BTreeMap::new();
+                    for name in names {
+                        fields.insert((*name).into(), Field::Unsigned(self.u32()?.into()));
+                    }
+                    Ok(Field::Object(fields))
+                })
+                .collect::<Result<_>>()?,
+        ))
+    }
+
     fn packed_guid(&mut self) -> Result<Field> {
         let mask = self.u8()?;
         let mut value = 0;
@@ -240,6 +258,100 @@ pub fn decode(opcode: u16, body: &[u8]) -> Result<Packet> {
     let mut body = Body(body);
     let mut fields = BTreeMap::new();
     match opcode {
+        0x017e => (),
+        0x0183 => {
+            fields.insert(
+                "guid".into(),
+                Field::Guid(u64::from_le_bytes(body.bytes()?)),
+            );
+            fields.insert("status".into(), Field::Unsigned(body.u32()?.into()));
+        }
+        0x0185 => {
+            fields.insert(
+                "guid".into(),
+                Field::Guid(u64::from_le_bytes(body.bytes()?)),
+            );
+            fields.insert("greeting".into(), Field::Text(body.text()?));
+            for name in ["emote_delay", "emote"] {
+                fields.insert(name.into(), Field::Unsigned(body.u32()?.into()));
+            }
+            let count = body.u8()?;
+            let mut quests = Vec::new();
+            for _ in 0..count {
+                let mut quest = BTreeMap::new();
+                for name in ["entry", "icon", "level"] {
+                    quest.insert(name.into(), Field::Unsigned(body.u32()?.into()));
+                }
+                quest.insert("title".into(), Field::Text(body.text()?));
+                quests.push(Field::Object(quest));
+            }
+            fields.insert("quests".into(), Field::List(quests));
+        }
+        0x0188 => {
+            fields.insert(
+                "guid".into(),
+                Field::Guid(u64::from_le_bytes(body.bytes()?)),
+            );
+            fields.insert("entry".into(), Field::Unsigned(body.u32()?.into()));
+            for name in ["title", "details", "objectives"] {
+                fields.insert(name.into(), Field::Text(body.text()?));
+            }
+            fields.insert("auto_finish".into(), Field::Unsigned(body.u32()?.into()));
+            for name in ["choices", "rewards"] {
+                let count = body.u32()?;
+                fields.insert(
+                    name.into(),
+                    body.records(count, &["entry", "count", "display"])?,
+                );
+            }
+            for name in ["money", "spell"] {
+                fields.insert(name.into(), Field::Unsigned(body.u32()?.into()));
+            }
+            let count = body.u32()?;
+            fields.insert("emotes".into(), body.records(count, &["emote", "delay"])?);
+        }
+        0x005d => {
+            for name in [
+                "entry",
+                "method",
+                "level",
+                "zone",
+                "type",
+                "reputation_faction",
+                "reputation_value",
+                "opposite_faction",
+                "opposite_value",
+                "next_quest",
+                "money",
+                "money_max_level",
+                "spell",
+                "source_item",
+                "flags",
+            ] {
+                fields.insert(name.into(), Field::Unsigned(body.u32()?.into()));
+            }
+            fields.insert("rewards".into(), body.records(4, &["entry", "count"])?);
+            fields.insert("choices".into(), body.records(6, &["entry", "count"])?);
+            fields.insert("point_map".into(), Field::Unsigned(body.u32()?.into()));
+            fields.insert("point_x".into(), body.float()?);
+            fields.insert("point_y".into(), body.float()?);
+            fields.insert("point_option".into(), Field::Unsigned(body.u32()?.into()));
+            for name in ["title", "objectives", "details", "end"] {
+                fields.insert(name.into(), Field::Text(body.text()?));
+            }
+            fields.insert(
+                "requirements".into(),
+                body.records(4, &["creature", "creature_count", "item", "item_count"])?,
+            );
+            fields.insert(
+                "objective_text".into(),
+                Field::List(
+                    (0..4)
+                        .map(|_| body.text().map(Field::Text))
+                        .collect::<Result<_>>()?,
+                ),
+            );
+        }
         0x02c2 => {
             fields.insert("map".into(), Field::Unsigned(body.u32()?.into()));
             fields.insert("zone".into(), Field::Unsigned(body.u32()?.into()));

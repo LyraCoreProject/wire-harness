@@ -63,6 +63,10 @@ pub enum FixtureVerb {
     Money {
         copper: u32,
     },
+    Quest {
+        entry: u32,
+        state: QuestState,
+    },
     KnownFlightNode {
         node_id: u32,
     },
@@ -71,6 +75,12 @@ pub enum FixtureVerb {
         entry: u32,
         offset: f32,
     },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuestState {
+    Incomplete,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -145,6 +155,18 @@ pub enum ClientPacket {
     },
     #[serde(rename = "CMSG_BANKER_ACTIVATE")]
     BankerActivate { target: Target },
+    #[serde(rename = "CMSG_QUESTGIVER_STATUS_QUERY")]
+    QuestgiverStatus { target: Target },
+    #[serde(rename = "CMSG_QUESTGIVER_HELLO")]
+    QuestgiverHello { target: Target },
+    #[serde(rename = "CMSG_QUESTGIVER_QUERY_QUEST")]
+    QuestgiverQuery { target: Target, entry: u32 },
+    #[serde(rename = "CMSG_QUEST_QUERY")]
+    QuestQuery { entry: u32 },
+    #[serde(rename = "CMSG_QUESTLOG_SWAP_QUEST")]
+    QuestLogSwap { first: u8, second: u8 },
+    #[serde(rename = "CMSG_QUESTLOG_REMOVE_QUEST")]
+    QuestLogRemove { slot: u8 },
     #[serde(rename = "CMSG_BUY_BANK_SLOT")]
     BuyBankSlot { target: Target },
 }
@@ -371,7 +393,13 @@ impl Scenario {
                 );
             } else {
                 ensure!(
-                    !checkpoint.expect.is_empty(),
+                    !checkpoint.expect.is_empty()
+                        || matches!(
+                            send,
+                            ClientPacket::QuestLogSwap { .. }
+                                | ClientPacket::QuestLogRemove { .. }
+                                | ClientPacket::QuestgiverQuery { .. }
+                        ),
                     "request without a success reply needs a checkpoint assertion"
                 );
             }
@@ -659,7 +687,13 @@ impl Scenario {
                             .for_character(actor)
                             .unwrap()
                             .expect
-                            .is_empty(),
+                            .is_empty()
+                            || matches!(
+                                send,
+                                ClientPacket::QuestLogSwap { .. }
+                                    | ClientPacket::QuestLogRemove { .. }
+                                    | ClientPacket::QuestgiverQuery { .. }
+                            ),
                         "request without a success reply needs a checkpoint assertion"
                     );
                 }
@@ -844,9 +878,16 @@ fn validate_fixtures(fixtures: &[FixtureVerb]) -> Result<(BTreeSet<String>, BTre
     let mut fixture_ids = BTreeSet::new();
     let mut nodes = BTreeSet::new();
     let mut money = false;
+    let mut quests = BTreeSet::new();
     for fixture in &fixtures[1..] {
         match fixture {
             FixtureVerb::Character { .. } => anyhow::bail!("duplicate Character fixture"),
+            FixtureVerb::Quest { entry, .. } => {
+                ensure!(
+                    *entry != 0 && quests.insert(*entry) && quests.len() <= 20,
+                    "invalid, duplicate or overflowing quest fixture"
+                );
+            }
             FixtureVerb::Money { copper } => {
                 ensure!(
                     !money && *copper <= 0x7fff_ffff,
@@ -883,16 +924,27 @@ impl ClientPacket {
             Self::TaxiNodeStatusQuery { .. } => Some(0x01ab),
             Self::TaxiQueryAvailableNodes { .. } => Some(0x01a9),
             Self::ActivateTaxi { .. } => Some(0x01ae),
+            Self::QuestgiverStatus { .. } => Some(0x0183),
+            Self::QuestQuery { .. } => Some(0x005d),
+            Self::QuestgiverHello { .. } | Self::QuestgiverQuery { .. } => None,
             Self::BankerActivate { .. } => Some(0x01b8),
-            Self::BuyBankSlot { .. } => None,
+            Self::BuyBankSlot { .. } | Self::QuestLogSwap { .. } | Self::QuestLogRemove { .. } => {
+                None
+            }
         }
     }
     fn target(&self) -> Option<&Target> {
         match self {
-            Self::Ping { .. } => None,
+            Self::Ping { .. }
+            | Self::QuestQuery { .. }
+            | Self::QuestLogSwap { .. }
+            | Self::QuestLogRemove { .. } => None,
             Self::NameQuery { target }
             | Self::TaxiNodeStatusQuery { target }
             | Self::TaxiQueryAvailableNodes { target }
+            | Self::QuestgiverStatus { target }
+            | Self::QuestgiverHello { target }
+            | Self::QuestgiverQuery { target, .. }
             | Self::BankerActivate { target }
             | Self::BuyBankSlot { target }
             | Self::ActivateTaxi { target, .. } => Some(target),
@@ -936,6 +988,16 @@ impl ClientPacket {
             Self::NameQuery { .. } => (0x0050, guid.to_le_bytes().to_vec()),
             Self::TaxiNodeStatusQuery { .. } => (0x01aa, guid.to_le_bytes().to_vec()),
             Self::TaxiQueryAvailableNodes { .. } => (0x01ac, guid.to_le_bytes().to_vec()),
+            Self::QuestgiverStatus { .. } => (0x0182, guid.to_le_bytes().to_vec()),
+            Self::QuestgiverHello { .. } => (0x0184, guid.to_le_bytes().to_vec()),
+            Self::QuestgiverQuery { entry, .. } => {
+                let mut body = guid.to_le_bytes().to_vec();
+                body.extend(entry.to_le_bytes());
+                (0x0186, body)
+            }
+            Self::QuestQuery { entry } => (0x005c, entry.to_le_bytes().to_vec()),
+            Self::QuestLogSwap { first, second } => (0x0193, vec![*first, *second]),
+            Self::QuestLogRemove { slot } => (0x0194, vec![*slot]),
             Self::BankerActivate { .. } => (0x01b7, guid.to_le_bytes().to_vec()),
             Self::BuyBankSlot { .. } => (0x01b9, guid.to_le_bytes().to_vec()),
             Self::ActivateTaxi {
