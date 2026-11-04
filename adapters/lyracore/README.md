@@ -48,3 +48,9 @@ the known node without starting a flight or sending a packet. The adapter's exac
 live verification of this verb and the complete LyraCore taxi scenario is pending T2d. The other
 required reducers already exist. Fixture creatures in LyraCore live for the disposable Realm's
 lifetime; use a fresh Realm when resetting them.
+
+The `quest` Fixture Verb uses `debug_grant_quest(character_guid: u64, quest_entry: u32)`.
+Only `state = "incomplete"` is supported. Both adapters verify every quest slot in the final
+Character CREATE: the declared entries in order, zero objective progress, zero state flags and
+no timer. Missing, completed, timed or pre-progressed quests fail setup. The core tier 1 Transport
+must handle `FixtureVerb::Quest` at the next pin, calling this reducer in fixture order.

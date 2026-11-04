@@ -1897,11 +1897,49 @@ pub(crate) fn compare_with_rules(
         }
     }
     for step in &scenario.steps {
-        let Some(ClientPacket::BankerActivate {
-            target: Target::Fixture(id),
-        }) = &step.send
-        else {
-            continue;
+        let (id, opcode) = match &step.send {
+            Some(ClientPacket::BankerActivate {
+                target: Target::Fixture(id),
+            }) => (id, 440),
+            Some(ClientPacket::QuestgiverStatus {
+                target: Target::Fixture(id),
+            }) => (id, 387),
+            Some(ClientPacket::QuestgiverHello {
+                target: Target::Fixture(id),
+            }) => {
+                let replies = if let Some(actor) = step.character.as_deref() {
+                    &step
+                        .checkpoint
+                        .for_character(actor)
+                        .context("quest actor checkpoint")?
+                        .replies
+                } else {
+                    &step.checkpoint.replies
+                };
+                let Some(opcode) = replies.iter().find(|opcode| matches!(opcode, 389 | 392)) else {
+                    continue;
+                };
+                (id, *opcode)
+            }
+            Some(ClientPacket::QuestgiverQuery {
+                target: Target::Fixture(id),
+                ..
+            }) => {
+                let replies = if let Some(actor) = step.character.as_deref() {
+                    &step
+                        .checkpoint
+                        .for_character(actor)
+                        .context("quest actor checkpoint")?
+                        .replies
+                } else {
+                    &step.checkpoint.replies
+                };
+                if !replies.contains(&392) {
+                    continue;
+                }
+                (id, 392)
+            }
+            _ => continue,
         };
         let character = step.character.as_deref();
         let fixtures = if let Some(character) = character {
@@ -1909,7 +1947,7 @@ pub(crate) fn compare_with_rules(
                 .characters
                 .iter()
                 .find(|item| item.id == character)
-                .context("bank actor")?
+                .context("fixture actor")?
                 .fixtures
         } else {
             &scenario.fixtures
@@ -1924,7 +1962,7 @@ pub(crate) fn compare_with_rules(
                 } if fixture_id == id => Some(*entry),
                 _ => None,
             })
-            .context("banker fixture")?;
+            .context("creature fixture")?;
         let expected_guid = opening_creature_guid(expected, character, entry);
         let actual_guid = opening_creature_guid(actual, character, entry);
         let location = Location {
@@ -1933,12 +1971,12 @@ pub(crate) fn compare_with_rules(
             stream: Some(Stream::Reply(step.id.clone())),
             packet_index: None,
             path: vec!["guid".into()],
-            opcode: Some(440),
+            opcode: Some(opcode),
         };
         match (expected_guid, actual_guid) {
             (Some(expected_guid), Some(actual_guid)) => {
                 comparator.field(
-                    440,
+                    opcode,
                     &location,
                     &Field::Guid(expected_guid),
                     &Field::Guid(actual_guid),
@@ -1947,13 +1985,13 @@ pub(crate) fn compare_with_rules(
                     for packet in trace.packets.iter().filter(|packet| {
                         packet.checkpoint == step.id
                             && packet.character.as_deref() == character
-                            && packet.opcode == 440
+                            && packet.opcode == opcode
                     }) {
                         if packet.fields.get("guid") != Some(&Field::Guid(guid)) {
                             comparator.difference(
                                 &location,
                                 "fixture_guid",
-                                "bank reply must name its banker fixture",
+                                "reply must name its creature fixture",
                                 Some(&Field::Guid(guid)),
                                 packet.fields.get("guid"),
                             );
@@ -1964,7 +2002,7 @@ pub(crate) fn compare_with_rules(
             _ => comparator.difference(
                 &location,
                 "fixture_guid",
-                "The bank reply must name the banker created during opening",
+                "The reply must name the creature created during opening",
                 expected_guid.map(Field::Guid).as_ref(),
                 actual_guid.map(Field::Guid).as_ref(),
             ),

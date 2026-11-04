@@ -1,0 +1,122 @@
+schema_version = 3
+id = "quest_log"
+behavior = "quest_log"
+
+[opening]
+window_ms = 1000
+
+[rules]
+time_tolerance_ms = 100
+wall_clock_tolerance_ms = 2000
+
+[rules.character_scope]
+name = "character_quest_log"
+reason = "Compare every Character field; nearby creatures are independent of quest log operations."
+packets = []
+
+[[fixtures]]
+verb = "character"
+name = "Questlogger"
+race = "human"
+class = "warrior"
+level = 1
+at = { map = 0, x = -8949.95, y = -132.493, z = 83.5312, orientation = 0.0 }
+
+[[fixtures]]
+verb = "quest"
+entry = 7
+state = "incomplete"
+
+[[fixtures]]
+verb = "quest"
+entry = 15
+state = "incomplete"
+
+[[steps]]
+id = "swap"
+send = { opcode = "CMSG_QUESTLOG_SWAP_QUEST", first = 0, second = 1 }
+[steps.checkpoint]
+window_ms = 500
+replies = []
+broadcasts = [{ opcode = 169, stream = "values" }]
+expect = [
+  { opcode = 169, path = ["objects", "0", "values", "field_198"], value = { type = "unsigned", value = 15 }, count = 1 },
+  { opcode = 169, path = ["objects", "0", "values", "field_201"], value = { type = "unsigned", value = 7 }, count = 1 },
+]
+
+[[rules.unexpected_packets]]
+name = "ambient_movement_swap"
+reason = "Nearby creature movement is independent of quest log operations."
+checkpoint = "swap"
+opcode = 221
+subject_guid_high = 61744
+
+[[steps]]
+id = "invalid_swap"
+send = { opcode = "CMSG_QUESTLOG_SWAP_QUEST", first = 0, second = 20 }
+[steps.checkpoint]
+window_ms = 500
+replies = []
+broadcasts = [{ opcode = 169, stream = "values" }]
+
+[[rules.unexpected_packets]]
+name = "ambient_movement_invalid_swap"
+reason = "Nearby creature movement is independent of quest log operations."
+checkpoint = "invalid_swap"
+opcode = 221
+subject_guid_high = 61744
+
+[[steps]]
+id = "swap_back"
+send = { opcode = "CMSG_QUESTLOG_SWAP_QUEST", first = 0, second = 1 }
+[steps.checkpoint]
+window_ms = 500
+replies = []
+broadcasts = [{ opcode = 169, stream = "values" }]
+expect = [
+  { opcode = 169, path = ["objects", "0", "values", "field_198"], value = { type = "unsigned", value = 7 }, count = 1 },
+  { opcode = 169, path = ["objects", "0", "values", "field_201"], value = { type = "unsigned", value = 15 }, count = 1 },
+]
+
+[[rules.unexpected_packets]]
+name = "ambient_movement_swap_back"
+reason = "Nearby creature movement is independent of quest log operations."
+checkpoint = "swap_back"
+opcode = 221
+subject_guid_high = 61744
+
+[[steps]]
+id = "abandon_first"
+send = { opcode = "CMSG_QUESTLOG_REMOVE_QUEST", slot = 0 }
+[steps.checkpoint]
+window_ms = 500
+replies = []
+broadcasts = [{ opcode = 169, stream = "values" }]
+expect = [
+  { opcode = 169, path = ["objects", "0", "values", "field_198"], value = { type = "unsigned", value = 0 }, count = 1 },
+]
+
+[[rules.unexpected_packets]]
+name = "ambient_movement_abandon_first"
+reason = "Nearby creature movement is independent of quest log operations."
+checkpoint = "abandon_first"
+opcode = 221
+subject_guid_high = 61744
+
+[[steps]]
+id = "abandon_second"
+send = { opcode = "CMSG_QUESTLOG_REMOVE_QUEST", slot = 1 }
+[steps.checkpoint]
+window_ms = 500
+replies = []
+broadcasts = [{ opcode = 169, stream = "values" }]
+expect = [
+  { opcode = 169, path = ["objects", "0", "values", "field_201"], value = { type = "unsigned", value = 0 }, count = 1 },
+]
+
+[[rules.unexpected_packets]]
+name = "ambient_movement_abandon_second"
+reason = "Nearby creature movement is independent of quest log operations."
+checkpoint = "abandon_second"
+opcode = 221
+subject_guid_high = 61744
