@@ -405,10 +405,13 @@ fn transport_clock_must_not_move_backwards_between_packets() {
 fn quest_fixtures_reject_invalid_entries_states_and_duplicates() {
     let text = include_str!("../scenarios/quest_log.toml");
     assert!(Scenario::parse(text).is_ok());
+    assert!(
+        Scenario::parse(&text.replace(r#"state = "incomplete""#, r#"state = "complete""#)).is_ok()
+    );
     for invalid in [
         text.replace("entry = 7", "entry = 0"),
         text.replace("entry = 15", "entry = 7"),
-        text.replace(r#"state = "incomplete""#, r#"state = "complete""#),
+        text.replace(r#"state = "incomplete""#, r#"state = "rewarded""#),
         text.replace(r#"state = "incomplete""#, r#"state = "unknown""#),
     ] {
         assert!(Scenario::parse(&invalid).is_err());
