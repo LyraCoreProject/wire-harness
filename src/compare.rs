@@ -1945,6 +1945,10 @@ pub(crate) fn compare_with_rules(
                     target: Target::Fixture(id),
                     ..
                 }
+                | ClientPacket::QuestgiverChooseReward {
+                    target: Target::Fixture(id),
+                    ..
+                }
                 | ClientPacket::QuestgiverRequestReward {
                     target: Target::Fixture(id),
                     ..

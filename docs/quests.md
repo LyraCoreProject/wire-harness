@@ -75,3 +75,17 @@ World-text fields are data comparisons. Tier 1 authors fixture text locally and 
 ids and values from the pinned world. Quest titles, details, objectives and menu text remain hashed
 in the Reference Server recording. A text value difference is data; a missing field, changed type,
 packet shape, numeric value or giver identity remains a rule difference.
+
+`quest_reward` accepts quest 2158 through the wire from Falkhaan Isenstrider (6774), then turns it
+in to Innkeeper Farley (295), selecting the first choice: five Small Pumpkins (4656). The recorder
+requires the completed log flag after acceptance, an empty log slot and 110 XP after turn-in,
+and exact item, reputation and XP notifications. Acceptance at the wrong giver, choice index 6,
+and repeated turn-in must grant nothing. The final repeat still returns the reward offer, as the
+pinned Reference Server does. No quest or item Fixture Verb is needed by this scenario.
+
+Reward-offer title and menu text use leaf data rules. Core tier 1 supplies locally authored text
+and numeric world ids/values only; text presence, type, reply structure and giver identity stay strict.
+
+The reward scenario uses a dwarf at the real dwarf starting position. Human Diplomacy would
+multiply the 25 reputation reward to 27.5, which the pinned CalculateReputationGain dithers to
+27 or 28. The dwarf keeps the numeric reputation result at exactly 25 without a range rule.

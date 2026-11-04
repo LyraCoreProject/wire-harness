@@ -200,6 +200,14 @@ pub enum ClientPacket {
     QuestgiverComplete { target: Target, entry: u32 },
     #[serde(rename = "CMSG_QUESTGIVER_REQUEST_REWARD")]
     QuestgiverRequestReward { target: Target, entry: u32 },
+    #[serde(rename = "CMSG_QUESTGIVER_ACCEPT_QUEST")]
+    QuestgiverAccept { target: Target, entry: u32 },
+    #[serde(rename = "CMSG_QUESTGIVER_CHOOSE_REWARD")]
+    QuestgiverChooseReward {
+        target: Target,
+        entry: u32,
+        choice: u32,
+    },
     #[serde(rename = "CMSG_BUY_BANK_SLOT")]
     BuyBankSlot { target: Target },
 }
@@ -434,6 +442,7 @@ impl Scenario {
                                 | ClientPacket::QuestLogRemove { .. }
                                 | ClientPacket::QuestgiverQuery { .. }
                                 | ClientPacket::QuestgiverRequestReward { .. }
+                                | ClientPacket::QuestgiverChooseReward { .. }
                         ),
                     "request without a success reply needs a checkpoint assertion"
                 );
@@ -737,6 +746,7 @@ impl Scenario {
                                     | ClientPacket::QuestLogRemove { .. }
                                     | ClientPacket::QuestgiverQuery { .. }
                                     | ClientPacket::QuestgiverRequestReward { .. }
+                                    | ClientPacket::QuestgiverChooseReward { .. }
                             ),
                         "request without a success reply needs a checkpoint assertion"
                     );
@@ -995,6 +1005,7 @@ impl ClientPacket {
             Self::TaxiQueryAvailableNodes { .. } => Some(0x01a9),
             Self::ActivateTaxi { .. } => Some(0x01ae),
             Self::QuestgiverStatus { .. } => Some(0x0183),
+            Self::QuestgiverAccept { .. } => Some(0x017e),
             Self::QuestQuery { .. } => Some(0x005d),
             Self::ListInventory { .. }
             | Self::BuyItem { .. }
@@ -1003,6 +1014,7 @@ impl ClientPacket {
             | Self::BuybackItem { .. }
             | Self::QuestgiverComplete { .. }
             | Self::QuestgiverRequestReward { .. }
+            | Self::QuestgiverChooseReward { .. }
             | Self::QuestgiverHello { .. }
             | Self::QuestgiverQuery { .. } => None,
             Self::BankerActivate { .. } => Some(0x01b8),
@@ -1030,6 +1042,8 @@ impl ClientPacket {
             | Self::BuybackItem { target, .. }
             | Self::QuestgiverComplete { target, .. }
             | Self::QuestgiverRequestReward { target, .. }
+            | Self::QuestgiverAccept { target, .. }
+            | Self::QuestgiverChooseReward { target, .. }
             | Self::BankerActivate { target }
             | Self::BuyBankSlot { target }
             | Self::ActivateTaxi { target, .. } => Some(target),
@@ -1081,17 +1095,22 @@ impl ClientPacket {
                 (0x0186, body)
             }
             Self::QuestgiverComplete { entry, .. }
-            | Self::QuestgiverRequestReward { entry, .. } => {
+            | Self::QuestgiverAccept { entry, .. }
+            | Self::QuestgiverRequestReward { entry, .. }
+            | Self::QuestgiverChooseReward { entry, .. } => {
                 let mut body = guid.to_le_bytes().to_vec();
                 body.extend(entry.to_le_bytes());
-                (
-                    if matches!(self, Self::QuestgiverComplete { .. }) {
-                        0x018a
-                    } else {
-                        0x018c
-                    },
-                    body,
-                )
+                let opcode = match self {
+                    Self::QuestgiverComplete { .. } => 0x018a,
+                    Self::QuestgiverAccept { .. } => 0x0189,
+                    Self::QuestgiverRequestReward { .. } => 0x018c,
+                    Self::QuestgiverChooseReward { choice, .. } => {
+                        body.extend(choice.to_le_bytes());
+                        0x018e
+                    }
+                    _ => unreachable!(),
+                };
+                (opcode, body)
             }
             Self::QuestQuery { entry } => (0x005c, entry.to_le_bytes().to_vec()),
             Self::QuestLogSwap { first, second } => (0x0193, vec![*first, *second]),
