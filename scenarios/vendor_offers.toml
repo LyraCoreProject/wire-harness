@@ -1,0 +1,192 @@
+schema_version = 3
+id = "vendor_offers"
+behavior = "vendor_offers"
+
+[opening]
+window_ms = 1000
+
+[rules]
+time_tolerance_ms = 100
+wall_clock_tolerance_ms = 2000
+
+[rules.character_scope]
+name = "character_vendor_offers"
+reason = "Retain every Character field; nearby creature and item object bodies are independent of the offer list."
+packets = []
+
+[[fixtures]]
+verb = "character"
+name = "Vendoroffers"
+race = "human"
+class = "warrior"
+level = 1
+at = { map = 0, x = -8949.95, y = -132.493, z = 83.5312, orientation = 0.0 }
+
+[[fixtures]]
+verb = "money"
+copper = 6000
+
+[[fixtures]]
+verb = "creature"
+id = "barkeep"
+entry = 9499
+offset = 2.0
+
+[[fixtures]]
+verb = "creature"
+id = "alchemist"
+entry = 11188
+offset = -2.0
+
+[[rules.identities]]
+name = "purchased_stack_guid"
+reason = "The backpack link is an allocated item GUID low word. Identity consistency is unchecked: single sample."
+opcode = 169
+path = ["objects", "0", "values", "field_536"]
+
+[[steps]]
+id = "condition_list"
+send = { opcode = "CMSG_LIST_INVENTORY", target = { fixture = "alchemist" } }
+[steps.checkpoint]
+window_ms = 500
+replies = [415]
+broadcasts = [{ opcode = 169, stream = "values" }]
+expect = [
+  { opcode = 415, path = ["items", "0", "entry"], value = { type = "unsigned", value = 3371 }, count = 1 },
+]
+
+[[rules.unexpected_packets]]
+name = "ambient_movement_condition_list"
+reason = "Nearby creature movement is independent of vendor offers."
+checkpoint = "condition_list"
+opcode = 221
+subject_guid_high = 61744
+
+[[steps]]
+id = "condition_refusal"
+send = { opcode = "CMSG_BUY_ITEM", target = { fixture = "alchemist" }, entry = 14526, count = 1 }
+[steps.checkpoint]
+window_ms = 500
+replies = [421]
+broadcasts = [{ opcode = 169, stream = "values" }]
+expect = [
+  { opcode = 421, path = ["reason"], value = { type = "unsigned", value = 0 }, count = 1 },
+]
+
+[[rules.unexpected_packets]]
+name = "ambient_movement_condition_refusal"
+reason = "Nearby creature movement is independent of vendor offers."
+checkpoint = "condition_refusal"
+opcode = 221
+subject_guid_high = 61744
+
+[[steps]]
+id = "stock_list"
+send = { opcode = "CMSG_LIST_INVENTORY", target = { fixture = "barkeep" } }
+[steps.checkpoint]
+window_ms = 500
+replies = [415]
+broadcasts = [{ opcode = 169, stream = "values" }]
+expect = [
+  { opcode = 415, path = ["items", "1", "entry"], value = { type = "unsigned", value = 11325 }, count = 1 },
+  { opcode = 415, path = ["items", "1", "stock"], value = { type = "unsigned", value = 10 }, count = 1 },
+]
+
+[[rules.unexpected_packets]]
+name = "ambient_movement_stock_list"
+reason = "Nearby creature movement is independent of vendor offers."
+checkpoint = "stock_list"
+opcode = 221
+subject_guid_high = 61744
+
+[[steps]]
+id = "deplete"
+send = { opcode = "CMSG_BUY_ITEM", target = { fixture = "barkeep" }, entry = 11325, count = 10 }
+[steps.checkpoint]
+window_ms = 500
+replies = [420, 358]
+broadcasts = [{ opcode = 169, stream = "values" }]
+expect = [
+  { opcode = 420, path = ["stock"], value = { type = "unsigned", value = 0 }, count = 1 },
+  { opcode = 358, path = ["count"], value = { type = "unsigned", value = 10 }, count = 1 },
+  { opcode = 169, path = ["objects", "0", "values", "field_1176"], value = { type = "unsigned", value = 0 }, count = 1 },
+]
+
+[[rules.unexpected_packets]]
+name = "ambient_movement_deplete"
+reason = "Nearby creature movement is independent of vendor offers."
+checkpoint = "deplete"
+opcode = 221
+subject_guid_high = 61744
+
+[[steps]]
+id = "empty_list"
+send = { opcode = "CMSG_LIST_INVENTORY", target = { fixture = "barkeep" } }
+[steps.checkpoint]
+window_ms = 500
+replies = [415]
+broadcasts = [{ opcode = 169, stream = "values" }]
+expect = [
+  { opcode = 415, path = ["items", "1", "stock"], value = { type = "unsigned", value = 0 }, count = 1 },
+]
+
+[[rules.unexpected_packets]]
+name = "ambient_movement_empty_list"
+reason = "Nearby creature movement is independent of vendor offers."
+checkpoint = "empty_list"
+opcode = 221
+subject_guid_high = 61744
+
+[[steps]]
+id = "empty_refusal"
+send = { opcode = "CMSG_BUY_ITEM", target = { fixture = "barkeep" }, entry = 11325, count = 1 }
+[steps.checkpoint]
+window_ms = 500
+replies = [421]
+broadcasts = [{ opcode = 169, stream = "values" }]
+expect = [
+  { opcode = 421, path = ["reason"], value = { type = "unsigned", value = 1 }, count = 1 },
+]
+
+[[rules.unexpected_packets]]
+name = "ambient_movement_empty_refusal"
+reason = "Nearby creature movement is independent of vendor offers."
+checkpoint = "empty_refusal"
+opcode = 221
+subject_guid_high = 61744
+
+[[steps]]
+id = "restock_wait"
+send = { opcode = "CMSG_PING", sequence = 71, latency_ms = 0 }
+[steps.checkpoint]
+window_ms = 61000
+replies = [477]
+broadcasts = [{ opcode = 169, stream = "values" }]
+expect = [
+  { opcode = 477, path = ["sequence"], value = { type = "unsigned", value = 71 }, count = 1 },
+]
+
+[[rules.unexpected_packets]]
+name = "ambient_movement_restock_wait"
+reason = "Nearby creature movement is independent of vendor offers."
+checkpoint = "restock_wait"
+opcode = 221
+subject_guid_high = 61744
+
+[[steps]]
+id = "restocked_list"
+send = { opcode = "CMSG_LIST_INVENTORY", target = { fixture = "barkeep" } }
+[steps.checkpoint]
+window_ms = 500
+replies = [415]
+broadcasts = [{ opcode = 169, stream = "values" }]
+expect = [
+  { opcode = 415, path = ["items", "1", "stock"], value = { type = "unsigned", value = 1 }, count = 1 },
+]
+
+[[rules.unexpected_packets]]
+name = "ambient_movement_restocked_list"
+reason = "Nearby creature movement is independent of vendor offers."
+checkpoint = "restocked_list"
+opcode = 221
+subject_guid_high = 61744

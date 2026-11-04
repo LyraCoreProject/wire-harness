@@ -258,6 +258,61 @@ pub fn decode(opcode: u16, body: &[u8]) -> Result<Packet> {
     let mut body = Body(body);
     let mut fields = BTreeMap::new();
     match opcode {
+        0x019f => {
+            fields.insert(
+                "guid".into(),
+                Field::Guid(u64::from_le_bytes(body.bytes()?)),
+            );
+            let count = body.u8()?;
+            fields.insert(
+                "items".into(),
+                body.records(
+                    u32::from(count),
+                    &[
+                        "slot",
+                        "entry",
+                        "display",
+                        "stock",
+                        "price",
+                        "durability",
+                        "buy_count",
+                    ],
+                )?,
+            );
+            if count == 0 {
+                fields.insert("reason".into(), Field::Unsigned(body.u8()?.into()));
+            }
+        }
+        0x01a4 => {
+            fields.insert(
+                "guid".into(),
+                Field::Guid(u64::from_le_bytes(body.bytes()?)),
+            );
+            for name in ["slot", "stock", "count"] {
+                fields.insert(name.into(), Field::Unsigned(body.u32()?.into()));
+            }
+        }
+        0x01a5 => {
+            fields.insert(
+                "guid".into(),
+                Field::Guid(u64::from_le_bytes(body.bytes()?)),
+            );
+            fields.insert("entry".into(), Field::Unsigned(body.u32()?.into()));
+            fields.insert("reason".into(), Field::Unsigned(body.u8()?.into()));
+        }
+        0x0166 => {
+            fields.insert(
+                "guid".into(),
+                Field::Guid(u64::from_le_bytes(body.bytes()?)),
+            );
+            for name in ["received", "created", "show"] {
+                fields.insert(name.into(), Field::Unsigned(body.u32()?.into()));
+            }
+            fields.insert("bag".into(), Field::Unsigned(body.u8()?.into()));
+            for name in ["slot", "entry", "suffix", "random_property", "count"] {
+                fields.insert(name.into(), Field::Unsigned(body.u32()?.into()));
+            }
+        }
         0x017e => (),
         0x0183 => {
             fields.insert(

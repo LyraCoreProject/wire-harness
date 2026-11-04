@@ -1940,6 +1940,27 @@ pub(crate) fn compare_with_rules(
                 }
                 (id, 392)
             }
+            Some(ClientPacket::ListInventory {
+                target: Target::Fixture(id),
+            }) => (id, 415),
+            Some(ClientPacket::BuyItem {
+                target: Target::Fixture(id),
+                ..
+            }) => {
+                let replies = if let Some(actor) = step.character.as_deref() {
+                    &step
+                        .checkpoint
+                        .for_character(actor)
+                        .context("vendor actor checkpoint")?
+                        .replies
+                } else {
+                    &step.checkpoint.replies
+                };
+                let Some(opcode) = replies.iter().find(|opcode| matches!(opcode, 420 | 421)) else {
+                    continue;
+                };
+                (id, *opcode)
+            }
             _ => continue,
         };
         let character = step.character.as_deref();
