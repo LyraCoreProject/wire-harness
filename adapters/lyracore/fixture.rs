@@ -158,6 +158,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn item_fixture_passes_entry_and_count_to_the_grant_reducer() {
+        let fixtures = [FixtureVerb::Item {
+            id: "linen".into(),
+            entry: 2589,
+            count: 2,
+        }];
+        assert_eq!(
+            reducer_calls(17, &fixtures),
+            vec![("debug_grant_item", serde_json::json!([17, 2589, 2]))]
+        );
+    }
+
+    #[test]
     fn incomplete_quest_uses_the_grant_reducer() {
         let fixtures = [FixtureVerb::Quest {
             entry: 7,

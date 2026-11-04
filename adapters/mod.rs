@@ -713,6 +713,78 @@ mod tests {
     use super::prepare_recording;
 
     #[test]
+    fn item_fixture_requires_owned_backpack_stack_with_exact_count() {
+        use std::collections::BTreeMap;
+        use wire_client::decode::{Field, Packet};
+        use wire_client::scenario::{FixtureVerb, Observation, Stream};
+        let fixtures = [FixtureVerb::Item {
+            id: "linen".into(),
+            entry: 2589,
+            count: 2,
+        }];
+        let snapshot = |owner, count, slot| {
+            let object = |guid, values| {
+                Field::Object(BTreeMap::from([
+                    ("guid".into(), Field::Guid(guid)),
+                    ("kind".into(), Field::Unsigned(3)),
+                    ("values".into(), Field::Object(values)),
+                ]))
+            };
+            Observation {
+                character: None,
+                received_after_ms: None,
+                checkpoint: "opening".into(),
+                stream: Stream::Opening,
+                packet: Packet {
+                    opcode: 169,
+                    fields: BTreeMap::from([(
+                        "objects".into(),
+                        Field::List(vec![
+                            object(
+                                9,
+                                BTreeMap::from([
+                                    (format!("field_{}", 486 + slot * 2), Field::Unsigned(7)),
+                                    (
+                                        format!("field_{}", 487 + slot * 2),
+                                        Field::Unsigned(0x40000000),
+                                    ),
+                                ]),
+                            ),
+                            object(
+                                0x4000000000000007,
+                                BTreeMap::from([
+                                    ("field_3".into(), Field::Unsigned(2589)),
+                                    ("field_6".into(), Field::Unsigned(owner)),
+                                    ("field_14".into(), Field::Unsigned(count)),
+                                ]),
+                            ),
+                        ]),
+                    )]),
+                },
+            }
+        };
+        assert_eq!(
+            super::item_fixture_bindings(&[snapshot(9, 2, 25)], 9, &fixtures)
+                .unwrap()
+                .unwrap()["linen"],
+            0x4000000000000007
+        );
+        assert!(super::item_fixture_bindings(&[], 9, &fixtures)
+            .unwrap()
+            .is_none());
+        assert!(
+            super::item_fixture_bindings(&[snapshot(9, 2, 40)], 9, &fixtures)
+                .unwrap()
+                .is_none()
+        );
+        for (owner, count) in [(10, 2), (9, 1), (9, 3)] {
+            assert!(
+                super::item_fixture_bindings(&[snapshot(owner, count, 25)], 9, &fixtures).is_err()
+            );
+        }
+    }
+
+    #[test]
     fn quest_fixture_requires_the_full_incomplete_log_in_order() {
         use std::collections::BTreeMap;
         use wire_client::decode::{Field, Packet};

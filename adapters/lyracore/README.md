@@ -54,3 +54,8 @@ Only `state = "incomplete"` is supported. Both adapters verify every quest slot 
 Character CREATE: the declared entries in order, zero objective progress, zero state flags and
 no timer. Missing, completed, timed or pre-progressed quests fail setup. The core tier 1 Transport
 must handle `FixtureVerb::Quest` at the next pin, calling this reducer in fixture order.
+
+The `item` Fixture Verb uses `debug_grant_item(character_guid: u64, entry: u32, count: u32)`.
+Both adapters require one owned backpack stack with the declared entry and count in the final
+login snapshot, then bind its full GUID to the fixture id for sell requests. Core tier 1 must
+apply the verb and populate the same binding at the next harness pin.

@@ -308,6 +308,11 @@ mod tests {
     use super::*;
 
     #[test]
+    fn item_command_sets_the_requested_stack_count() {
+        assert_eq!(item_command(2589, 2), ".additem 2589 2");
+    }
+
+    #[test]
     fn quest_command_names_the_gameplay_character() {
         assert_eq!(quest_command(7, "Questlogger"), ".quest add 7 Questlogger");
     }

@@ -214,6 +214,7 @@ remain separate per recipient; GUID mapping remains shared across all recipients
 | Verb | Fields | Meaning |
 | --- | --- | --- |
 | `character` | `name`, `race`, `class`, `level`, `at` | Create the Character; `at` has map, x/y/z in yards and orientation in radians. |
+| `item` | `id`, `entry`, `count` | Grant one backpack stack, with nonzero entry and count from 1 through 255; entries and binding ids are unique. Setup fails if the item template cannot hold this count in one stack. |
 | `money` | `copper` | Set the exact balance, from 0 through 2,147,483,647; at most once. |
 | `quest` | `entry`, `state = "incomplete"` | Add a quest to the next log slot, with no objective progress or timer. Entries are nonzero and unique; at most 20. |
 | `known_flight_node` | `node_id` | Learn one node, from 1 through 256; no duplicates. |
@@ -221,6 +222,11 @@ remain separate per recipient; GUID mapping remains shared across all recipients
 
 Creature ids are unique bindings for packet targets, for example `target = { fixture = "master" }`.
 `target = "character"` names the Character. An unresolved binding fails before sending its packet.
+Item ids bind full item GUIDs for `CMSG_SELL_ITEM` through its `item` field. Both adapters check
+the final login snapshot for one backpack stack of the declared entry, owner and exact count.
+The LyraCore adapter calls `debug_grant_item(character_guid: u64, entry: u32, count: u32)`; the
+vmangos adapter selects the gameplay Character and sends `.additem ENTRY COUNT`.
+
 Both adapters apply Character state before spawning creatures and check each spawn's entry and
 position. They reconnect after setup so the opening starts at the final login. Add other verbs
 only when a scenario needs them, with both adapters.
@@ -252,6 +258,13 @@ The commands were checked at vmangos source `d9173eca3ea08dd985c52dabbcc826898d1
 [CreatureCommands.cpp](https://github.com/vmangos/core/blob/d9173eca3ea08dd985c52dabbcc826898d1d0b77/src/game/Commands/CreatureCommands.cpp)
 and [TeleportCommands.cpp](https://github.com/vmangos/core/blob/d9173eca3ea08dd985c52dabbcc826898d1d0b77/src/game/Commands/TeleportCommands.cpp).
 Setup and recording instructions are in [adapters/vmangos/](../adapters/vmangos/README.md).
+
+Vendor requests include `CMSG_LIST_INVENTORY`, `CMSG_BUY_ITEM` (`entry`, byte-sized `count`),
+`CMSG_BUY_ITEM_IN_SLOT` (`entry`, backpack `slot`, byte-sized `count`), `CMSG_SELL_ITEM` (`item`,
+byte-sized `count`, where zero sells the entire stack), and `CMSG_BUYBACK_ITEM` (`slot`). Each
+names a vendor `target`. Buy-in-slot uses the acting Character's GUID as the bag GUID. In build
+5875 the buyback slots start at 69. Vendor replies and sell Refusals must name their fixtures
+from opening. The independent decoders retain offer stock, prices, purchase counts and Refusal reasons.
 
 ## Opening and checkpoints
 

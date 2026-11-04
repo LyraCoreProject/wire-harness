@@ -132,7 +132,7 @@ subject_guid_high = 61744
 
 [[steps]]
 id = "buyback"
-send = { opcode = "CMSG_BUYBACK_ITEM", target = { fixture = "vendor" }, slot = 74 }
+send = { opcode = "CMSG_BUYBACK_ITEM", target = { fixture = "vendor" }, slot = 69 }
 [steps.checkpoint]
 window_ms = 500
 replies = []
@@ -150,7 +150,7 @@ subject_guid_high = 61744
 
 [[steps]]
 id = "buyback_empty"
-send = { opcode = "CMSG_BUYBACK_ITEM", target = { fixture = "vendor" }, slot = 74 }
+send = { opcode = "CMSG_BUYBACK_ITEM", target = { fixture = "vendor" }, slot = 69 }
 [steps.checkpoint]
 window_ms = 500
 replies = [421]
@@ -203,3 +203,47 @@ reason = "Nearby creature movement is independent of vendor transactions."
 checkpoint = "buy_in_slot"
 opcode = 221
 subject_guid_high = 61744
+
+[[rules.identities]]
+name = "inventory_guid_word_536"
+reason = "The low word of an allocated item GUID differs between fixtures; require a 32-bit bijection. Identity consistency is unchecked: single sample when only one nonzero link is observed."
+opcode = 169
+path = ["objects", "0", "values", "field_536"]
+
+[[rules.identities]]
+name = "inventory_guid_word_538"
+reason = "The low word of an allocated item GUID differs between fixtures; require a 32-bit bijection. Identity consistency is unchecked: single sample when only one nonzero link is observed."
+opcode = 169
+path = ["objects", "0", "values", "field_538"]
+
+[[rules.identities]]
+name = "inventory_guid_word_546"
+reason = "The low word of an allocated item GUID differs between fixtures; require a 32-bit bijection. Identity consistency is unchecked: single sample when only one nonzero link is observed."
+opcode = 169
+path = ["objects", "0", "values", "field_546"]
+
+[[rules.identities]]
+name = "inventory_guid_word_624"
+reason = "The low word of an allocated item GUID differs between fixtures; require a 32-bit bijection. Identity consistency is unchecked: single sample when only one nonzero link is observed."
+opcode = 169
+path = ["objects", "0", "values", "field_624"]
+
+[[rules.identities]]
+name = "inventory_guid_word_626"
+reason = "The low word of an allocated item GUID differs between fixtures; require a 32-bit bijection. Identity consistency is unchecked: single sample when only one nonzero link is observed."
+opcode = 169
+path = ["objects", "0", "values", "field_626"]
+
+[[rules.tolerances]]
+name = "buyback_expiry_second_1238"
+reason = "Buyback expiry is 30 hours plus whole seconds since login; the two setup samples can straddle one second."
+opcode = 169
+path = ["objects", "0", "values", "field_1238"]
+tolerance = 1
+
+[[rules.tolerances]]
+name = "buyback_expiry_second_1239"
+reason = "Buyback expiry is 30 hours plus whole seconds since login; the two setup samples can straddle one second."
+opcode = 169
+path = ["objects", "0", "values", "field_1239"]
+tolerance = 1

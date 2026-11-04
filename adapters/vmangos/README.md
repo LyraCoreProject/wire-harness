@@ -187,3 +187,8 @@ The `quest` Fixture Verb uses `.quest add ENTRY CHARACTER`. The final login snap
 the declared log entries and incomplete state through the same check as the LyraCore adapter.
 The command is defined by `ChatHandler::HandleQuestAddCommand` in the pinned
 [CharacterCommands.cpp](https://raw.githubusercontent.com/vmangos/core/d9173eca3ea08dd985c52dabbcc826898d1d0b77/src/game/Commands/CharacterCommands.cpp).
+
+The `item` Fixture Verb selects the gameplay Character and sends `.additem ENTRY COUNT`.
+Both adapters verify and bind the owned backpack stack from the final login snapshot before capture.
+The command is `ChatHandler::HandleAddItemCommand` in the pinned
+[CharacterCommands.cpp](https://raw.githubusercontent.com/vmangos/core/d9173eca3ea08dd985c52dabbcc826898d1d0b77/src/game/Commands/CharacterCommands.cpp).
