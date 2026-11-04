@@ -475,6 +475,82 @@ pub fn decode(opcode: u16, body: &[u8]) -> Result<Packet> {
                 fields.insert("group_bonus".into(), body.float()?);
             }
         }
+        0x012a => {
+            fields.insert("spec".into(), Field::Unsigned(body.u8()?.into()));
+            let count = u16::from_le_bytes(body.bytes()?);
+            let mut spells = Vec::new();
+            for _ in 0..count {
+                spells.push(Field::Object(BTreeMap::from([
+                    (
+                        "id".into(),
+                        Field::Unsigned(u16::from_le_bytes(body.bytes()?).into()),
+                    ),
+                    (
+                        "slot".into(),
+                        Field::Signed(i16::from_le_bytes(body.bytes()?).into()),
+                    ),
+                ])));
+            }
+            fields.insert("spells".into(), Field::List(spells));
+            let count = u16::from_le_bytes(body.bytes()?);
+            let mut cooldowns = Vec::new();
+            for _ in 0..count {
+                let mut cooldown = BTreeMap::new();
+                for name in ["spell", "item", "category"] {
+                    cooldown.insert(
+                        name.into(),
+                        Field::Unsigned(u16::from_le_bytes(body.bytes()?).into()),
+                    );
+                }
+                for name in ["recovery", "category_recovery"] {
+                    cooldown.insert(
+                        name.into(),
+                        Field::Signed(i32::from_le_bytes(body.bytes()?).into()),
+                    );
+                }
+                cooldowns.push(Field::Object(cooldown));
+            }
+            fields.insert("cooldowns".into(), Field::List(cooldowns));
+        }
+        0x024c => {
+            fields.insert("caster".into(), body.packed_guid()?);
+            fields.insert("spell".into(), Field::Unsigned(body.u32()?.into()));
+            let count = body.u32()?;
+            ensure!(count <= 3, "too many spell execute effects");
+            let mut effects = Vec::new();
+            for _ in 0..count {
+                let kind = body.u32()?;
+                ensure!(kind == 24, "unsupported spell execute effect");
+                let count = body.u32()?;
+                effects.push(Field::Object(BTreeMap::from([
+                    ("kind".into(), Field::Unsigned(kind.into())),
+                    ("items".into(), body.records(count, &["entry"])?),
+                ])));
+            }
+            fields.insert("effects".into(), Field::List(effects));
+        }
+        0x0130 => {
+            fields.insert("spell".into(), Field::Unsigned(body.u32()?.into()));
+            let result = body.u8()?;
+            ensure!(result <= 2, "invalid cast result");
+            fields.insert("result".into(), Field::Unsigned(result.into()));
+            if result == 2 {
+                fields.insert("reason".into(), Field::Unsigned(body.u8()?.into()));
+                if !body.0.is_empty() {
+                    fields.insert("argument_1".into(), Field::Unsigned(body.u32()?.into()));
+                }
+                if !body.0.is_empty() {
+                    fields.insert("argument_2".into(), Field::Unsigned(body.u32()?.into()));
+                }
+            }
+        }
+        0x02a6 => {
+            fields.insert(
+                "guid".into(),
+                Field::Guid(u64::from_le_bytes(body.bytes()?)),
+            );
+            fields.insert("spell".into(), Field::Unsigned(body.u32()?.into()));
+        }
         0x017e => (),
         0x0183 => {
             fields.insert(

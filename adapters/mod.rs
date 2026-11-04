@@ -556,6 +556,63 @@ fn verify_item_fixtures(
     }
 }
 
+fn spell_snapshot_matches(observation: &Observation, fixtures: &[FixtureVerb]) -> Result<bool> {
+    use wire_client::decode::Field;
+    if observation.packet.opcode != 298 {
+        return Ok(false);
+    }
+    let Some(Field::List(spells)) = observation.packet.fields.get("spells") else {
+        bail!("final login spell list did not decode");
+    };
+    for fixture in fixtures {
+        if let FixtureVerb::Spell { spell_id } = fixture {
+            let present = spells.iter().any(|spell| matches!(spell, Field::Object(fields) if fields.get("id") == Some(&Field::Unsigned((*spell_id).into()))));
+            ensure!(
+                present,
+                "spell fixture {spell_id} missing from final login spell list"
+            );
+        }
+    }
+    Ok(true)
+}
+
+fn verify_spell_fixtures(prepared: &mut PreparedClient, fixtures: &[FixtureVerb]) -> Result<()> {
+    if !fixtures
+        .iter()
+        .any(|fixture| matches!(fixture, FixtureVerb::Spell { .. }))
+    {
+        return Ok(());
+    }
+    for observation in &prepared.opening {
+        if spell_snapshot_matches(observation, fixtures)? {
+            return Ok(());
+        }
+    }
+    prepared
+        .client
+        .set_recv_timeout(Duration::from_millis(100))?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        match prepared.client.recv_raw() {
+            Ok((opcode, body)) => {
+                let observation = Observation::opening(opcode, &body);
+                let verified = spell_snapshot_matches(&observation, fixtures)?;
+                ensure!(
+                    prepared.opening.len() < 4096,
+                    "spell fixture verification exceeded 4096 frames"
+                );
+                prepared.opening.push(observation);
+                if verified {
+                    return Ok(());
+                }
+            }
+            Err(error) if wire_client::is_read_timeout(&error) => (),
+            Err(error) => return Err(error),
+        }
+    }
+    bail!("spell fixture verification did not receive the final login spell list")
+}
+
 fn new_creature(
     client: &mut WireClient,
     before: &[u64],
@@ -716,6 +773,32 @@ pub fn record(invocation: &Invocation, path: &str, golden: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::prepare_recording;
+
+    #[test]
+    fn spell_fixture_requires_the_declared_spell_in_final_login() {
+        use std::collections::BTreeMap;
+        use wire_client::decode::{Field, Packet};
+        use wire_client::scenario::{FixtureVerb, Observation, Stream};
+        let fixtures = [FixtureVerb::Spell { spell_id: 5504 }];
+        let snapshot = |id| Observation {
+            character: None,
+            received_after_ms: None,
+            checkpoint: "opening".into(),
+            stream: Stream::Opening,
+            packet: Packet {
+                opcode: 298,
+                fields: BTreeMap::from([(
+                    "spells".into(),
+                    Field::List(vec![Field::Object(BTreeMap::from([(
+                        "id".into(),
+                        Field::Unsigned(id),
+                    )]))]),
+                )]),
+            },
+        };
+        assert!(super::spell_snapshot_matches(&snapshot(5504), &fixtures).unwrap());
+        assert!(super::spell_snapshot_matches(&snapshot(133), &fixtures).is_err());
+    }
 
     #[test]
     fn item_fixture_requires_owned_backpack_stack_with_exact_count() {

@@ -68,6 +68,9 @@ pub enum FixtureVerb {
         entry: u32,
         count: u32,
     },
+    Spell {
+        spell_id: u32,
+    },
     Quest {
         entry: u32,
         state: QuestState,
@@ -208,6 +211,14 @@ pub enum ClientPacket {
         entry: u32,
         choice: u32,
     },
+    #[serde(rename = "CMSG_CAST_SPELL")]
+    CastSpell {
+        #[serde(default)]
+        target: Option<Target>,
+        spell_id: u32,
+    },
+    #[serde(rename = "CMSG_CANCEL_CAST")]
+    CancelCast { spell_id: u32 },
     #[serde(rename = "CMSG_BUY_BANK_SLOT")]
     BuyBankSlot { target: Target },
 }
@@ -933,11 +944,18 @@ fn validate_fixtures(fixtures: &[FixtureVerb]) -> Result<(BTreeSet<String>, BTre
     let mut nodes = BTreeSet::new();
     let mut money = false;
     let mut quests = BTreeSet::new();
+    let mut spells = BTreeSet::new();
     let mut items = BTreeSet::new();
     let mut binding_ids = BTreeSet::new();
     for fixture in &fixtures[1..] {
         match fixture {
             FixtureVerb::Character { .. } => anyhow::bail!("duplicate Character fixture"),
+            FixtureVerb::Spell { spell_id } => {
+                ensure!(
+                    (1..=65535).contains(spell_id) && spells.insert(*spell_id),
+                    "invalid or duplicate spell fixture"
+                );
+            }
             FixtureVerb::Item { id, entry, count } => {
                 ensure!(
                     identifier(id) && binding_ids.insert(id.clone()),
@@ -1015,6 +1033,8 @@ impl ClientPacket {
             | Self::QuestgiverComplete { .. }
             | Self::QuestgiverRequestReward { .. }
             | Self::QuestgiverChooseReward { .. }
+            | Self::CastSpell { .. }
+            | Self::CancelCast { .. }
             | Self::QuestgiverHello { .. }
             | Self::QuestgiverQuery { .. } => None,
             Self::BankerActivate { .. } => Some(0x01b8),
@@ -1028,7 +1048,9 @@ impl ClientPacket {
             Self::Ping { .. }
             | Self::QuestQuery { .. }
             | Self::QuestLogSwap { .. }
-            | Self::QuestLogRemove { .. } => None,
+            | Self::QuestLogRemove { .. }
+            | Self::CancelCast { .. } => None,
+            Self::CastSpell { target, .. } => target.as_ref(),
             Self::NameQuery { target }
             | Self::TaxiNodeStatusQuery { target }
             | Self::TaxiQueryAvailableNodes { target }
@@ -1112,6 +1134,19 @@ impl ClientPacket {
                 };
                 (opcode, body)
             }
+            Self::CastSpell { spell_id, target } => {
+                let mut body = spell_id.to_le_bytes().to_vec();
+                body.extend(if target.is_some() { 2u16 } else { 0u16 }.to_le_bytes());
+                if target.is_some() {
+                    let bytes = guid.to_le_bytes();
+                    body.push(bytes.iter().enumerate().fold(0u8, |mask, (index, byte)| {
+                        mask | (u8::from(*byte != 0) << index)
+                    }));
+                    body.extend(bytes.into_iter().filter(|byte| *byte != 0));
+                }
+                (0x012e, body)
+            }
+            Self::CancelCast { spell_id } => (0x012f, spell_id.to_le_bytes().to_vec()),
             Self::QuestQuery { entry } => (0x005c, entry.to_le_bytes().to_vec()),
             Self::QuestLogSwap { first, second } => (0x0193, vec![*first, *second]),
             Self::QuestLogRemove { slot } => (0x0194, vec![*slot]),
