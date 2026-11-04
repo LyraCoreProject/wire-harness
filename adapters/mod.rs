@@ -433,6 +433,59 @@ fn verify_quest_fixtures(prepared: &mut PreparedClient, fixtures: &[FixtureVerb]
     bail!("quest fixture verification did not receive the Character CREATE")
 }
 
+fn spell_snapshot_matches(observation: &Observation, fixtures: &[FixtureVerb]) -> Result<bool> {
+    use wire_client::decode::Field;
+    if observation.packet.opcode != 298 {
+        return Ok(false);
+    }
+    let Some(Field::List(spells)) = observation.packet.fields.get("spells") else {
+        bail!("final login spell list did not decode");
+    };
+    for fixture in fixtures {
+        if let FixtureVerb::Spell { spell_id } = fixture {
+            ensure!(spells.iter().any(|spell| matches!(spell,Field::Object(fields) if fields.get("id")==Some(&Field::Unsigned((*spell_id).into())))), "spell fixture {spell_id} missing from final login spell list");
+        }
+    }
+    Ok(true)
+}
+
+fn verify_spell_fixtures(prepared: &mut PreparedClient, fixtures: &[FixtureVerb]) -> Result<()> {
+    if !fixtures
+        .iter()
+        .any(|fixture| matches!(fixture, FixtureVerb::Spell { .. }))
+    {
+        return Ok(());
+    }
+    for observation in &prepared.opening {
+        if spell_snapshot_matches(observation, fixtures)? {
+            return Ok(());
+        }
+    }
+    prepared
+        .client
+        .set_recv_timeout(Duration::from_millis(100))?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        match prepared.client.recv_raw() {
+            Ok((opcode, body)) => {
+                let observation = Observation::opening(opcode, &body);
+                let verified = spell_snapshot_matches(&observation, fixtures)?;
+                ensure!(
+                    prepared.opening.len() < 4096,
+                    "spell fixture verification exceeded 4096 frames"
+                );
+                prepared.opening.push(observation);
+                if verified {
+                    return Ok(());
+                }
+            }
+            Err(error) if wire_client::is_read_timeout(&error) => (),
+            Err(error) => return Err(error),
+        }
+    }
+    bail!("spell fixture verification did not receive the final login spell list")
+}
+
 fn new_creature(
     client: &mut WireClient,
     before: &[u64],

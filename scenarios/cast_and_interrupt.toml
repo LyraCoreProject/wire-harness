@@ -1,0 +1,103 @@
+schema_version = 3
+id = "cast_and_interrupt"
+behavior = "cast_and_interrupt"
+
+[opening]
+window_ms = 1000
+
+[rules]
+time_tolerance_ms = 100
+wall_clock_tolerance_ms = 2000
+
+[rules.character_scope]
+name = "character_spell_state"
+reason = "Retain every Character field; unrelated creatures and item object bodies are outside the cast comparison."
+packets = []
+
+[[fixtures]]
+verb = "character"
+name = "Spellcaster"
+race = "human"
+class = "mage"
+level = 4
+at = { map = 0, x = -8949.95, y = -132.493, z = 83.5312, orientation = 0.0 }
+
+[[fixtures]]
+verb = "spell"
+spell_id = 5504
+
+[[steps]]
+id = "begin"
+send = { opcode = "CMSG_CAST_SPELL", target = "character", spell_id = 5504 }
+[steps.checkpoint]
+window_ms = 500
+replies = [305]
+broadcasts = [{ opcode = 169, stream = "values" }]
+expect = [
+  { opcode = 305, path = ["spell"], value = { type = "unsigned", value = 5504 }, count = 1 },
+  { opcode = 305, path = ["duration"], value = { type = "time_ms", value = 3000 }, count = 1 },
+]
+
+[[rules.unexpected_packets]]
+name = "ambient_movement_begin"
+reason = "Nearby creature movement is independent of casting."
+checkpoint = "begin"
+opcode = 221
+subject_guid_high = 61744
+
+[[steps]]
+id = "interrupt"
+send = { opcode = "CMSG_CANCEL_CAST", spell_id = 5504 }
+[steps.checkpoint]
+window_ms = 500
+replies = [678, 304]
+broadcasts = [{ opcode = 169, stream = "values" }]
+expect = [
+  { opcode = 304, path = ["spell"], value = { type = "unsigned", value = 5504 }, count = 1 },
+  { opcode = 304, path = ["result"], value = { type = "unsigned", value = 2 }, count = 1 },
+]
+
+[[rules.unexpected_packets]]
+name = "ambient_movement_interrupt"
+reason = "Nearby creature movement is independent of casting."
+checkpoint = "interrupt"
+opcode = 221
+subject_guid_high = 61744
+
+[[steps]]
+id = "finish"
+send = { opcode = "CMSG_CAST_SPELL", target = "character", spell_id = 5504 }
+[steps.checkpoint]
+window_ms = 3500
+replies = [305, 306, 358]
+broadcasts = [{ opcode = 169, stream = "values" }]
+expect = [
+  { opcode = 358, path = ["entry"], value = { type = "unsigned", value = 5350 }, count = 1 },
+  { opcode = 358, path = ["count"], value = { type = "unsigned", value = 2 }, count = 1 },
+]
+
+[[rules.unexpected_packets]]
+name = "ambient_movement_finish"
+reason = "Nearby creature movement is independent of casting."
+checkpoint = "finish"
+opcode = 221
+subject_guid_high = 61744
+
+[[steps]]
+id = "bad_target"
+send = { opcode = "CMSG_CAST_SPELL", target = "character", spell_id = 133 }
+[steps.checkpoint]
+window_ms = 500
+replies = [304]
+broadcasts = [{ opcode = 169, stream = "values" }]
+expect = [
+  { opcode = 304, path = ["spell"], value = { type = "unsigned", value = 133 }, count = 1 },
+  { opcode = 304, path = ["result"], value = { type = "unsigned", value = 2 }, count = 1 },
+]
+
+[[rules.unexpected_packets]]
+name = "ambient_movement_bad_target"
+reason = "Nearby creature movement is independent of casting."
+checkpoint = "bad_target"
+opcode = 221
+subject_guid_high = 61744

@@ -93,6 +93,7 @@ fn reducer_calls(guid: u64, fixtures: &[FixtureVerb]) -> Vec<(&'static str, serd
                     json!([guid, at.map, at.x, at.y, at.z, at.orientation]),
                 ),
             ],
+            FixtureVerb::Spell { spell_id } => vec![("debug_learn_spell", json!([guid, spell_id]))],
             FixtureVerb::Quest { entry, .. } => vec![("debug_grant_quest", json!([guid, entry]))],
             FixtureVerb::Money { copper } => vec![("debug_set_money", json!([guid, copper]))],
             FixtureVerb::KnownFlightNode { node_id } => {
@@ -140,6 +141,7 @@ impl FixtureAdapter for Adapter {
         drop(client);
         let mut prepared = super::reconnect_checked(&self.invocation, fixture)?;
         super::verify_quest_fixtures(&mut prepared, fixtures)?;
+        super::verify_spell_fixtures(&mut prepared, fixtures)?;
         prepared.fixtures = bindings;
         Ok(prepared)
     }
