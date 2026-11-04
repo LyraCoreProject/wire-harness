@@ -212,6 +212,17 @@ impl Body<'_> {
         Ok(Field::Object(fields))
     }
 
+    fn counted_text(&mut self) -> Result<Field> {
+        let size = self.u32()? as usize;
+        let before = self.0.len();
+        let text = self.text()?;
+        ensure!(
+            before - self.0.len() == size,
+            "chat text length differs from its prefix"
+        );
+        Ok(Field::Text(text))
+    }
+
     fn text(&mut self) -> Result<String> {
         let end = self
             .0
@@ -323,6 +334,57 @@ pub fn decode(opcode: u16, body: &[u8]) -> Result<Packet> {
             for name in ["slot", "entry", "suffix", "random_property", "count"] {
                 fields.insert(name.into(), Field::Unsigned(body.u32()?.into()));
             }
+        }
+        0x0096 => {
+            let kind = body.u8()?;
+            fields.insert("kind".into(), Field::Unsigned(kind.into()));
+            fields.insert("language".into(), Field::Unsigned(body.u32()?.into()));
+            match kind {
+                0 | 1 | 5 => {
+                    fields.insert(
+                        "guid".into(),
+                        Field::Guid(u64::from_le_bytes(body.bytes()?)),
+                    );
+                    fields.insert(
+                        "sender".into(),
+                        Field::Guid(u64::from_le_bytes(body.bytes()?)),
+                    );
+                }
+                0x0b | 0x0c => {
+                    fields.insert(
+                        "guid".into(),
+                        Field::Guid(u64::from_le_bytes(body.bytes()?)),
+                    );
+                    fields.insert("name".into(), body.counted_text()?);
+                    fields.insert(
+                        "target".into(),
+                        Field::Guid(u64::from_le_bytes(body.bytes()?)),
+                    );
+                }
+                0x0d | 0x1a => {
+                    fields.insert("name".into(), body.counted_text()?);
+                    fields.insert(
+                        "target".into(),
+                        Field::Guid(u64::from_le_bytes(body.bytes()?)),
+                    );
+                }
+                0x0e => {
+                    fields.insert("channel".into(), Field::Text(body.text()?));
+                    fields.insert("rank".into(), Field::Unsigned(body.u32()?.into()));
+                    fields.insert(
+                        "guid".into(),
+                        Field::Guid(u64::from_le_bytes(body.bytes()?)),
+                    );
+                }
+                _ => {
+                    fields.insert(
+                        "guid".into(),
+                        Field::Guid(u64::from_le_bytes(body.bytes()?)),
+                    );
+                }
+            }
+            fields.insert("text".into(), body.counted_text()?);
+            fields.insert("tag".into(), Field::Unsigned(body.u8()?.into()));
         }
         0x017e => (),
         0x0183 => {

@@ -320,3 +320,9 @@ WIRE_ADAPTER=vmangos vanilla-wire scenario-file scenarios/connection_identity.to
   --host 127.0.0.1 --logon-port 13724 --world-port 18085 \
   --account ACCOUNT --password-stdin
 ```
+
+`vendor_offers` checks patch-conditioned offer membership, depleted stock and one-unit restocking
+from the pinned world. Its elevated Stormwind position keeps nearby ground creatures outside the
+fixture's view during the 61-second wait. The scenario makes no movement or collision claim.
+The chat decoder checks counted strings and retains sender identity before the recorder hashes text;
+the restock wait permits only creature-subject chat and despawns, in addition to creature movement.

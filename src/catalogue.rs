@@ -73,6 +73,11 @@ pub const ENTRIES: &[Entry] = &[
         scenario: include_str!("../scenarios/vendor_transactions.toml"),
         trace: include_str!("../traces/vendor_transactions.json"),
     },
+    Entry {
+        id: "vendor_offers",
+        scenario: include_str!("../scenarios/vendor_offers.toml"),
+        trace: include_str!("../traces/vendor_offers.json"),
+    },
 ];
 
 pub fn get(id: &str) -> Result<GoldenTrace> {
