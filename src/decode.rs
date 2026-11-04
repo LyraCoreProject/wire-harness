@@ -258,6 +258,56 @@ pub fn decode(opcode: u16, body: &[u8]) -> Result<Packet> {
     let mut body = Body(body);
     let mut fields = BTreeMap::new();
     match opcode {
+        0x018d => {
+            fields.insert(
+                "guid".into(),
+                Field::Guid(u64::from_le_bytes(body.bytes()?)),
+            );
+            fields.insert("entry".into(), Field::Unsigned(body.u32()?.into()));
+            fields.insert("title".into(), Field::Text(body.text()?));
+            fields.insert("text".into(), Field::Text(body.text()?));
+            fields.insert("auto_finish".into(), Field::Unsigned(body.u32()?.into()));
+            let emotes = body.u32()?;
+            fields.insert("emotes".into(), body.records(emotes, &["delay", "emote"])?);
+            let choices = body.u32()?;
+            fields.insert(
+                "choices".into(),
+                body.records(choices, &["entry", "count", "display"])?,
+            );
+            let rewards = body.u32()?;
+            fields.insert(
+                "rewards".into(),
+                body.records(rewards, &["entry", "count", "display"])?,
+            );
+            for name in ["money", "flags", "spell"] {
+                fields.insert(name.into(), Field::Unsigned(body.u32()?.into()));
+            }
+        }
+        0x018b => {
+            fields.insert(
+                "guid".into(),
+                Field::Guid(u64::from_le_bytes(body.bytes()?)),
+            );
+            fields.insert("entry".into(), Field::Unsigned(body.u32()?.into()));
+            fields.insert("title".into(), Field::Text(body.text()?));
+            fields.insert("text".into(), Field::Text(body.text()?));
+            for name in ["delay", "emote", "close_on_cancel", "money"] {
+                fields.insert(name.into(), Field::Unsigned(body.u32()?.into()));
+            }
+            let items = body.u32()?;
+            fields.insert(
+                "items".into(),
+                body.records(items, &["entry", "count", "display"])?,
+            );
+            for name in [
+                "completion_1",
+                "completion_2",
+                "completion_3",
+                "completion_4",
+            ] {
+                fields.insert(name.into(), Field::Unsigned(body.u32()?.into()));
+            }
+        }
         0x017e => (),
         0x0183 => {
             fields.insert(

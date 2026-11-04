@@ -81,6 +81,7 @@ pub enum FixtureVerb {
 #[serde(rename_all = "snake_case")]
 pub enum QuestState {
     Incomplete,
+    Complete,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -167,6 +168,10 @@ pub enum ClientPacket {
     QuestLogSwap { first: u8, second: u8 },
     #[serde(rename = "CMSG_QUESTLOG_REMOVE_QUEST")]
     QuestLogRemove { slot: u8 },
+    #[serde(rename = "CMSG_QUESTGIVER_COMPLETE_QUEST")]
+    QuestgiverComplete { target: Target, entry: u32 },
+    #[serde(rename = "CMSG_QUESTGIVER_REQUEST_REWARD")]
+    QuestgiverRequestReward { target: Target, entry: u32 },
     #[serde(rename = "CMSG_BUY_BANK_SLOT")]
     BuyBankSlot { target: Target },
 }
@@ -399,6 +404,7 @@ impl Scenario {
                             ClientPacket::QuestLogSwap { .. }
                                 | ClientPacket::QuestLogRemove { .. }
                                 | ClientPacket::QuestgiverQuery { .. }
+                                | ClientPacket::QuestgiverRequestReward { .. }
                         ),
                     "request without a success reply needs a checkpoint assertion"
                 );
@@ -693,6 +699,7 @@ impl Scenario {
                                 ClientPacket::QuestLogSwap { .. }
                                     | ClientPacket::QuestLogRemove { .. }
                                     | ClientPacket::QuestgiverQuery { .. }
+                                    | ClientPacket::QuestgiverRequestReward { .. }
                             ),
                         "request without a success reply needs a checkpoint assertion"
                     );
@@ -926,7 +933,10 @@ impl ClientPacket {
             Self::ActivateTaxi { .. } => Some(0x01ae),
             Self::QuestgiverStatus { .. } => Some(0x0183),
             Self::QuestQuery { .. } => Some(0x005d),
-            Self::QuestgiverHello { .. } | Self::QuestgiverQuery { .. } => None,
+            Self::QuestgiverHello { .. }
+            | Self::QuestgiverQuery { .. }
+            | Self::QuestgiverComplete { .. }
+            | Self::QuestgiverRequestReward { .. } => None,
             Self::BankerActivate { .. } => Some(0x01b8),
             Self::BuyBankSlot { .. } | Self::QuestLogSwap { .. } | Self::QuestLogRemove { .. } => {
                 None
@@ -945,6 +955,8 @@ impl ClientPacket {
             | Self::QuestgiverStatus { target }
             | Self::QuestgiverHello { target }
             | Self::QuestgiverQuery { target, .. }
+            | Self::QuestgiverComplete { target, .. }
+            | Self::QuestgiverRequestReward { target, .. }
             | Self::BankerActivate { target }
             | Self::BuyBankSlot { target }
             | Self::ActivateTaxi { target, .. } => Some(target),
@@ -994,6 +1006,19 @@ impl ClientPacket {
                 let mut body = guid.to_le_bytes().to_vec();
                 body.extend(entry.to_le_bytes());
                 (0x0186, body)
+            }
+            Self::QuestgiverComplete { entry, .. }
+            | Self::QuestgiverRequestReward { entry, .. } => {
+                let mut body = guid.to_le_bytes().to_vec();
+                body.extend(entry.to_le_bytes());
+                (
+                    if matches!(self, Self::QuestgiverComplete { .. }) {
+                        0x018a
+                    } else {
+                        0x018c
+                    },
+                    body,
+                )
             }
             Self::QuestQuery { entry } => (0x005c, entry.to_le_bytes().to_vec()),
             Self::QuestLogSwap { first, second } => (0x0193, vec![*first, *second]),

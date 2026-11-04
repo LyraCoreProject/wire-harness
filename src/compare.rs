@@ -1940,6 +1940,30 @@ pub(crate) fn compare_with_rules(
                 }
                 (id, 392)
             }
+            Some(
+                ClientPacket::QuestgiverComplete {
+                    target: Target::Fixture(id),
+                    ..
+                }
+                | ClientPacket::QuestgiverRequestReward {
+                    target: Target::Fixture(id),
+                    ..
+                },
+            ) => {
+                let replies = if let Some(actor) = step.character.as_deref() {
+                    &step
+                        .checkpoint
+                        .for_character(actor)
+                        .context("quest actor checkpoint")?
+                        .replies
+                } else {
+                    &step.checkpoint.replies
+                };
+                let Some(opcode) = replies.iter().find(|opcode| matches!(opcode, 395 | 397)) else {
+                    continue;
+                };
+                (id, *opcode)
+            }
             _ => continue,
         };
         let character = step.character.as_deref();

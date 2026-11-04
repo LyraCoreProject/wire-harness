@@ -368,7 +368,13 @@ fn quest_snapshot_matches(
         let quests: Vec<_> = fixtures
             .iter()
             .filter_map(|fixture| match fixture {
-                FixtureVerb::Quest { entry, .. } => Some(*entry),
+                FixtureVerb::Quest { entry, state } => Some((
+                    *entry,
+                    match state {
+                        wire_client::scenario::QuestState::Incomplete => 0,
+                        wire_client::scenario::QuestState::Complete => 0x01000000,
+                    },
+                )),
                 _ => None,
             })
             .collect();
@@ -382,12 +388,12 @@ fn quest_snapshot_matches(
                 }
             };
             ensure!(
-                word(0)? == u64::from(quests.get(slot).copied().unwrap_or(0)),
+                word(0)? == u64::from(quests.get(slot).map_or(0, |quest| quest.0)),
                 "quest fixture did not occupy the expected log slot {slot}"
             );
             ensure!(
-                word(1)? == 0 && word(2)? == 0,
-                "quest fixture must be incomplete, without progress or a timer"
+                word(1)? == quests.get(slot).map_or(0, |quest| quest.1) && word(2)? == 0,
+                "quest fixture state did not apply or has objective progress or a timer"
             );
         }
         return Ok(true);
