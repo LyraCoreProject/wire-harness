@@ -282,3 +282,33 @@ fn field_tolerance_indices_follow_the_scoped_stream() {
         .detected_mutations
         .contains(&format!("packet_{index}/field_duration/past_bound")));
 }
+
+#[test]
+fn taxi_node_emotes_require_a_creature_subject() {
+    let golden = wire_client::catalogue::get("taxi_single_hop").unwrap();
+    for (checkpoint, subject, accepted) in [
+        ("nodes", 0xf130_0000_0000_0001, true),
+        ("nodes", golden.trace().header.character_guid, false),
+        ("nodes", 0xf110_0000_0000_0001, false),
+        ("status", 0xf130_0000_0000_0001, false),
+    ] {
+        let mut candidate = golden.trace().clone();
+        candidate.packets.push(wire_client::trace::RecordedPacket {
+            character: None,
+            received_after_ms: Some(1),
+            checkpoint: checkpoint.into(),
+            stream: wire_client::scenario::Stream::Unexpected,
+            opcode: 259,
+            fields: BTreeMap::from([
+                ("guid".into(), RecordedField::Guid(subject)),
+                ("emote".into(), RecordedField::Unsigned(1)),
+            ]),
+        });
+        assert_eq!(
+            compare(&golden, &candidate, &[]).unwrap().is_match(),
+            accepted
+        );
+        candidate.packets.last_mut().unwrap().fields.clear();
+        assert!(!compare(&golden, &candidate, &[]).unwrap().is_match());
+    }
+}

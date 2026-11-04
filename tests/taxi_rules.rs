@@ -526,7 +526,7 @@ fn zone_data_exceptions_cover_only_the_named_fields() {
             756 => {
                 packet
                     .fields
-                    .insert("weather_type".into(), Recorded::Unsigned(1));
+                    .insert("weather_type".into(), Recorded::Unsigned(2));
                 packet
                     .fields
                     .insert("sound".into(), Recorded::Unsigned(8533));

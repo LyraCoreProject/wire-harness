@@ -15,7 +15,6 @@ packet_timing = [
   { name = "actor_create_delivery", reason = "The timed connection can shift a CREATE by one extra 100 ms map tick. VALUES delivery keeps the base 150 ms bound.", character = "actor", opcode = 169, path = ["objects", "0", "kind"], creates_only = true, tolerance_ms = 250 },
   { name = "viewer_create_delivery", reason = "The timed connection can shift a CREATE by one extra 100 ms map tick. VALUES delivery keeps the base 150 ms bound.", character = "viewer", opcode = 169, path = ["objects", "0", "kind"], creates_only = true, tolerance_ms = 250 },
 ]
-unexpected_packets = [{ name = "ambient_node_emote", reason = "Nearby creature emotes are independent of the taxi-node reply.", checkpoint = "nodes", opcode = 259, subject_guid_high = 61744 }]
 viewer = { verb = "character", name = "Taxiviewer", race = "human", class = "warrior", level = 1, at = { map = 0, x = -10628.9, y = 1036.68, z = 34.06, orientation = 0.0 } }
 
 
@@ -56,7 +55,6 @@ tolerance = 8.0
 
 [[variants]]
 axis = "reconnect"
-unexpected_packets = [{ name = "ambient_node_emote", reason = "Nearby creature emotes are independent of the taxi-node reply.", checkpoint = "nodes", opcode = 259, subject_guid_high = 61744 }]
 exclude_create_values = [{ name = "reconnect_skill_slots", reason = "Login assigns the same skills to different slots between recordings. Skill-slot layout is outside the taxi check; CREATE flight fields and all VALUES remain compared.", character = "actor", first = 718, last = 1101 }]
 values_only_assertions = true
 identities = [

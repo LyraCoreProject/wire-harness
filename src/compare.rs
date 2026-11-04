@@ -1153,6 +1153,7 @@ pub(crate) fn scoped_trace(
                     )
             });
         if packet.stream == Stream::Opening
+            || packet.stream == Stream::Unexpected
             || packet.stream == Stream::Malformed
             || declared_stream.as_ref() != Some(&packet.stream)
         {
