@@ -4,7 +4,8 @@
 world relates that giver to quest 433: kill ten creatures of entry 1117. The scenario requires
 available status 5, the offer from the greeting, a direct details query and the numeric objective
 in the quest query response. Querying quest 7 at this unrelated giver must close gossip. Giver
-GUIDs must name the creature bound from opening CREATE updates. Text is compared as recorder hashes.
+GUIDs must name the creature bound from opening CREATE updates. World text is recorded as hashes and compared under leaf data rules. Tier 1 authors fixture text
+locally; missing text, changed types, numeric values, packet structure and giver identities stay rule checks.
 
 `quest_log` grants quests 7 and 15 to a level-1 human warrior. Both are incomplete kill quests.
 The fixture deliberately bypasses their prerequisite chain: this scenario tests log operations,
