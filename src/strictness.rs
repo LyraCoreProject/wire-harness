@@ -540,6 +540,13 @@ fn candidate_rules(
                     }
                 }
             }
+            for rule in &rules.identities {
+                if rule_character_applies(&rule.character, packet)
+                    && rule.inventory_high_path().as_ref() == Some(&path)
+                {
+                    names.push(rule.name.clone());
+                }
+            }
             for rule in rules.identities.iter().chain(&rules.data_fields) {
                 if rule.opcode == packet.opcode
                     && rule_character_applies(&rule.character, packet)
