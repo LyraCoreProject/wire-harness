@@ -153,6 +153,19 @@ PY
     trap 'exit 143' TERM
     running=$("$adapter/reference.sh" ps --status running --services) || exit 1
     if [[ -z $running ]]; then
+      if ! python3 - <<'PYPORT'
+import socket
+for port in (13724, 18085):
+    with socket.socket() as listener:
+        try:
+            listener.bind(('127.0.0.1', port))
+        except OSError:
+            raise SystemExit(1)
+PYPORT
+      then
+        echo "[reference] Reference Server ports are in use; wait and retry" >&2
+        exit 3
+      fi
       echo "[reference] starting provisioned Reference Server" >&2
       started=1
       "$adapter/reference.sh" up -d --wait --wait-timeout 180 || exit 1

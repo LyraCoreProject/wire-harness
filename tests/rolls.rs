@@ -7,6 +7,8 @@ fn spec() -> Specification {
         reference_characters: 16,
         agility: 100,
         weapon_skill: 300,
+        defense_skill: 300,
+        target_faction: 7,
         target_entry: 38,
         target_levels: [60, 63],
         expected_basis_points: [
@@ -82,6 +84,11 @@ fn independent_wire_decoder_classifies_each_category_and_rejects_conflicts() {
     assert!(!counts.observe(&packet, 3, 2).unwrap());
     let packet = wire_client::decode::decode(0x14a, &swing(0x4, 1, 7, 0)).unwrap();
     assert!(counts.observe(&packet, 1, 2).is_err());
+    let mut magical = wire_client::decode::decode(0x14a, &swing(2, 1, 7, 0)).unwrap();
+    magical
+        .fields
+        .insert("school".into(), wire_client::decode::Field::Unsigned(1));
+    assert!(counts.observe(&magical, 1, 2).is_err());
     let mut truncated = swing(0x80, 1, 7, 0);
     truncated.pop();
     assert!(wire_client::decode::decode(0x14a, &truncated).is_err());
@@ -93,4 +100,37 @@ fn attempted_avoidance_flags_are_not_resolved_outcomes() {
     let mut counts = Counts::default();
     counts.observe(&packet, 1, 2).unwrap();
     assert_eq!(counts.0, [0, 0, 0, 0, 0, 1, 0]);
+}
+
+#[test]
+fn short_tcp_witnesses_cannot_claim_roll_rates() {
+    let golden = wire_client::catalogue::get("white_melee_outcomes").unwrap();
+    for recording in [None, golden.trace().roll_check.clone()] {
+        let mut candidate = golden.trace().clone();
+        candidate.header.origin = wire_client::trace::Origin::Candidate {
+            adapter: "test".into(),
+        };
+        candidate.roll_check = recording;
+        let comparison = wire_client::compare::compare(&golden, &candidate, &[]).unwrap();
+        assert!(comparison
+            .differences
+            .iter()
+            .any(|difference| difference.rule == "white_melee_sample"));
+    }
+}
+
+#[test]
+fn malformed_roll_counts_return_an_error_without_overflow() {
+    let recording = wire_client::rolls::CheckRecording {
+        classifier_version: 1,
+        elapsed_ms: 500_000,
+        characters: (0..16)
+            .map(|index| wire_client::rolls::RecordedCharacter {
+                level: if index < 8 { 60 } else { 63 },
+                counts: Counts([u32::MAX; 7]),
+                blocks: vec![],
+            })
+            .collect(),
+    };
+    assert!(recording.validate(&spec()).is_err());
 }

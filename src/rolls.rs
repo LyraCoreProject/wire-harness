@@ -18,6 +18,8 @@ pub struct Specification {
     pub reference_characters: u8,
     pub agility: u32,
     pub weapon_skill: u32,
+    pub defense_skill: u32,
+    pub target_faction: u32,
     pub target_entry: u32,
     pub target_levels: [u32; 2],
     pub expected_basis_points: [[u32; 7]; 2],
@@ -38,11 +40,19 @@ impl Specification {
             "reference check needs 16 Characters"
         );
         ensure!(
-            self.agility == 100
-                && self.weapon_skill == 300
-                && self.target_entry == 38
-                && self.target_levels == [60, 63],
-            "unsupported white melee context"
+            self.agility <= 10_000
+                && self.weapon_skill <= 1275
+                && self.defense_skill <= 1275
+                && self.target_entry > 0
+                && self.target_faction > 0,
+            "invalid roll context"
+        );
+        ensure!(
+            self.target_levels
+                .iter()
+                .all(|level| (1..=255).contains(level))
+                && self.target_levels[0] < self.target_levels[1],
+            "invalid roll target levels"
         );
         for probabilities in self.expected_basis_points {
             ensure!(
@@ -89,8 +99,11 @@ impl Counts {
             }
         };
         ensure!(
-            number("spell")? == 0 && number("absorbed")? == 0 && number("resisted")? == 0,
-            "ineligible spell, absorb or resist"
+            number("school")? == 0
+                && number("spell")? == 0
+                && number("absorbed")? == 0
+                && number("resisted")? == 0,
+            "ineligible school, spell, absorb or resist"
         );
         let flags = number("hit_info")?;
         let state = number("victim_state")?;
@@ -170,8 +183,11 @@ impl CheckRecording {
                 "check needs eight Characters per level"
             );
             ensure!(
-                characters.iter().map(|c| c.counts.total()).sum::<u32>()
-                    == spec.reference_samples_per_level,
+                characters
+                    .iter()
+                    .map(|c| u64::from(c.counts.total()))
+                    .sum::<u64>()
+                    == u64::from(spec.reference_samples_per_level),
                 "check sample count"
             );
             for character in characters {

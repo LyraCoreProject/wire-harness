@@ -8,6 +8,8 @@ reference_samples_per_level = 2000
 reference_characters = 16
 agility = 100
 weapon_skill = 300
+defense_skill = 300
+target_faction = 7
 target_entry = 38
 target_levels = [60, 63]
 expected_basis_points = [[500, 500, 500, 500, 1000, 500, 6500], [800, 650, 1400, 500, 4000, 200, 2450]]
@@ -25,7 +27,7 @@ name = "Rollalpha"
 race = "human"
 class = "warrior"
 level = 60
-at = { map = 0, x = -8949.95, y = -132.493, z = 83.5312, orientation = 0.0 }
+at = { map = 1, x = 16222.1, y = 16252.1, z = 12.5872, orientation = 0.0 }
 
 [[fixtures]]
 verb = "creature"

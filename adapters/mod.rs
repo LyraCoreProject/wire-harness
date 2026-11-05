@@ -727,8 +727,7 @@ pub fn record(invocation: &Invocation, path: &str, golden: bool) -> Result<()> {
     );
     let scenario_text = std::fs::read_to_string(path)?;
     let scenario = wire_client::scenario::Scenario::parse(&scenario_text)?;
-    if scenario.rolls.is_some() {
-        ensure!(golden, "roll recording requires the Reference Server");
+    if scenario.rolls.is_some() && golden {
         return vmangos_rolls::record(
             invocation,
             &scenario_text,
