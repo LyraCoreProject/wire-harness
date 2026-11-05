@@ -5,6 +5,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 
@@ -29,10 +30,34 @@ class ReferenceWrapperTests(unittest.TestCase):
         self.scenario = self.root / 'scenario.toml'
         self.scenario.write_text("[[fixtures]]\nverb = 'character'\nname = 'Fixture'\n")
         self.output = self.root / 'trace.json'
+        self.ports = []
+        for _ in range(2):
+            with socket.socket() as listener:
+                listener.bind(('127.0.0.1', 0))
+                self.ports.append(listener.getsockname()[1])
+        adapter = self.root / 'adapter'
+        adapter.mkdir()
+        self.script = adapter / 'reference.sh'
+        source = (ROOT / 'adapters/vmangos/reference.sh').read_text()
+        for old, port in zip(('13724', '18085'), self.ports):
+            source = source.replace(old, str(port))
+        self._write_executable(self.script, source)
         self._write_executable(
             self.bin / 'docker',
             """#!/usr/bin/env python3
+import os
+from pathlib import Path
 import sys
+import time
+with Path(os.environ['DOCKER_LOG']).open('a') as log:
+    log.write(' '.join(sys.argv[1:]) + '\\n')
+if 'up' in sys.argv and os.environ.get('WAIT_FOR_PORTS') == '1':
+    Path(os.environ['UP_STARTED']).touch()
+    deadline = time.monotonic() + 5
+    while not Path(os.environ['PORTS_READY']).exists():
+        if time.monotonic() > deadline:
+            raise SystemExit(1)
+        time.sleep(0.01)
 if 'ps' in sys.argv:
     raise SystemExit(0)
 if 'down' in sys.argv:
@@ -52,40 +77,64 @@ elif sys.argv[1] == 'compare':
 """,
         )
     def _listen_for_reference(self):
-        listeners = []
-        for port in (13724, 18085):
+        for port in self.ports:
             listener = socket.socket()
+            self.addCleanup(listener.close)
             listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             listener.bind(('127.0.0.1', port))
             listener.listen()
-            listeners.append(listener)
-            self.addCleanup(listener.close)
 
     def _write_executable(self, path, source):
         path.write_text(source)
         path.chmod(0o700)
 
-    def test_failed_shutdown_rejects_and_removes_recording(self):
-        self._listen_for_reference()
-        env = dict(os.environ, HOME=str(self.home), WIRE_BIN=str(self.wire),
-                   PATH=f'{self.bin}:{Path(sys.executable).parent}:/usr/bin:/bin')
-        result = subprocess.run(
-            ['/bin/bash', str(ROOT / 'adapters/vmangos/reference.sh'), 'record-checked',
-             str(self.scenario), str(self.output)],
-            env=env, capture_output=True, text=True,
-        )
+    def _environment(self):
+        return dict(os.environ, HOME=str(self.home), WIRE_BIN=str(self.wire),
+                    DOCKER_LOG=str(self.root / 'docker.log'),
+                    PATH=f'{self.bin}:{Path(sys.executable).parent}:/usr/bin:/bin')
 
-        self.assertNotEqual(result.returncode, 0, result.stderr)
-        self.assertIn('stop failed; run reference.sh down', result.stderr)
+    def _command(self):
+        return ['/bin/bash', str(self.script), 'record-checked',
+                str(self.scenario), str(self.output)]
+
+    def test_failed_shutdown_rejects_and_removes_recording(self):
+        up_started = self.root / 'up-started'
+        ports_ready = self.root / 'ports-ready'
+        env = dict(self._environment(), WAIT_FOR_PORTS='1', UP_STARTED=str(up_started),
+                   PORTS_READY=str(ports_ready))
+        with subprocess.Popen(self._command(), env=env, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True) as process:
+            deadline = time.monotonic() + 5
+            while not up_started.exists() and process.poll() is None:
+                if time.monotonic() > deadline:
+                    break
+                time.sleep(0.01)
+            self.assertTrue(up_started.exists())
+            self._listen_for_reference()
+            ports_ready.touch()
+            _, stderr = process.communicate(timeout=10)
+
+        self.assertNotEqual(process.returncode, 0, stderr)
+        self.assertIn('stop failed; run reference.sh down', stderr)
+        self.assertFalse(self.output.exists())
+
+    def test_busy_ports_never_start_or_stop_another_reference_server(self):
+        self._listen_for_reference()
+        result = subprocess.run(self._command(), env=self._environment(),
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertIn('ports are in use', result.stderr)
+        commands = (self.root / 'docker.log').read_text().splitlines()
+        self.assertTrue(commands)
+        self.assertTrue(all(' ps ' in command for command in commands), commands)
         self.assertFalse(self.output.exists())
 
     def test_checked_recording_rejects_held_reference_lock(self):
-        env = dict(os.environ, HOME=str(self.home), WIRE_BIN=str(self.wire),
-                   PATH=f'{self.bin}:{Path(sys.executable).parent}:/usr/bin:/bin')
+        env = self._environment()
         with (self.reference / '.audit.lock').open('w') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             result = subprocess.run(
-                ['/bin/bash', str(ROOT / 'adapters/vmangos/reference.sh'), 'record-checked',
+                ['/bin/bash', str(self.script), 'record-checked',
                  str(self.scenario), str(self.output)],
                 env=env, capture_output=True, text=True,
             )
