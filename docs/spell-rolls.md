@@ -151,3 +151,11 @@ exception to ADR 0007's "once, without a repeat recording" rule. Keep context, e
 public seeds and measurement code fixed, and edit no script during capture. Copy the accepted
 trace before wrapper cleanup. Use the replacement regardless of its results, report both samples,
 and stop if it fails or is lost. No third capture is authorized.
+
+The only replacement completed with setup 464,310 ms and capture 454,361 ms. Its counts are
+`[0,77,114,1809,0]` at level 60 and `[0,357,100,1543,324]` at level 63. The diagnostic accepted both
+levels. This replacement is the committed Golden Trace, with SHA-256
+`958c3f88f01d229477a7376bad28881fdba5c3d31e3bcd62f68d62533d97239f`.
+All 59 frozen source/input files matched their pre-capture hashes after the wrapper exited zero.
+The accepted bytes were copied and synced before wrapper cleanup, and the two copies matched.
+No third recording was taken.

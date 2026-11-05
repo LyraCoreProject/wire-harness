@@ -94,6 +94,11 @@ pub const ENTRIES: &[Entry] = &[
         trace: include_str!("../traces/cast_and_interrupt.json"),
     },
     Entry {
+        id: "spell_direct_damage_outcomes",
+        scenario: include_str!("../scenarios/spell_direct_damage_outcomes.toml"),
+        trace: include_str!("../traces/spell_direct_damage_outcomes.json"),
+    },
+    Entry {
         id: "white_melee_outcomes",
         scenario: include_str!("../scenarios/white_melee_outcomes.toml"),
         trace: include_str!("../traces/white_melee_outcomes.json"),
