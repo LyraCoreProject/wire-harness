@@ -1,4 +1,4 @@
-use anyhow::{bail, ensure, Result};
+use anyhow::{bail, ensure, Context, Result};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 use wire_client::cli::Invocation;
@@ -11,6 +11,8 @@ use wow_world_messages::vanilla::{opcodes::ServerOpcodeMessage as Smsg, CMSG_CHA
 mod lyracore_fixture_impl;
 #[path = "vmangos/fixture.rs"]
 mod vmangos_fixture_impl;
+#[path = "vmangos/rolls.rs"]
+mod vmangos_rolls;
 
 pub fn select(invocation: &Invocation) -> Result<Box<dyn FixtureAdapter>> {
     match std::env::var("WIRE_ADAPTER").as_deref() {
@@ -725,6 +727,15 @@ pub fn record(invocation: &Invocation, path: &str, golden: bool) -> Result<()> {
     );
     let scenario_text = std::fs::read_to_string(path)?;
     let scenario = wire_client::scenario::Scenario::parse(&scenario_text)?;
+    if scenario.rolls.is_some() {
+        ensure!(golden, "roll recording requires the Reference Server");
+        return vmangos_rolls::record(
+            invocation,
+            &scenario_text,
+            provenance.context("roll provenance")?,
+            output,
+        );
+    }
     let (header, observed) = if scenario.schema_version == 4 {
         let (mut clients, mut header) =
             prepare_recording(&scenario_text, provenance, adapter_name, || {

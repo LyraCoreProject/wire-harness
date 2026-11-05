@@ -22,7 +22,7 @@ import sys
 import tomllib
 with open(sys.argv[1], 'rb') as source:
     scenario = tomllib.load(source)
-print(len(scenario.get('characters', [])) if scenario.get('schema_version') == 4 else 1)
+print(scenario['rolls']['reference_characters'] if 'rolls' in scenario else len(scenario.get('characters', [])) if scenario.get('schema_version') == 4 else 1)
 PY
     ) || exit 2
     passwords=("$REFERENCE_ROOT/credentials/player-password")
@@ -67,7 +67,13 @@ import sys
 import tomllib
 with open(sys.argv[1], 'rb') as source:
     scenario = tomllib.load(source)
-if scenario.get('schema_version') == 4:
+if 'rolls' in scenario:
+    names = ['Rollalpha','Rollbeta','Rollgamma','Rolldelta','Rollepsilon','Rollzeta','Rolleta','Rolltheta','Rolliota','Rollkappa','Rolambda','Rollmu','Rollnu','Rollxi','Rollomicron','Rollpi']
+    for index, name in enumerate(names, 1):
+        account = 'CONFORMANCE' if index == 1 else f'CONFORMANCE{index}'
+        password = 'player' if index == 1 else f'peer{index}'
+        print(f'{account}\t{name}\t{password}')
+elif scenario.get('schema_version') == 4:
     for index, character in enumerate(scenario['characters'], 1):
         fixture = character['fixtures'][0]
         if fixture.get('verb') != 'character':
@@ -170,6 +176,16 @@ PY
     echo "[reference] recording first sample" >&2
     "$adapter/reference.sh" record "$output" "$scenario" || exit 1
     reset_characters || exit 1
+    if python3 - "$scenario" <<'PYROLL'
+import sys, tomllib
+with open(sys.argv[1], 'rb') as source:
+    raise SystemExit(0 if 'rolls' in tomllib.load(source) else 1)
+PYROLL
+    then
+      echo "[reference] single diagnostic roll check written to $output" >&2
+      written=0
+      exit 0
+    fi
     echo "[reference] recording repeat sample" >&2
     "$adapter/reference.sh" record "$scratch/repeat.json" "$scenario" || exit 1
     echo "[reference] comparing repeat with first sample" >&2

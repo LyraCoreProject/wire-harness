@@ -7,6 +7,7 @@ pub mod cli;
 pub mod compare;
 pub mod decode;
 pub mod metrics;
+pub mod rolls;
 pub mod runner;
 pub mod scenario;
 pub mod spatial;

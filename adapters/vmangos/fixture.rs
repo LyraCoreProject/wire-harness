@@ -258,7 +258,7 @@ fn discover_node(client: &mut WireClient, guid: u64, node_id: u32) -> Result<()>
     anyhow::bail!("flight node was not learned")
 }
 
-fn drain(gm: &mut WireClient, client: &mut WireClient) -> Result<()> {
+pub(super) fn drain(gm: &mut WireClient, client: &mut WireClient) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(2);
     while Instant::now() < deadline {
         drain_one(gm, Duration::from_millis(50))?;
@@ -267,7 +267,7 @@ fn drain(gm: &mut WireClient, client: &mut WireClient) -> Result<()> {
     Ok(())
 }
 
-fn drain_one(client: &mut WireClient, window: Duration) -> Result<()> {
+pub(super) fn drain_one(client: &mut WireClient, window: Duration) -> Result<()> {
     client.set_recv_timeout(Duration::from_millis(50))?;
     let deadline = Instant::now() + window;
     while Instant::now() < deadline {
@@ -301,7 +301,7 @@ fn teleport_ack(guid: u64, counter: u32, timestamp: u32) -> [u8; 16] {
     body
 }
 
-fn command(client: &mut WireClient, message: String) -> Result<()> {
+pub(super) fn command(client: &mut WireClient, message: String) -> Result<()> {
     client.send(&CMSG_MESSAGECHAT {
         chat_type: CMSG_MESSAGECHAT_ChatType::Say,
         language: Language::Common,

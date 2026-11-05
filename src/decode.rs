@@ -718,6 +718,23 @@ pub fn decode(opcode: u16, body: &[u8]) -> Result<Packet> {
         0x030d | 0x030e => {
             fields.insert("guid".into(), body.packed_guid()?);
         }
+        0x014a => {
+            fields.insert("hit_info".into(), Field::Unsigned(body.u32()?.into()));
+            fields.insert("attacker".into(), body.packed_guid()?);
+            fields.insert("victim".into(), body.packed_guid()?);
+            fields.insert("damage".into(), Field::Unsigned(body.u32()?.into()));
+            let count = body.u8()?;
+            ensure!(count == 1, "white melee needs one damage subrecord");
+            fields.insert("school".into(), Field::Unsigned(body.u32()?.into()));
+            fields.insert("subdamage_float".into(), body.float()?);
+            fields.insert("subdamage".into(), Field::Unsigned(body.u32()?.into()));
+            fields.insert("absorbed".into(), Field::Unsigned(body.u32()?.into()));
+            fields.insert("resisted".into(), Field::Unsigned(body.u32()?.into()));
+            fields.insert("victim_state".into(), Field::Unsigned(body.u32()?.into()));
+            fields.insert("unknown".into(), Field::Unsigned(body.u32()?.into()));
+            fields.insert("spell".into(), Field::Unsigned(body.u32()?.into()));
+            fields.insert("blocked".into(), Field::Unsigned(body.u32()?.into()));
+        }
         0x014e => (),
         0x016e | 0x016f => {
             fields.insert("result".into(), Field::Unsigned(body.u32()?.into()));

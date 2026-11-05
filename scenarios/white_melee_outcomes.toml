@@ -1,0 +1,44 @@
+schema_version = 3
+id = "white_melee_outcomes"
+behavior = "auto_attack"
+
+[rolls]
+samples_per_level = 50000
+reference_samples_per_level = 2000
+reference_characters = 16
+agility = 100
+weapon_skill = 300
+target_entry = 38
+target_levels = [60, 63]
+expected_basis_points = [[500, 500, 500, 500, 1000, 500, 6500], [800, 650, 1400, 500, 4000, 200, 2450]]
+
+[opening]
+window_ms = 1000
+
+[rules]
+time_tolerance_ms = 100
+wall_clock_tolerance_ms = 2000
+
+[[fixtures]]
+verb = "character"
+name = "Rollalpha"
+race = "human"
+class = "warrior"
+level = 60
+at = { map = 0, x = -8949.95, y = -132.493, z = 83.5312, orientation = 0.0 }
+
+[[fixtures]]
+verb = "creature"
+id = "target"
+entry = 38
+offset = 2.0
+
+[[steps]]
+id = "start"
+send = { opcode = "CMSG_ATTACKSWING", target = { fixture = "target" } }
+checkpoint = { window_ms = 100, replies = [323] }
+
+[[steps]]
+id = "stop"
+send = { opcode = "CMSG_ATTACKSTOP" }
+checkpoint = { window_ms = 100, replies = [324] }
