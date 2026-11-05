@@ -79,6 +79,25 @@ pub struct FieldRule {
     pub path: Vec<String>,
 }
 
+impl FieldRule {
+    pub(crate) fn inventory_high_path(&self) -> Option<Vec<String>> {
+        if self.opcode != 0x00a9
+            || self.path.len() != 4
+            || self.path[..3] != ["objects", "0", "values"]
+        {
+            return None;
+        }
+        // Build 5875 inventory GUID pairs occupy update fields 486 through 711.
+        let low: u16 = self.path[3].strip_prefix("field_")?.parse().ok()?;
+        if !(486..=710).contains(&low) || low % 2 != 0 {
+            return None;
+        }
+        let mut path = self.path.clone();
+        path[3] = format!("field_{}", low + 1);
+        Some(path)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToleranceRule {
@@ -786,6 +805,24 @@ impl Comparator<'_> {
         });
     }
 
+    fn guid_field(&mut self, location: &Location, expected: &Field, actual: &Field) {
+        let (Field::Guid(e), Field::Guid(a)) = (expected, actual) else {
+            unreachable!();
+        };
+        if !self.guid_matches(*e, *a) {
+            self.difference(
+                location,
+                "guid_bijection",
+                "GUID mapping must preserve type and be one-to-one; zero maps only to zero",
+                Some(expected),
+                Some(actual),
+            );
+        } else {
+            self.expected_guids.insert(*e, *a);
+            self.actual_guids.insert(*a, *e);
+        }
+    }
+
     fn fields(
         &mut self,
         opcode: u16,
@@ -884,6 +921,12 @@ impl Comparator<'_> {
                     .map_or(true, |id| location.character.as_ref() == Some(id))
         }) {
             self.used_identities.insert(index);
+            if rule.inventory_high_path().is_some()
+                && matches!((expected, actual), (Field::Guid(_), Field::Guid(_)))
+            {
+                self.guid_field(location, expected, actual);
+                return;
+            }
             let matches = match (expected, actual) {
                 (Field::Unsigned(e), Field::Unsigned(a))
                     if u32::try_from(*e).is_ok() && u32::try_from(*a).is_ok() =>
@@ -953,19 +996,8 @@ impl Comparator<'_> {
             return;
         }
         match (expected, actual) {
-            (Field::Guid(e), Field::Guid(a)) => {
-                if !self.guid_matches(*e, *a) {
-                    self.difference(
-                        location,
-                        "guid_bijection",
-                        "GUID mapping must preserve type and be one-to-one; zero maps only to zero",
-                        Some(expected),
-                        Some(actual),
-                    );
-                } else {
-                    self.expected_guids.insert(*e, *a);
-                    self.actual_guids.insert(*a, *e);
-                }
+            (Field::Guid(_), Field::Guid(_)) => {
+                self.guid_field(location, expected, actual);
             }
             (Field::TimeMs(e), Field::TimeMs(a)) => {
                 if e.abs_diff(*a) > self.rules.time_tolerance_ms {
@@ -1212,6 +1244,34 @@ pub(crate) fn scoped_trace(
                                         rule.contains(packet.character.as_deref(), name)
                                     })
                                 });
+                            }
+                        }
+                        if let Some(Field::Object(values)) = fields.get_mut("values") {
+                            for rule in &rules.identities {
+                                if rule
+                                    .character
+                                    .as_ref()
+                                    .is_some_and(|id| packet.character.as_ref() != Some(id))
+                                {
+                                    continue;
+                                }
+                                let Some(high_path) = rule.inventory_high_path() else {
+                                    continue;
+                                };
+                                let low = &rule.path[3];
+                                let high = &high_path[3];
+                                if let (Some(Field::Unsigned(lo)), Some(Field::Unsigned(hi))) =
+                                    (values.get(low), values.get(high))
+                                {
+                                    if let (Ok(lo), Ok(hi)) =
+                                        (u32::try_from(*lo), u32::try_from(*hi))
+                                    {
+                                        let guid =
+                                            Field::Guid(u64::from(lo) | (u64::from(hi) << 32));
+                                        values.insert(low.clone(), guid.clone());
+                                        values.insert(high.clone(), guid);
+                                    }
+                                }
                             }
                         }
                         if fields.get("kind") == Some(&Field::Unsigned(0)) {
