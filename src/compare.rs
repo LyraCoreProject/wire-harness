@@ -2436,7 +2436,27 @@ pub(crate) fn compare_with_rules(
             );
         }
     }
-    comparator.finish(deviations)
+    let mut comparison = comparator.finish(deviations)?;
+    if let Some(spec) = &scenario.rolls {
+        if let Some(recording) = &actual.roll_check {
+            recording.validate(spec)?;
+        }
+        if actual.roll_check.is_none()
+            || matches!(
+                &actual.header.origin,
+                crate::trace::Origin::Candidate { .. }
+            )
+        {
+            comparison.differences.push(Difference {
+                classification: DifferenceClass::Rule, character: None,
+                checkpoint: "roll_sample".into(), stream: Some(Stream::Broadcast("swings".into())),
+                packet_index: None, field_path: vec!["outcomes".into()], opcode: Some(0x014a), deviations: vec![],
+                rule: "white_melee_sample".into(), reason: "TCP roll collection is not implemented; packet witnesses cannot establish roll rates".into(),
+                expected: Some(crate::trace::RecordedField::Unsigned(u64::from(spec.samples_per_level))), actual: None,
+            });
+        }
+    }
+    Ok(comparison)
 }
 
 /// Schema 3 callers supply decoded observations and capture time without server provenance.

@@ -19,6 +19,8 @@ pub struct Scenario {
     #[serde(default)]
     pub characters: Vec<ScenarioCharacter>,
     pub steps: Vec<Step>,
+    #[serde(default)]
+    pub rolls: Option<crate::rolls::Specification>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -148,6 +150,10 @@ pub enum SessionAction {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "opcode", deny_unknown_fields)]
 pub enum ClientPacket {
+    #[serde(rename = "CMSG_ATTACKSWING")]
+    AttackSwing { target: Target },
+    #[serde(rename = "CMSG_ATTACKSTOP")]
+    AttackStop,
     #[serde(rename = "CMSG_PING")]
     Ping { sequence: u32, latency_ms: u32 },
     #[serde(rename = "CMSG_NAME_QUERY")]
@@ -340,6 +346,9 @@ impl Scenario {
     }
 
     pub fn validate(&self) -> Result<()> {
+        if let Some(rolls) = &self.rolls {
+            rolls.validate()?;
+        }
         ensure!(
             matches!(self.schema_version, 3 | 4),
             "unsupported scenario schema"
@@ -1017,6 +1026,8 @@ impl ClientPacket {
 
     fn reply_opcode(&self) -> Option<u16> {
         match self {
+            Self::AttackSwing { .. } => Some(0x0143),
+            Self::AttackStop => Some(0x0144),
             Self::Ping { .. } => Some(0x01dd),
             Self::NameQuery { .. } => Some(0x0051),
             Self::TaxiNodeStatusQuery { .. } => Some(0x01ab),
@@ -1045,13 +1056,15 @@ impl ClientPacket {
     }
     fn target(&self) -> Option<&Target> {
         match self {
-            Self::Ping { .. }
+            Self::AttackStop
+            | Self::Ping { .. }
             | Self::QuestQuery { .. }
             | Self::QuestLogSwap { .. }
             | Self::QuestLogRemove { .. }
             | Self::CancelCast { .. } => None,
             Self::CastSpell { target, .. } => target.as_ref(),
-            Self::NameQuery { target }
+            Self::AttackSwing { target }
+            | Self::NameQuery { target }
             | Self::TaxiNodeStatusQuery { target }
             | Self::TaxiQueryAvailableNodes { target }
             | Self::QuestgiverStatus { target }
@@ -1098,6 +1111,8 @@ impl ClientPacket {
             ensure!(guid != 0, "target GUID must be nonzero");
         }
         Ok(match self {
+            Self::AttackSwing { .. } => (0x0141, guid.to_le_bytes().to_vec()),
+            Self::AttackStop => (0x0142, vec![]),
             Self::Ping {
                 sequence,
                 latency_ms,

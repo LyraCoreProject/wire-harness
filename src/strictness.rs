@@ -302,6 +302,7 @@ fn scoped_packet(golden: &GoldenTrace, packet: RecordedPacket) -> Result<Trace> 
     scoped_trace(
         golden.scenario(),
         &Trace {
+            roll_check: golden.trace().roll_check.clone(),
             header: golden.trace().header.clone(),
             packets: vec![packet],
         },
