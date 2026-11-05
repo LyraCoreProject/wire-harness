@@ -46,6 +46,10 @@ impl Specification {
         );
         for probabilities in self.expected_basis_points {
             ensure!(
+                probabilities.iter().all(|p| *p <= 10_000),
+                "invalid roll probability"
+            );
+            ensure!(
                 probabilities.iter().sum::<u32>() == 10_000,
                 "roll probabilities must sum to one"
             );
@@ -60,7 +64,11 @@ pub struct Counts(pub [u32; 7]);
 
 impl Counts {
     pub fn total(&self) -> u32 {
-        self.0.iter().sum()
+        self.0
+            .iter()
+            .map(|count| u64::from(*count))
+            .sum::<u64>()
+            .min(u64::from(u32::MAX)) as u32
     }
 
     pub fn observe(&mut self, packet: &Packet, attacker: u64, target: u64) -> Result<bool> {
@@ -94,15 +102,15 @@ impl Counts {
             flags & 0x10 != 0,
             state == 2,
             state == 3,
-            flags & 0x800 != 0 || state == 4,
+            flags & 0x800 != 0 || state == 5,
             flags & 0x4000 != 0,
-            flags & 0x200 != 0,
+            flags & 0x80 != 0,
         ];
         ensure!(
             outcomes.iter().filter(|v| **v).count() <= 1,
             "conflicting swing categories"
         );
-        ensure!(matches!(state, 0..=4), "ineligible swing victim state");
+        ensure!(matches!(state, 0..=3 | 5), "ineligible swing victim state");
         let category = outcomes.iter().position(|v| *v).unwrap_or(6);
         ensure!(
             (state == 0) == (category == 0),
@@ -181,6 +189,26 @@ impl CheckRecording {
                 ensure!(sum == character.counts, "check block counts disagree");
             }
         }
+        for (index, level) in spec.target_levels.into_iter().enumerate() {
+            let mut counts = Counts::default();
+            for character in self.characters.iter().filter(|c| c.level == level) {
+                for category in 0..7 {
+                    counts.0[category] += character.counts.0[category];
+                }
+            }
+            ensure!(
+                compare(
+                    spec,
+                    &counts,
+                    index,
+                    "reference_check",
+                    spec.reference_samples_per_level
+                )?
+                .is_match(),
+                "small check disagrees with derived rates at level {level}: {:?}",
+                counts.0
+            );
+        }
         Ok(())
     }
 }
@@ -209,7 +237,7 @@ pub fn binomial_p_upper(n: u32, k: u32, basis_points: u32) -> Result<f64> {
         if x - 1 <= k {
             lower += mass;
         }
-        if x - 1 >= k {
+        if x > k {
             upper += mass;
         }
     }
@@ -217,7 +245,7 @@ pub fn binomial_p_upper(n: u32, k: u32, basis_points: u32) -> Result<f64> {
     for x in mode..n {
         mass *= f64::from(n - x) / f64::from(x + 1) * p / (1.0 - p);
         total += mass;
-        if x + 1 <= k {
+        if x < k {
             lower += mass;
         }
         if x + 1 >= k {
@@ -256,7 +284,7 @@ pub fn compare(
                 deviations: vec![],
                 rule: "white_melee_distribution".into(),
                 reason: format!("{actual}/{samples}, expected {expected}/10000; equal-tail binomial p upper={p:.12e}; Bonferroni alpha={:.12e}", FAMILY_ALPHA / f64::from(TESTS_PER_SUBMISSION)),
-                expected: Some(crate::trace::RecordedField::Unsigned(u64::from(expected))),
+                expected: Some(crate::trace::RecordedField::Unsigned(u64::from(expected) * u64::from(samples) / 10_000)),
                 actual: Some(crate::trace::RecordedField::Unsigned(u64::from(actual))),
             });
         }

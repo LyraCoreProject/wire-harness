@@ -97,7 +97,7 @@ fn verify(
         word(player, 34)? == 60
             && word(player, 151)? == 100
             && word(creature, 34)? == u64::from(level),
-        "roll level/agility context changed"
+        "roll level/agility context changed: player level {}, agility {}, target level {}, expected {level}", word(player, 34)?, word(player,151)?, word(creature,34)?
     );
     ensure!(
         word(player, 22)? > 0 && word(creature, 22)? > 0,
@@ -105,7 +105,8 @@ fn verify(
     );
     ensure!(
         word(player, 126)? == 2000,
-        "ordinary unarmed cadence changed"
+        "ordinary unarmed cadence changed: raw {}",
+        word(player, 126)?
     );
     ensure!(
         f32::from_bits(word(player, 1109)? as u32) == 5.0,
@@ -170,6 +171,7 @@ pub fn record(
         let level = spec.target_levels[index / 8];
         let gm = adapter.2.as_mut().context("roll GM")?;
         gm.set_selection(prepared.client.self_guid)?;
+        settle(gm, &mut prepared.client, &mut view)?;
         for message in [
             ".additem 25 -1",
             ".additem 38 -1",
@@ -178,10 +180,11 @@ pub fn record(
             ".additem 2362 -1",
             ".setskill 162 300 300",
             ".setskill 95 300 300",
-            ".modify agility 100",
+            ".modify agility 20",
             ".modify hp 1000000000",
         ] {
             command(gm, message.into())?;
+            settle(gm, &mut prepared.client, &mut view)?;
         }
         settle(gm, &mut prepared.client, &mut view)?;
         let mut target_at = at.clone();
@@ -207,6 +210,7 @@ pub fn record(
             .context("roll target CREATE")?;
         adapter.1.push(target);
         gm.set_selection(target)?;
+        settle(gm, &mut prepared.client, &mut view)?;
         command(gm, format!(".npc set level {level}"))?;
         command(gm, ".modify hp 1000000000".into())?;
         settle(gm, &mut prepared.client, &mut view)?;
@@ -333,7 +337,11 @@ pub fn record(
             .collect(),
     };
     recording.validate(spec)?;
-    let mut header = Header::golden(text, provenance, 0)?;
+    let recorded_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_millis()
+        .try_into()?;
+    let mut header = Header::golden(text, provenance, recorded_at)?;
     header.character_guid = clients[0].1.client.self_guid;
     let mut trace = Trace::record(header, &witnesses)?;
     trace.roll_check = Some(recording);

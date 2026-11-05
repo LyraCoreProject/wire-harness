@@ -69,7 +69,7 @@ fn independent_wire_decoder_classifies_each_category_and_rejects_conflicts() {
         (0, 3, 0, 0),
         (0x800, 1, 3, 1),
         (0x4000, 1, 7, 0),
-        (0x200, 1, 20, 0),
+        (0x80, 1, 20, 0),
         (2, 1, 10, 0),
     ] {
         let packet =
@@ -77,12 +77,20 @@ fn independent_wire_decoder_classifies_each_category_and_rejects_conflicts() {
         assert!(counts.observe(&packet, 1, 2).unwrap());
     }
     assert_eq!(counts.0, [1; 7]);
-    let packet = wire_client::decode::decode(0x14a, &swing(0x200 | 0x4000, 1, 7, 0)).unwrap();
+    let packet = wire_client::decode::decode(0x14a, &swing(0x80 | 0x4000, 1, 7, 0)).unwrap();
     assert!(counts.observe(&packet, 1, 2).is_err());
     assert!(!counts.observe(&packet, 3, 2).unwrap());
     let packet = wire_client::decode::decode(0x14a, &swing(0x4, 1, 7, 0)).unwrap();
     assert!(counts.observe(&packet, 1, 2).is_err());
-    let mut truncated = swing(0x200, 1, 7, 0);
+    let mut truncated = swing(0x80, 1, 7, 0);
     truncated.pop();
     assert!(wire_client::decode::decode(0x14a, &truncated).is_err());
+}
+
+#[test]
+fn attempted_avoidance_flags_are_not_resolved_outcomes() {
+    let packet = wire_client::decode::decode(0x14a, &swing(0x700 | 0x80, 1, 20, 0)).unwrap();
+    let mut counts = Counts::default();
+    counts.observe(&packet, 1, 2).unwrap();
+    assert_eq!(counts.0, [0, 0, 0, 0, 0, 1, 0]);
 }
