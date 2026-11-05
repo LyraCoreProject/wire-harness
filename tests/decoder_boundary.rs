@@ -5,6 +5,7 @@ const MODULES: &[&str] = &[
     "compare",
     "decode",
     "scenario",
+    "rolls",
     "trace",
     "values_mask",
     "spatial",
