@@ -333,3 +333,9 @@ such as Conjure Water; this sends an empty target mask. An explicit target uses 
 and a packed GUID. `CMSG_CANCEL_CAST` takes `spell_id`. The `cast_and_interrupt` scenario learns
 Conjure Water (5504), interrupts it, completes a second cast to create two items 5350, and requires
 Fireball (133) on self to fail with bad-target reason 10. Its compared packets have no world-text fields.
+
+`spell_direct_damage_outcomes` declares `[spell_rolls]`: sample sizes, pinned spell and Character
+inputs, two target levels and five exact rational probabilities per level. The
+[spell Roll Conformance contract](spell-rolls.md) defines the context, source derivation,
+overlapping partial-resist check, small recording and submission allocation. A scenario may declare
+either `[rolls]` or `[spell_rolls]`. Each Golden Trace requires its matching diagnostic recording.

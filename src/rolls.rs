@@ -8,7 +8,7 @@ use crate::scenario::Stream;
 pub const CATEGORIES: [&str; 7] = ["miss", "dodge", "parry", "block", "glancing", "crit", "hit"];
 pub const PUBLIC_SEEDS: [u64; 2] = [0x4c79726100000001, 0x4c79726100000002];
 pub const FAMILY_ALPHA: f64 = 1e-6;
-pub const TESTS_PER_SUBMISSION: u32 = 7 * 2 * 3;
+pub const TESTS_PER_SUBMISSION: u32 = (7 + 5) * 2 * 3;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -231,17 +231,26 @@ impl CheckRecording {
 
 // Equal-tail exact binomial; the numerical allowance makes rejection conservative.
 pub fn binomial_p_upper(n: u32, k: u32, basis_points: u32) -> Result<f64> {
+    binomial_p_ratio_upper(n, k, u64::from(basis_points), 10_000)
+}
+
+pub fn binomial_p_ratio_upper(n: u32, k: u32, numerator: u64, denominator: u64) -> Result<f64> {
     ensure!(
-        n > 0 && n <= 50_000 && k <= n && basis_points <= 10_000,
+        n > 0
+            && n <= 50_000
+            && k <= n
+            && denominator > 0
+            && denominator <= (1u64 << 53)
+            && numerator <= denominator,
         "invalid binomial input"
     );
-    if basis_points == 0 {
+    if numerator == 0 {
         return Ok(if k == 0 { 1.0 } else { 0.0 });
     }
-    if basis_points == 10_000 {
+    if numerator == denominator {
         return Ok(if k == n { 1.0 } else { 0.0 });
     }
-    let p = f64::from(basis_points) / 10_000.0;
+    let p = numerator as f64 / denominator as f64;
     let mode = ((f64::from(n) + 1.0) * p).floor() as u32;
     let mut total = 1.0;
     let mut lower = if mode <= k { 1.0 } else { 0.0 };

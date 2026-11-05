@@ -11,7 +11,7 @@ use wire_client::trace::{Header, Provenance, Trace};
 
 use super::vmangos_fixture_impl::{command, drain_one, Adapter};
 
-struct SpawnedTargets(Adapter);
+pub(super) struct SpawnedTargets(pub(super) Adapter);
 
 impl Drop for SpawnedTargets {
     fn drop(&mut self) {
@@ -21,7 +21,7 @@ impl Drop for SpawnedTargets {
     }
 }
 
-const NAMES: [&str; 16] = [
+pub(super) const NAMES: [&str; 16] = [
     "Rollalpha",
     "Rollbeta",
     "Rollgamma",
@@ -40,7 +40,7 @@ const NAMES: [&str; 16] = [
     "Rollpi",
 ];
 
-fn update_view(
+pub(super) fn update_view(
     view: &mut BTreeMap<u64, BTreeMap<String, Field>>,
     opcode: u16,
     bytes: &[u8],
@@ -53,7 +53,7 @@ fn update_view(
     Ok(())
 }
 
-fn apply_view(
+pub(super) fn apply_view(
     view: &mut BTreeMap<u64, BTreeMap<String, Field>>,
     packet: &wire_client::decode::Packet,
 ) {
@@ -75,7 +75,7 @@ fn apply_view(
     }
 }
 
-fn settle(
+pub(super) fn settle(
     gm: &mut wire_client::WireClient,
     client: &mut wire_client::WireClient,
     view: &mut BTreeMap<u64, BTreeMap<String, Field>>,
@@ -129,7 +129,7 @@ fn ready_swing(client: &mut wire_client::WireClient, target: u64) -> Result<()> 
     anyhow::bail!("fixture first swing missing")
 }
 
-fn verify_max_health(gm: &mut wire_client::WireClient, target: u64) -> Result<()> {
+pub(super) fn verify_max_health(gm: &mut wire_client::WireClient, target: u64) -> Result<()> {
     gm.set_selection(target)?;
     drain_one(gm, Duration::from_millis(300))?;
     command(gm, ".debug getvaluebyindex 28 int".into())?;

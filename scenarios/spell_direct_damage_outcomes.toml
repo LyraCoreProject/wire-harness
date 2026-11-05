@@ -1,0 +1,53 @@
+schema_version = 3
+id = "spell_direct_damage_outcomes"
+behavior = "cast_and_interrupt"
+
+[spell_rolls]
+samples_per_level = 50000
+reference_samples_per_level = 2000
+reference_characters = 16
+spell_id = 2948
+intellect = 125
+target_entry = 38
+target_faction = 7
+target_levels = [60, 63]
+expected = [
+  [{ numerator = 0, denominator = 1 }, { numerator = 400, denominator = 10001 }, { numerator = 2484350909999, denominator = 42953967927296 }, { numerator = 38751630098897, denominator = 42953967927296 }, { numerator = 0, denominator = 1000100 }],
+  [{ numerator = 0, denominator = 1 }, { numerator = 1700, denominator = 10001 }, { numerator = 2147963431299, denominator = 42953967927296 }, { numerator = 33504560092797, denominator = 42953967927296 }, { numerator = 157719, denominator = 1000100 }],
+]
+
+[opening]
+window_ms = 1000
+
+[rules]
+time_tolerance_ms = 100
+wall_clock_tolerance_ms = 2000
+
+[[fixtures]]
+verb = "character"
+name = "Rollalpha"
+race = "human"
+class = "mage"
+level = 60
+at = { map = 1, x = 16222.1, y = 16252.1, z = 12.5872, orientation = 0.0 }
+
+[[fixtures]]
+verb = "spell"
+spell_id = 2948
+
+[[fixtures]]
+verb = "creature"
+id = "target"
+entry = 38
+offset = 2.0
+
+[[steps]]
+id = "cast"
+send = { opcode = "CMSG_CAST_SPELL", spell_id = 2948, target = { fixture = "target" } }
+[steps.checkpoint]
+window_ms = 100
+replies = [305]
+expect = [
+  { opcode = 305, path = ["spell"], value = { type = "unsigned", value = 2948 }, count = 1 },
+  { opcode = 305, path = ["duration"], value = { type = "time_ms", value = 1500 }, count = 1 },
+]

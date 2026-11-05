@@ -736,6 +736,36 @@ pub fn decode(opcode: u16, body: &[u8]) -> Result<Packet> {
             fields.insert("blocked".into(), Field::Unsigned(body.u32()?.into()));
         }
         0x014e => (),
+        0x0250 => {
+            fields.insert("target".into(), body.packed_guid()?);
+            fields.insert("caster".into(), body.packed_guid()?);
+            fields.insert("spell".into(), Field::Unsigned(body.u32()?.into()));
+            fields.insert("damage".into(), Field::Unsigned(body.u32()?.into()));
+            fields.insert("school".into(), Field::Unsigned(body.u8()?.into()));
+            fields.insert("absorbed".into(), Field::Unsigned(body.u32()?.into()));
+            fields.insert(
+                "resisted".into(),
+                Field::Signed(i32::from_le_bytes(body.bytes()?).into()),
+            );
+            fields.insert("periodic".into(), Field::Unsigned(body.u8()?.into()));
+            fields.insert("unused".into(), Field::Unsigned(body.u8()?.into()));
+            fields.insert("blocked".into(), Field::Unsigned(body.u32()?.into()));
+            let flags = body.u32()?;
+            fields.insert("hit_info".into(), Field::Unsigned(flags.into()));
+            let extended = body.u8()?;
+            ensure!(extended <= 1, "invalid extended spell damage flag");
+            fields.insert("extended".into(), Field::Unsigned(extended.into()));
+            if extended == 1 {
+                if flags & 1 != 0 {
+                    fields.insert("crit_roll".into(), body.float()?);
+                    fields.insert("crit_needed".into(), body.float()?);
+                }
+                if flags & 4 != 0 {
+                    fields.insert("hit_roll".into(), body.float()?);
+                    fields.insert("hit_needed".into(), body.float()?);
+                }
+            }
+        }
         0x016e | 0x016f => {
             fields.insert("result".into(), Field::Unsigned(body.u32()?.into()));
         }

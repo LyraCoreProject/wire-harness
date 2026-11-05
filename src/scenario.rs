@@ -21,6 +21,8 @@ pub struct Scenario {
     pub steps: Vec<Step>,
     #[serde(default)]
     pub rolls: Option<crate::rolls::Specification>,
+    #[serde(default)]
+    pub spell_rolls: Option<crate::spell_rolls::Specification>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -348,6 +350,10 @@ impl Scenario {
     pub fn validate(&self) -> Result<()> {
         if let Some(rolls) = &self.rolls {
             rolls.validate()?;
+        }
+        if let Some(rolls) = &self.spell_rolls {
+            rolls.validate()?;
+            ensure!(self.rolls.is_none(), "one roll context per scenario");
         }
         ensure!(
             matches!(self.schema_version, 3 | 4),

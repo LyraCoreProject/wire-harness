@@ -11,6 +11,7 @@ pub mod rolls;
 pub mod runner;
 pub mod scenario;
 pub mod spatial;
+pub mod spell_rolls;
 pub mod strictness;
 pub mod trace;
 pub mod values_mask;
