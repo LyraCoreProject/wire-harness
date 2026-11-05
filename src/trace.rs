@@ -226,6 +226,8 @@ pub struct Trace {
     pub packets: Vec<RecordedPacket>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub roll_check: Option<crate::rolls::CheckRecording>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spell_roll_check: Option<crate::spell_rolls::CheckRecording>,
 }
 
 impl Trace {
@@ -234,6 +236,7 @@ impl Trace {
         let trace = Self {
             header,
             roll_check: None,
+            spell_roll_check: None,
             packets: observations
                 .iter()
                 .map(|o| RecordedPacket {
@@ -434,6 +437,11 @@ impl GoldenTrace {
             (Some(spec), Some(recording)) => recording.validate(spec)?,
             (None, None) => (),
             _ => anyhow::bail!("roll scenario needs its check recording"),
+        }
+        match (&scenario.spell_rolls, &trace.spell_roll_check) {
+            (Some(spec), Some(recording)) => recording.validate(spec)?,
+            (None, None) => (),
+            _ => anyhow::bail!("spell roll scenario needs its check recording"),
         }
         crate::compare::validate_rule_samples(&scenario, &trace)?;
         Ok(Self { scenario, trace })

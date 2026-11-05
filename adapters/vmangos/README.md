@@ -189,6 +189,10 @@ adapter. Complete state must follow from the normal add command; quest 2158 need
 The command is defined by `ChatHandler::HandleQuestAddCommand` in the pinned
 [CharacterCommands.cpp](https://raw.githubusercontent.com/vmangos/core/d9173eca3ea08dd985c52dabbcc826898d1d0b77/src/game/Commands/CharacterCommands.cpp).
 
+For `spell_direct_damage_outcomes`, use the [spell roll recorder](../../docs/spell-rolls.md).
+The checked wrapper records one 2,000-cast diagnostic per target level under the shared audit lock.
+It retains counts and small witnesses, removes its fixtures and does not take a repeat rate sample.
+
 The `item` Fixture Verb selects the gameplay Character and sends `.additem ENTRY COUNT`.
 Both adapters verify and bind the owned backpack stack from the final login snapshot before capture.
 The command is `ChatHandler::HandleAddItemCommand` in the pinned

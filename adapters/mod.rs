@@ -13,6 +13,8 @@ mod lyracore_fixture_impl;
 mod vmangos_fixture_impl;
 #[path = "vmangos/rolls.rs"]
 mod vmangos_rolls;
+#[path = "vmangos/spell_rolls.rs"]
+mod vmangos_spell_rolls;
 
 pub fn select(invocation: &Invocation) -> Result<Box<dyn FixtureAdapter>> {
     match std::env::var("WIRE_ADAPTER").as_deref() {
@@ -727,6 +729,14 @@ pub fn record(invocation: &Invocation, path: &str, golden: bool) -> Result<()> {
     );
     let scenario_text = std::fs::read_to_string(path)?;
     let scenario = wire_client::scenario::Scenario::parse(&scenario_text)?;
+    if scenario.spell_rolls.is_some() && golden {
+        return vmangos_spell_rolls::record(
+            invocation,
+            &scenario_text,
+            provenance.context("spell roll provenance")?,
+            output,
+        );
+    }
     if scenario.rolls.is_some() && golden {
         return vmangos_rolls::record(
             invocation,

@@ -2,7 +2,7 @@
 
 `white_melee_outcomes` uses fixed expected probabilities derived from vmangos source, with a
 small diagnostic recording. The complete context, formula inputs and pinned source lines are in
-[LyraCore ADR 0007](https://github.com/LyraCoreProject/LyraCore/blob/conformance/statistical-rolls-design/docs/adr/0007-statistical-roll-conformance.md).
+[LyraCore ADR 0007](https://github.com/LyraCoreProject/LyraCore/blob/main/docs/adr/0007-statistical-roll-conformance.md).
 The rate author does not fix gameplay. This harness never imports a LyraCore decoder or calculation.
 
 The scenario's `[rolls]` declares 50,000 candidate swings per target level, 2,000 reference swings
@@ -33,7 +33,8 @@ pins the scenario bytes and vmangos binary, source and database. Packet text use
 
 The small check catches a misread formula, not a subtle error. It does not estimate expected rates.
 The submission comparison uses conservative two-sided equal-tail exact binomial tails against fixed
-probabilities. The 42-test Bonferroni family covers seven categories, two levels and three seeds,
+probabilities. The 72-test Bonferroni allocation covers seven white-melee categories plus five
+[spell checks](spell-rolls.md), two levels and three seeds,
 with false failure at most 1e-6 per submission. The numerical allowance before rejection is
 `64 * n * f64::EPSILON`; relative-mode recurrence avoids factorials and underflow. No Monte Carlo
 or large-count approximation is used. Zero and one probabilities are handled exactly.

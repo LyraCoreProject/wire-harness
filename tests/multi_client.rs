@@ -471,6 +471,7 @@ fn trace(source: &str, golden: bool, first: u64, second: u64, second_seen: u64) 
     };
     Trace {
         roll_check: None,
+        spell_roll_check: None,
         header,
         packets: vec![packet("first", second), packet("second", second_seen)],
     }

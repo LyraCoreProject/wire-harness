@@ -143,6 +143,43 @@ elif sys.argv[1] == 'compare':
         self.assertIn('another recording or audit holds the lock', result.stderr)
         self.assertFalse(self.output.exists())
 
+    def test_spell_roll_check_records_once_and_cleans_all_characters(self):
+        self.scenario.write_text("[spell_rolls]\nreference_characters = 16\n")
+        for peer in range(2, 17):
+            (self.reference / f'credentials/peer{peer}-password').write_text('peer\n')
+        (self.script.parent / 'setup.py').write_text('import sys\n')
+        self._write_executable(
+            self.bin / 'docker',
+            "#!/bin/sh\nprintf 'auth\\ndatabase\\nworld\\n'\n",
+        )
+        self._write_executable(
+            self.wire,
+            """#!/usr/bin/env python3
+import os
+from pathlib import Path
+import sys
+with Path(os.environ['WIRE_LOG']).open('a') as log:
+    log.write(' '.join(sys.argv[1:]) + '\\n')
+if sys.argv[1] == 'record':
+    Path(sys.argv[4]).write_text('{}\\n')
+""",
+        )
+        self._listen_for_reference()
+        log = self.root / 'wire.log'
+        result = subprocess.run(
+            self._command(), env=dict(self._environment(), WIRE_LOG=str(log)),
+            capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = log.read_text().splitlines()
+        self.assertEqual(sum(call.startswith('record ') for call in calls), 1)
+        self.assertFalse(any(call.startswith('compare ') for call in calls))
+        resets = [call for call in calls if call.startswith('scenario char-delete ')]
+        self.assertEqual(len(resets), 32)
+        self.assertTrue(any('--account CONFORMANCE16 --character Rollpi' in call
+                            for call in resets))
+        self.assertTrue(self.output.exists())
+
 
 if __name__ == '__main__':
     unittest.main()

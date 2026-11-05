@@ -61,6 +61,7 @@ fn measure(distinct_subjects: bool) {
         }));
         Trace {
             roll_check: None,
+            spell_roll_check: None,
             header: header.clone(),
             packets,
         }

@@ -22,7 +22,13 @@ import sys
 import tomllib
 with open(sys.argv[1], 'rb') as source:
     scenario = tomllib.load(source)
-print(scenario['rolls']['reference_characters'] if 'rolls' in scenario else len(scenario.get('characters', [])) if scenario.get('schema_version') == 4 else 1)
+rolls = scenario.get('rolls', scenario.get('spell_rolls'))
+if rolls is not None:
+    print(rolls['reference_characters'])
+elif scenario.get('schema_version') == 4:
+    print(len(scenario.get('characters', [])))
+else:
+    print(1)
 PY
     ) || exit 2
     passwords=("$REFERENCE_ROOT/credentials/player-password")
@@ -67,7 +73,7 @@ import sys
 import tomllib
 with open(sys.argv[1], 'rb') as source:
     scenario = tomllib.load(source)
-if 'rolls' in scenario:
+if 'rolls' in scenario or 'spell_rolls' in scenario:
     names = ['Rollalpha','Rollbeta','Rollgamma','Rolldelta','Rollepsilon','Rollzeta','Rolleta','Rolltheta','Rolliota','Rollkappa','Rolambda','Rollmu','Rollnu','Rollxi','Rollomicron','Rollpi']
     for index, name in enumerate(names, 1):
         account = 'CONFORMANCE' if index == 1 else f'CONFORMANCE{index}'
@@ -192,7 +198,8 @@ PYPORT
     if python3 - "$scenario" <<'PYROLL'
 import sys, tomllib
 with open(sys.argv[1], 'rb') as source:
-    raise SystemExit(0 if 'rolls' in tomllib.load(source) else 1)
+    scenario = tomllib.load(source)
+    raise SystemExit(0 if 'rolls' in scenario or 'spell_rolls' in scenario else 1)
 PYROLL
     then
       echo "[reference] single diagnostic roll check written to $output" >&2
