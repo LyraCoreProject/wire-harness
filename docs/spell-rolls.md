@@ -137,3 +137,17 @@ are synthetic, not measured gameplay. Core's later PR must add delivered-packet 
 repeatability and gameplay-rate sensitivity through the existing fixture-only random Seam.
 The generic TCP comparator reports `spell_sample` until it has a full candidate collector; a
 copied reference histogram or short packet witness cannot claim statistical parity.
+
+## Single replacement exception, 2026-11-05
+
+The first completed diagnostic passed, but an edit to the running wrapper caused a later shell
+read failure. Failure cleanup deleted its accepted Golden Trace. It was not rejected on results.
+The retained aggregate counts, ordered miss/resist/crit/hit/partial resist, are
+`[0,87,124,1789,0]` at level 60 and `[0,316,97,1587,314]` at level 63. Setup took 473,572 ms;
+capture took 463,490 ms. The deleted trace is not reconstructed from these counts.
+
+The maintainer authorized exactly one replacement of 2,000 casts per level. This is a single
+exception to ADR 0007's "once, without a repeat recording" rule. Keep context, expected rates,
+public seeds and measurement code fixed, and edit no script during capture. Copy the accepted
+trace before wrapper cleanup. Use the replacement regardless of its results, report both samples,
+and stop if it fails or is lost. No third capture is authorized.
