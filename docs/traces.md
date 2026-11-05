@@ -177,6 +177,12 @@ supply a replacement tolerance or random range to `compare`. General rule kinds 
   An unused rule is a reported difference; invalid or duplicate rules fail scenario parsing.
 - Named `identities` rules map unsigned 32-bit identifiers bijectively per rule, including zero.
   They cover server-local counters such as spline ids; they cannot override GUID or time fields.
+  In Character-scoped object updates, an identity rule on an inventory GUID low word
+  (`field_486` through `field_710`, even offsets) compares the complete GUID when both unsigned
+  32-bit words are present. Both word updates keep their presence, order and arrival-time checks.
+  The link uses the trace-wide GUID bijection, including across inventory slots, rather than a
+  separate 32-bit mapping. Zero links remain zero; GUID type bits remain strict. Missing words
+  and invalid word types retain their ordinary field checks.
   A single sample checks the unsigned 32-bit shape only. A rule's reason must state that identity
   consistency is unchecked when the scenario has one sample. Golden Trace validation counts
   declared field occurrences after excluding opening and out-of-scope packets. With one occurrence,
